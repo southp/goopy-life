@@ -12,10 +12,6 @@ Users can create an ephemeral Ghost instance on Goopy.Life by just one click. Th
 
 Please visit https://goopy.life
 
-### Local
-
-Run `just dev`
-
 ## Development
 
 Please see @docs/DEVELOPMENT.md for more info.

@@ -92,31 +92,6 @@ It offers:
 
 When a user first creates a goopy, we store the gid in their cookie so they can come back to see their URL later.
 
-## Task runner
+## Deployment
 
-We use [just](https://github.com/casey/just) as our central task runner at root. See `justfile` for what's available. The most relevant commands are:
-
-* `build`: Build everything
-* `test`: Test everything
-* `dev`: Initiate the local dev servers
-* `deploy`: Deploy everything to production.
-
-## Local development
-
-
-## Deploying to production
-
-At the moment, our frontend runs on Vercel, while the backend runs on a VPS. These info are passed as environment variables so they can be configured for different setup.
-
-Run `just deploy` to deploy everything into production.  The command does the following actions:
-
-1. For deploying the backend, we simply let the backend server pull the new code and running relevant commands through SSH connection:
-    1. Run `cargo build --production` 
-    1. Make sure all the tests are passed.
-    1. Copy the new executable into the service folder
-    1. Restart the service
-1. Deploy the frontend. 
-    1. Make sure all the frontend tests are passed.
-    1. It is basically an alias to `vercel deploy` at the moment.
-
-The database setup is manual. IP, port, account, password, and the table are defined in a configuration file. If there is any change made to the table schema, we'll need to manually migrate the data.
+All manual at the moment. You are welcome 😎
