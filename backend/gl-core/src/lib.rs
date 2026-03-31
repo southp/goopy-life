@@ -1,14 +1,20 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+use chrono::{DateTime, Utc};
+
+pub struct Goopy {
+    pub slug: String,
+    pub life_in_days: i32,
+    pub created_at: DateTime<Utc>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[derive(Debug)]
+pub enum GlError {
+    Failed(String),
+    Invalid,
+    NotFound,
+}
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+pub trait GoopyRuntime {
+    fn spawn(&self, goopy: &Goopy) -> Result<(), GlError>;
+    fn despawn(&self, goopy: &Goopy) -> Result<(), GlError>;
+    fn get(&self, slug: String) -> Result<(), GlError>;
 }
