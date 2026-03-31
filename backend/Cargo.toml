@@ -10,3 +10,4 @@ members = ["gl-core","gl-serv"]
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
