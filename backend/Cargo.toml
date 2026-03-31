@@ -1,0 +1,12 @@
+[workspace]
+memebers = [
+	"crates/core",
+	"crates/server",
+]
+
+resolver = "2"
+members = ["gl-core","gl-serv"]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
