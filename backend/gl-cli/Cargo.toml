@@ -1,0 +1,9 @@
+[package]
+name = "gl-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+url.workspace = true
+chrono.workspace = true
+gl-core = { path = "../gl-core" }

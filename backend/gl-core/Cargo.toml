@@ -7,3 +7,4 @@ edition = "2024"
 tokio.workspace = true
 serde.workspace = true
 chrono.workspace = true
+url.workspace = true
