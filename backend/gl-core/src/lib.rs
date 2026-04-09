@@ -1,7 +1,8 @@
 use chrono::{DateTime, Utc};
 use url::Url;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Child};
+use std::collections::hash_map::{HashMap, Entry};
 
 #[derive(Debug)]
 pub enum GlError {
@@ -42,30 +43,51 @@ pub struct GoopyManager {
     pub base_dir: PathBuf,
     pub domain: String,
     pub ssl_email: String,
+
+    slug_job_map: HashMap<String, Child>,
 }
 
 impl GoopyManager {
-    pub fn spawn(&self, goopy: &Goopy) -> bool {
+    pub fn new(base_dir: PathBuf, domain: String, ssl_email:String) -> Self {
+        Self {
+            base_dir,
+            domain,
+            ssl_email,
+            slug_job_map: HashMap::new(),
+        }
+    }
+
+    pub fn spawn(&mut self, goopy: &Goopy) -> bool {
         // ghost install --no-prompt --dir ${ghost_dir} --db sqlite3 --dbpath content/data/${name}_prod.db --url https://${name}.southp.dev --process systemd --sslemail mail@southp.me
         let ghost_dir = self.base_dir.join(&goopy.slug);
         let db_path = format!("content/data/{}_prod.db", goopy.slug);
         let site_url = Url::parse(&format!("https://{}.{}", goopy.slug, self.domain)).expect("Url parse error!");
 
-        let cmd_install = Command::new("echo")
+        let mut cmd_install = Command::new("sleep")
         .args([
-            "--no-prompt",
-            "--dir", ghost_dir.to_str().unwrap(),
-            "--db", "sqlite3",
-            "--dbpath", &db_path,
-            "--url", site_url.as_str(),
-            "--process", "systemd",
-            "--sslemail", &self.ssl_email
+            "3s",
+            // "--no-prompt",
+            // "--dir", ghost_dir.to_str().unwrap(),
+            // "--db", "sqlite3",
+            // "--dbpath", &db_path,
+            // "--url", site_url.as_str(),
+            // "--process", "systemd",
+            // "--sslemail", &self.ssl_email
         ])
-        .status()
+        .spawn()
         .expect("Failed to run the installation command");
 
-        // TODO: create a tracking entry if successful
-        cmd_install.success()
+        println!("Spawend pid: {}", cmd_install.id());
+
+        match self.slug_job_map.entry(goopy.slug.clone()) {
+            Entry::Vacant(e) => {
+                e.insert(cmd_install);
+                return true;
+            }
+            Entry::Occupied(_) => {
+                return false;
+            }
+        }
     }
 
     pub fn despawn(&self, _goopy: &Goopy) -> Result<(), std::io::Error> {
