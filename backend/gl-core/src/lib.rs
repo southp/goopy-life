@@ -116,9 +116,10 @@ impl GoopyManager {
 
         let worker_handle = std::thread::spawn(move || {
             let result = fs::create_dir_all(&ghost_dir)
-                .and_then(|_| Command::new("sleep")
+                .and_then(|_| Command::new("ghost")
                     .args([
-                        "3s",
+                        "install",
+                        "local"
                     ])
                     .current_dir(&ghost_dir)
                     .output()
@@ -132,6 +133,11 @@ impl GoopyManager {
                         *e = if cmd.status.success() { GlStatus::Done } else { GlStatus::Failed };
                     });
                     println!("job for goopy: {} exits with status: {}", slug_clone, cmd.status);
+
+                    if ! cmd.status.success() {
+                        println!("stdout: {}", String::from_utf8_lossy(&cmd.stdout));
+                        println!("stderr: {}", String::from_utf8_lossy(&cmd.stderr));
+                    }
                 }
                 Err(err) => {
                     m.entry(slug_clone.clone()).and_modify(|e| {
