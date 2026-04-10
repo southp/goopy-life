@@ -122,7 +122,9 @@ impl GoopyManager {
             .expect("Failed to run the installation command");
 
             let mut m = status_clone.lock().unwrap();
-            m.entry(slug_clone.clone()).and_modify(|e| { *e = GlStatus::Done });
+            m.entry(slug_clone.clone()).and_modify(|e| {
+                *e = if cmd.status.success() { GlStatus::Done } else { GlStatus::Failed };
+            });
 
             println!("job for goopy: {} exits with status: {}", slug_clone, cmd.status);
         });
