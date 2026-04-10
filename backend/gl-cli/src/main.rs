@@ -1,4 +1,6 @@
 use gl_core::*;
+use indicatif::ProgressBar;
+use std::time::Duration;
 
 fn main() {
     let mut gm = GoopyManager::new(
@@ -13,9 +15,13 @@ fn main() {
         gm.spawn(s.to_string());
     }
 
-    while ss.iter().map(|s| gm.get(s.to_string()).unwrap().0).any(|s| s == GlStatus::InProgress) {
-        println!("Someone is still in-progress...");
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_message("Spawning ...");
+    spinner.enable_steady_tick(Duration::from_millis(100));
 
-        std::thread::sleep(std::time::Duration::from_secs(1));
+    while ss.iter().map(|s| gm.get(s.to_string()).unwrap().0).any(|s| s == GlStatus::InProgress) {
+        std::thread::sleep(Duration::from_secs(1));
     }
+
+    spinner.finish_with_message("Done!");
 }
