@@ -4,12 +4,10 @@ fn main() {
     let mut gm = GoopyManager::new(
         "./test-temp".into(),
         "localhost".into(),
-        "bar@example.com".into()
+        "bar@example.com".into(),
+        32,
     );
 
-    gm.spawn(&Goopy {
-        slug: "foobar".to_string(),
-        life_in_days: 3,
-        created_at: chrono::Utc::now(),
-    });
+    let s1 = "foobar".to_string();
+    gm.spawn(s1);
 }
