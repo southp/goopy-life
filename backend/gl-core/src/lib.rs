@@ -12,7 +12,7 @@ pub enum GlError {
     NotFound,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum GlStatus {
     Failed,
     InProgress,
