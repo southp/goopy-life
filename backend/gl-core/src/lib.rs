@@ -4,6 +4,7 @@ use std::process::{Command};
 use std::collections::hash_map::{HashMap, Entry};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::fs;
 
 #[derive(Debug)]
 pub enum GlError {
@@ -105,28 +106,41 @@ impl GoopyManager {
         }
 
         // ghost install --no-prompt --dir ${ghost_dir} --db sqlite3 --dbpath content/data/${name}_prod.db --url https://${name}.southp.dev --process systemd --sslemail mail@southp.me
-        // let ghost_dir = self.base_dir.join(&goopy.slug);
         // let db_path = format!("content/data/{}_prod.db", goopy.slug);
         // let site_url = Url::parse(&format!("https://{}.{}", goopy.slug, self.domain)).expect("Url parse error!");
 
         // now, spawn the job
         let status_clone = Arc::clone(&self.slug_status);
         let slug_clone = slug.clone();
+        let ghost_dir = self.base_dir.join(&slug);
 
         let worker_handle = std::thread::spawn(move || {
-            let cmd = Command::new("sleep")
-            .args([
-                "3s",
-            ])
-            .output()
-            .expect("Failed to run the installation command");
+            let result = fs::create_dir_all(&ghost_dir)
+                .and_then(|_| Command::new("sleep")
+                    .args([
+                        "3s",
+                    ])
+                    .current_dir(&ghost_dir)
+                    .output()
+                );
 
             let mut m = status_clone.lock().unwrap();
-            m.entry(slug_clone.clone()).and_modify(|e| {
-                *e = if cmd.status.success() { GlStatus::Done } else { GlStatus::Failed };
-            });
 
-            println!("job for goopy: {} exits with status: {}", slug_clone, cmd.status);
+            match result {
+                Ok(cmd) => {
+                    m.entry(slug_clone.clone()).and_modify(|e| {
+                        *e = if cmd.status.success() { GlStatus::Done } else { GlStatus::Failed };
+                    });
+                    println!("job for goopy: {} exits with status: {}", slug_clone, cmd.status);
+                }
+                Err(err) => {
+                    m.entry(slug_clone.clone()).and_modify(|e| {
+                        *e = GlStatus::Failed;
+                    });
+                    println!("job for goopy: {} failed: {}", slug_clone, err);
+                }
+            }
+
         });
 
         self.jobs.push(worker_handle);
