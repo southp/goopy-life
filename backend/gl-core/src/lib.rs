@@ -124,10 +124,10 @@ impl GoopyManager {
                 .and_then(|_| Command::new("ghost")
                     .args([
                         "install",
-                        "local",
+                        "6.28.0",
                         "--pname", &slug_clone,
                         "--port", &port.to_string(),
-                        "--version", "6.28.0",
+                        "--local",
                     ])
                     .current_dir(&ghost_dir)
                     .output()
@@ -143,7 +143,6 @@ impl GoopyManager {
                     println!("job for goopy: {} exits with status: {}", slug_clone, cmd.status);
 
                     if ! cmd.status.success() {
-                        println!("stdout: {}", String::from_utf8_lossy(&cmd.stdout));
                         println!("stderr: {}", String::from_utf8_lossy(&cmd.stderr));
                     }
                 }
