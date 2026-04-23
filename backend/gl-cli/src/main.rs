@@ -4,6 +4,9 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
+#[command(name = "Goopy-Life CLI")]
+#[command(version = "0.1")]
+#[command(about = "Mainly a quick playground for now. Would it become a real CLI tool? Who knows.", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Cmd,
@@ -11,12 +14,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Spawn one or more goopies
+    /// Spawn one or more goopies test test
     Spawn {
+        #[arg(num_args = 1.., required = true)]
         slugs: Vec<String>,
     },
     /// Despawn one or more goopies
     Despawn {
+        #[arg(num_args = 1.., required = true)]
         slugs: Vec<String>,
     }
 }

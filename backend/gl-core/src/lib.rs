@@ -171,7 +171,10 @@ impl GoopyManager {
             // annotate the status
             {
                 let mut sm = self.status_map.lock().unwrap();
-                sm.entry(slug.clone()).and_modify(|e| *e = GlStatus::InDestructing);
+
+                sm.entry(slug.clone())
+                    .and_modify(|e| *e = GlStatus::InDestructing)
+                    .or_insert(GlStatus::InDestructing);
             }
 
             let instance_dir = self.base_dir.join(&goopy.slug);
