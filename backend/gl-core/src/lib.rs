@@ -1,53 +1,16 @@
-use chrono::{DateTime, Utc};
+mod goopy;
+mod shared_types;
+
+pub use goopy::*;
+pub use shared_types::*;
+
+use chrono::Utc;
 use std::path::PathBuf;
 use std::process::{Command};
 use std::collections::hash_map::{HashMap, Entry};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::fs;
-
-#[derive(Debug)]
-pub enum GlError {
-    Failed(String),
-    Invalid,
-    NotFound,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum GlStatus {
-    Failed,
-    InProgress,
-    InDestructing,
-    Done,
-}
-#[derive(Debug, Clone)]
-pub struct Goopy {
-    pub slug: String,
-    pub life_in_days: i32,
-    pub created_at: DateTime<Utc>,
-}
-
-impl Goopy {
-    pub fn new(
-        slug: String,
-        life_in_days: i32,
-        created_at: DateTime<Utc>,
-    ) -> Result<Self, GlError> {
-        if life_in_days <= 0 {
-            return Err(GlError::Invalid);
-        }
-
-        if slug.is_empty() {
-            return Err(GlError::Invalid);
-        }
-
-        Ok(Self {
-            slug,
-            life_in_days,
-            created_at,
-        })
-    }
-}
 
 pub struct GoopyManager {
     pub base_dir: PathBuf,
