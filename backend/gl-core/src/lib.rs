@@ -17,6 +17,7 @@ pub enum GlError {
 pub enum GlStatus {
     Failed,
     InProgress,
+    InDestructing,
     Done,
 }
 #[derive(Debug, Clone)]
@@ -165,6 +166,12 @@ impl GoopyManager {
         if let Some((status, goopy)) = self.get(&slug) {
             if status == GlStatus::InProgress {
                 return Err(GlError::Failed("Can't despawn a spawning instance.".into()));
+            }
+
+            // annotate the status
+            {
+                let mut sm = self.status_map.lock().unwrap();
+                sm.entry(slug.clone()).and_modify(|e| *e = GlStatus::InDestructing);
             }
 
             let instance_dir = self.base_dir.join(&goopy.slug);

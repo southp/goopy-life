@@ -8,3 +8,4 @@ url.workspace = true
 chrono.workspace = true
 gl-core = { path = "../gl-core" }
 indicatif = { version = "0.17" }
+clap = { version = "4", features = ["derive"] }
