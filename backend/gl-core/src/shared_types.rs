@@ -1,21 +1,16 @@
-#[derive(Debug)]
-pub enum GlError {
-    Failed(String),
-    Invalid,
-    NotFound,
-}
-
 #[derive(Debug, Clone, PartialEq)]
-pub enum GlStatus {
+pub enum Status {
+    Empty,
     Failed,
-    InProgress,
-    InDestructing,
+    Spawning,
+    Despawning,
     Done,
 }
 
 #[derive(Debug)]
-pub enum StoreError {
+pub enum Error {
     NotFound,
+    Invalid,
     AlreadyExists,
     Io(std::io::Error),
     Other(String),

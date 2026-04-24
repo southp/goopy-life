@@ -1,4 +1,5 @@
 use gl_core::*;
+use gl_core::goopy_store::simple_fs_store::SimpleFsStore;
 use indicatif::ProgressBar;
 use std::time::Duration;
 use clap::{Parser, Subcommand};
@@ -32,6 +33,7 @@ fn main() {
         "localhost".into(),
         "bar@example.com".into(),
         32,
+        SimpleFsStore::new("./test-temp"),
     );
 
     let cli = Cli::parse();
@@ -39,35 +41,49 @@ fn main() {
     match cli.command {
         Cmd::Spawn { slugs } => {
             let port_base = 50000;
+            let mut jobs = vec![];
             for (i, s) in slugs.iter().enumerate() {
-                gm.spawn(s.to_string(), port_base + i as u32);
+                match gm.spawn(s.to_string(), port_base + i as u32) {
+                    Ok(job_id) => jobs.push(job_id),
+                    Err(e) => {
+                        println!("Spawn failed: {:?}", e);
+                        std::process::exit(1);
+                    }
+                }
             }
 
             let spinner = ProgressBar::new_spinner();
             spinner.set_message("Spawning ...");
             spinner.enable_steady_tick(Duration::from_millis(100));
 
-            while slugs.iter().map(|s| gm.get(&s.to_string()).unwrap().0).any(|s| s == GlStatus::InProgress) {
+            while jobs.iter().map(|job_id| gm.is_job_finished(job_id).unwrap()).any(|s| s == false) {
                 std::thread::sleep(Duration::from_secs(1));
             }
 
             spinner.finish_with_message("Done spawning!");
         }
         Cmd::Despawn { slugs } => {
-            let de_spinner = ProgressBar::new_spinner();
-            de_spinner.set_message("Now despawning...");
-            de_spinner.enable_steady_tick(Duration::from_millis(1000));
+            let mut jobs = vec![];
 
             for s in slugs.iter() {
-                let _ = gm.despawn(s.to_string());
+                match gm.despawn(s.to_string()) {
+                    Ok(job_id) => jobs.push(job_id),
+                    Err(e) => {
+                        println!("Despawn failed: {:?}", e);
+                        std::process::exit(1);
+                    }
+                }
             }
 
-            while slugs.iter().map(|s| gm.get(&s.to_string()).unwrap().0).any(|s| s == GlStatus::InDestructing) {
+            let spinner = ProgressBar::new_spinner();
+            spinner.set_message("Now despawning...");
+            spinner.enable_steady_tick(Duration::from_millis(1000));
+
+            while jobs.iter().map(|job_id| gm.is_job_finished(job_id).unwrap()).any(|s| s == false) {
                 std::thread::sleep(Duration::from_secs(1));
             }
 
-            de_spinner.finish_with_message("Done depawning!");
-
+            spinner.finish_with_message("Done depawning!");
         }
     }
 }
