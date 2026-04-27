@@ -69,8 +69,6 @@ impl<T> GoopyManager<T> where T: GoopyStore + Send + Sync + 'static {
 
             match result {
                 Ok(cmd) => {
-                    println!("job for goopy: {} exits with status: {}", slug_clone, cmd.status);
-
                     if cmd.status.success() {
                         if let Err(e) = store_clone.update_status(&goopy_clone.slug, Status::Done) {
                             eprintln!("update {} error: {:?}", goopy_clone.slug, e);
@@ -127,8 +125,6 @@ impl<T> GoopyManager<T> where T: GoopyStore + Send + Sync + 'static {
 
             match result {
                 Ok(cmd) => {
-                    println!("despawning job for goopy: {} exits with status: {}", goopy_clone.slug, cmd.status);
-
                     if cmd.status.success() {
                         return;
                     } else {

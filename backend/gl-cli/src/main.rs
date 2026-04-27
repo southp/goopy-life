@@ -1,6 +1,6 @@
 use gl_core::*;
 use gl_core::goopy_store::simple_fs_store::SimpleFsStore;
-use indicatif::ProgressBar;
+use indicatif::{MultiProgress, ProgressBar};
 use std::time::Duration;
 use clap::{Parser, Subcommand};
 
@@ -37,35 +37,35 @@ fn main() {
     );
 
     let cli = Cli::parse();
+    let mp = MultiProgress::new();
+    let mut spinners = vec![];
+    let mut jobs = vec![];
 
     match cli.command {
         Cmd::Spawn { slugs } => {
             let port_base = 50000;
-            let mut jobs = vec![];
+
             for (i, s) in slugs.iter().enumerate() {
+                let spinner = mp.add(ProgressBar::new_spinner());
+                spinner.set_message(format!("Spawning {} ...", s));
+                spinner.enable_steady_tick(Duration::from_millis(100));
+
                 match gm.spawn(s.to_string(), port_base + i as u32) {
                     Ok(job_id) => jobs.push(job_id),
                     Err(e) => {
                         println!("Spawn failed: {:?}", e);
-                        std::process::exit(1);
+                        spinner.finish_with_message(format!("Failed due to: {:?}", e));
                     }
                 }
+                spinners.push(spinner);
             }
-
-            let spinner = ProgressBar::new_spinner();
-            spinner.set_message("Spawning ...");
-            spinner.enable_steady_tick(Duration::from_millis(100));
-
-            while jobs.iter().map(|job_id| gm.is_job_finished(job_id).unwrap()).any(|s| s == false) {
-                std::thread::sleep(Duration::from_secs(1));
-            }
-
-            spinner.finish_with_message("Done spawning!");
         }
         Cmd::Despawn { slugs } => {
-            let mut jobs = vec![];
-
             for s in slugs.iter() {
+                let spinner = mp.add(ProgressBar::new_spinner());
+                spinner.set_message(format!("Despawning {} ...", s));
+                spinner.enable_steady_tick(Duration::from_millis(100));
+
                 match gm.despawn(s.to_string()) {
                     Ok(job_id) => jobs.push(job_id),
                     Err(e) => {
@@ -73,17 +73,14 @@ fn main() {
                         std::process::exit(1);
                     }
                 }
+                spinners.push(spinner);
             }
-
-            let spinner = ProgressBar::new_spinner();
-            spinner.set_message("Now despawning...");
-            spinner.enable_steady_tick(Duration::from_millis(1000));
-
-            while jobs.iter().map(|job_id| gm.is_job_finished(job_id).unwrap()).any(|s| s == false) {
-                std::thread::sleep(Duration::from_secs(1));
-            }
-
-            spinner.finish_with_message("Done depawning!");
         }
     }
+
+    while jobs.iter().map(|job_id| gm.is_job_finished(job_id).unwrap()).any(|s| s == false) {
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
+    spinners.iter().for_each(|s| s.finish_with_message(format!("{} done!", s.message())));
 }
