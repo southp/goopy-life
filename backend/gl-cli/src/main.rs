@@ -1,5 +1,6 @@
 use gl_core::*;
 use gl_core::goopy_store::simple_fs_store::SimpleFsStore;
+use gl_core::goopy_provisioner::ghost_local_provisioner::GhostLocalProvisioner;
 use indicatif::{MultiProgress, ProgressBar};
 use std::time::Duration;
 use clap::{Parser, Subcommand};
@@ -34,6 +35,7 @@ fn main() {
         "bar@example.com".into(),
         32,
         SimpleFsStore::new("./test-temp"),
+        GhostLocalProvisioner::new(),
     );
 
     let cli = Cli::parse();

@@ -1,34 +1,51 @@
 use crate::goopy::*;
+use crate::goopy_provisioner::*;
 use crate::goopy_store::*;
 use crate::shared_types::*;
 
 use chrono::Utc;
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::process::{Command};
-use std::sync::Arc;
-use std::thread::{ThreadId, JoinHandle};
 use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::Arc;
+use std::thread::{JoinHandle, ThreadId};
 
-pub struct GoopyManager<T: GoopyStore + Send + Sync + 'static> {
+pub struct GoopyManager<
+    Store: GoopyStore + Send + Sync + 'static,
+    Provisioner: GoopyProvisioner + Send + Sync + 'static,
+> {
     pub base_dir: PathBuf,
     pub domain: String,
     pub ssl_email: String,
     pub goopy_life_in_days: i32,
-    pub store: Arc<T>,
+    pub store: Arc<Store>,
+    pub provisioner: Arc<Provisioner>,
 
     // TODO: This will also need to be cleaned up regularly
     jobs: HashMap<ThreadId, JoinHandle<()>>,
 }
 
-impl<T> GoopyManager<T> where T: GoopyStore + Send + Sync + 'static {
-    pub fn new(base_dir: PathBuf, domain: String, ssl_email:String, goopy_life_in_days: i32, store: T) -> Self {
+impl<Store, Provisioner> GoopyManager<Store, Provisioner>
+where
+    Store: GoopyStore + Send + Sync + 'static,
+    Provisioner: GoopyProvisioner + Send + Sync + 'static,
+{
+    pub fn new(
+        base_dir: PathBuf,
+        domain: String,
+        ssl_email: String,
+        goopy_life_in_days: i32,
+        store: Store,
+        provisioner: Provisioner,
+    ) -> Self {
         Self {
             base_dir,
             domain,
             ssl_email,
             goopy_life_in_days,
             store: Arc::new(store),
+            provisioner: Arc::new(provisioner),
             jobs: HashMap::new(),
         }
     }
@@ -42,7 +59,7 @@ impl<T> GoopyManager<T> where T: GoopyStore + Send + Sync + 'static {
             slug.clone(),
             self.goopy_life_in_days,
             Utc::now(),
-            Status::Spawning
+            Status::Spawning,
         );
 
         self.store.save(&new_goopy)?;
@@ -54,18 +71,20 @@ impl<T> GoopyManager<T> where T: GoopyStore + Send + Sync + 'static {
         let goopy_clone = new_goopy.clone();
 
         let handle = std::thread::spawn(move || {
-            let result = fs::create_dir_all(&goopy_dir)
-                .and_then(|_| Command::new("ghost")
+            let result = fs::create_dir_all(&goopy_dir).and_then(|_| {
+                Command::new("ghost")
                     .args([
                         "install",
                         "6.28.0",
-                        "--pname", &slug_clone,
-                        "--port", &port.to_string(),
+                        "--pname",
+                        &slug_clone,
+                        "--port",
+                        &port.to_string(),
                         "--local",
                     ])
                     .current_dir(&goopy_dir)
                     .output()
-                );
+            });
 
             match result {
                 Ok(cmd) => {
@@ -76,11 +95,12 @@ impl<T> GoopyManager<T> where T: GoopyStore + Send + Sync + 'static {
                     } else {
                         eprintln!("stderr: {}", String::from_utf8_lossy(&cmd.stderr));
 
-                        if let Err(e) = store_clone.update_status(&goopy_clone.slug, Status::Failed) {
+                        if let Err(e) = store_clone.update_status(&goopy_clone.slug, Status::Failed)
+                        {
                             eprintln!("update {} error: {:?}", goopy_clone.slug, e);
                         }
                     }
-                },
+                }
                 Err(err) => {
                     eprintln!("job for goopy: {} failed: {}", slug_clone, err);
 
@@ -116,10 +136,7 @@ impl<T> GoopyManager<T> where T: GoopyStore + Send + Sync + 'static {
         let handle = std::thread::spawn(move || {
             // remove the instance through the "provisioner"
             let result = Command::new("ghost")
-                .args([
-                    "uninstall",
-                    "-f"
-                ])
+                .args(["uninstall", "-f"])
                 .current_dir(instance_dir)
                 .output();
 
@@ -130,7 +147,8 @@ impl<T> GoopyManager<T> where T: GoopyStore + Send + Sync + 'static {
                     } else {
                         eprintln!("stderr: {}", String::from_utf8_lossy(&cmd.stderr));
 
-                        if let Err(e) = store_clone.update_status(&goopy_clone.slug, Status::Failed) {
+                        if let Err(e) = store_clone.update_status(&goopy_clone.slug, Status::Failed)
+                        {
                             eprintln!("update {} error: {:?}", goopy_clone.slug, e);
                         }
                         return;
@@ -167,7 +185,11 @@ impl<T> GoopyManager<T> where T: GoopyStore + Send + Sync + 'static {
     }
 }
 
-impl<T> Drop for GoopyManager<T> where T: GoopyStore + Send + Sync + 'static {
+impl<Store, Provisioner> Drop for GoopyManager<Store, Provisioner>
+where
+    Store: GoopyStore + Send + Sync + 'static,
+    Provisioner: GoopyProvisioner + Send + Sync + 'static,
+{
     fn drop(&mut self) {
         for (_, handle) in self.jobs.drain() {
             if let Err(e) = handle.join() {
