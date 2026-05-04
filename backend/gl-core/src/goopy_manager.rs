@@ -59,6 +59,8 @@ where
             slug.clone(),
             self.goopy_life_in_days,
             Utc::now(),
+            &self.base_dir.join(&slug),
+            port,
             Status::Spawning,
         );
 
@@ -66,23 +68,21 @@ where
 
         // now, spawn the job
         let store_clone = Arc::clone(&self.store);
-        let slug_clone = slug.clone();
-        let goopy_dir = self.base_dir.join(&slug);
         let goopy_clone = new_goopy.clone();
 
         let handle = std::thread::spawn(move || {
-            let result = fs::create_dir_all(&goopy_dir).and_then(|_| {
+            let result = fs::create_dir_all(&goopy_clone.working_dir).and_then(|_| {
                 Command::new("ghost")
                     .args([
                         "install",
                         "6.28.0",
                         "--pname",
-                        &slug_clone,
+                        &goopy_clone.slug,
                         "--port",
                         &port.to_string(),
                         "--local",
                     ])
-                    .current_dir(&goopy_dir)
+                    .current_dir(&goopy_clone.working_dir)
                     .output()
             });
 
@@ -102,7 +102,7 @@ where
                     }
                 }
                 Err(err) => {
-                    eprintln!("job for goopy: {} failed: {}", slug_clone, err);
+                    eprintln!("job for goopy: {} failed: {}", goopy_clone.slug, err);
 
                     if let Err(e) = store_clone.update_status(&goopy_clone.slug, Status::Failed) {
                         eprintln!("update {} error: {:?}", goopy_clone.slug, e);
