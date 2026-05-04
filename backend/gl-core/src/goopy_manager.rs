@@ -5,9 +5,7 @@ use crate::shared_types::*;
 
 use chrono::Utc;
 use std::collections::HashMap;
-use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::Arc;
 use std::thread::{JoinHandle, ThreadId};
 
@@ -67,45 +65,23 @@ where
         self.store.save(&new_goopy)?;
 
         // now, spawn the job
-        let store_clone = Arc::clone(&self.store);
+        let store = Arc::clone(&self.store);
         let goopy_clone = new_goopy.clone();
+        let provisioner = Arc::clone(&self.provisioner);
 
         let handle = std::thread::spawn(move || {
-            let result = fs::create_dir_all(&goopy_clone.working_dir).and_then(|_| {
-                Command::new("ghost")
-                    .args([
-                        "install",
-                        "6.28.0",
-                        "--pname",
-                        &goopy_clone.slug,
-                        "--port",
-                        &port.to_string(),
-                        "--local",
-                    ])
-                    .current_dir(&goopy_clone.working_dir)
-                    .output()
-            });
-
-            match result {
-                Ok(cmd) => {
-                    if cmd.status.success() {
-                        if let Err(e) = store_clone.update_status(&goopy_clone.slug, Status::Done) {
-                            eprintln!("update {} error: {:?}", goopy_clone.slug, e);
-                        }
-                    } else {
-                        eprintln!("stderr: {}", String::from_utf8_lossy(&cmd.stderr));
-
-                        if let Err(e) = store_clone.update_status(&goopy_clone.slug, Status::Failed)
-                        {
-                            eprintln!("update {} error: {:?}", goopy_clone.slug, e);
-                        }
+            match provisioner.provision(&goopy_clone) {
+                Ok(_) => {
+                    if let Err(e) = store.update_status(&goopy_clone.slug, Status::Done) {
+                        eprintln!("spawning: update {} error: {:?}", goopy_clone.slug, e);
                     }
-                }
+                },
                 Err(err) => {
-                    eprintln!("job for goopy: {} failed: {}", goopy_clone.slug, err);
+                    eprintln!("provisioning for goopy: {} failed: {:?}", goopy_clone.slug, err);
 
-                    if let Err(e) = store_clone.update_status(&goopy_clone.slug, Status::Failed) {
-                        eprintln!("update {} error: {:?}", goopy_clone.slug, e);
+                    if let Err(e) = store.update_status(&goopy_clone.slug, Status::Failed)
+                    {
+                        eprintln!("spawning: update {} error: {:?}", goopy_clone.slug, e);
                     }
                 }
             }
@@ -122,48 +98,35 @@ where
             return Err(Error::NotFound);
         };
 
-        if goopy.status == Status::Spawning {
+        if goopy.status == Status::Spawning || goopy.status == Status::Despawning {
             return Err(Error::Invalid);
         }
 
         // annotate the status
         self.store.update_status(&slug, Status::Despawning)?;
 
-        let instance_dir = self.base_dir.join(&goopy.slug);
         let goopy_clone = goopy.clone();
-        let store_clone = Arc::clone(&self.store);
+        let store = Arc::clone(&self.store);
+        let provisioner = Arc::clone(&self.provisioner);
 
         let handle = std::thread::spawn(move || {
-            // remove the instance through the "provisioner"
-            let result = Command::new("ghost")
-                .args(["uninstall", "-f"])
-                .current_dir(instance_dir)
-                .output();
-
+            let result = provisioner.deprovision(&goopy_clone);
             match result {
-                Ok(cmd) => {
-                    if cmd.status.success() {
-                        return;
-                    } else {
-                        eprintln!("stderr: {}", String::from_utf8_lossy(&cmd.stderr));
-
-                        if let Err(e) = store_clone.update_status(&goopy_clone.slug, Status::Failed)
-                        {
-                            eprintln!("update {} error: {:?}", goopy_clone.slug, e);
-                        }
-                        return;
+                Ok(_) => {
+                    if let Err(e) = store.update_status(&goopy_clone.slug, Status::Archived) {
+                        eprintln!("despawning: update {} error: {:?}", goopy_clone.slug, e);
                     }
-                }
-
+                },
                 Err(err) => {
-                    eprintln!("despawning for: {} failed because: {}", slug, err);
+                    eprintln!("deprovisioning for goopy: {} failed: {:?}", goopy_clone.slug, err);
 
-                    if let Err(e) = store_clone.update_status(&goopy_clone.slug, Status::Failed) {
-                        eprintln!("update {} error: {:?}", goopy_clone.slug, e);
+                    if let Err(e) = store.update_status(&goopy_clone.slug, Status::Failed)
+                    {
+                        eprintln!("despawning: update {} error: {:?}", goopy_clone.slug, e);
                     }
-                    return;
                 }
             }
+            // remove the instance through the "provisioner"
         });
 
         let id = handle.thread().id();
@@ -174,6 +137,10 @@ where
 
     pub fn get(&self, slug: &String) -> Result<Option<Goopy>, Error> {
         self.store.load(slug)
+    }
+
+    pub fn list(&self) -> Result<Vec<Goopy>, Error> {
+        self.store.list()
     }
 
     pub fn is_job_finished(&self, job_id: &ThreadId) -> Option<bool> {

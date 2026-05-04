@@ -25,7 +25,9 @@ enum Cmd {
     Despawn {
         #[arg(num_args = 1.., required = true)]
         slugs: Vec<String>,
-    }
+    },
+    /// List all the available goopies
+    List {}
 }
 
 fn main() {
@@ -76,6 +78,19 @@ fn main() {
                     }
                 }
                 spinners.push(spinner);
+            }
+        }
+        Cmd::List {} => {
+            match gm.list() {
+                Ok(goopies) => {
+                    for gp in goopies {
+                        println!("{:?}", gp);
+                    }
+                }
+                Err(e) => {
+                    println!("List failed: {:?}", e);
+                    std::process::exit(1);
+                }
             }
         }
     }

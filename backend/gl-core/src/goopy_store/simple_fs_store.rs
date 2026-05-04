@@ -15,33 +15,56 @@ impl SimpleFsStore {
             base_dir: base_dir.as_ref().into(),
         }
     }
+
+    fn port_file_name(&self, slug: &String) -> PathBuf {
+        self.base_dir.join(format!("{}_{}", "port", slug))
+    }
+
+    fn status_file_name(&self, slug: &String) -> PathBuf {
+        self.base_dir.join(format!("{}_{}", "status", slug))
+    }
 }
 
 impl GoopyStore for SimpleFsStore {
     fn save(&self, gp: &Goopy) -> Result<(), Error> {
-        match fs::create_dir_all(self.base_dir.join(gp.slug.clone())) {
-            Ok(_) => Ok(()),
-            Err(e) => Err(Error::Io(e))
-        }
+        let working_dir = self.base_dir.join(&gp.slug);
+
+        fs::create_dir_all(&working_dir).map_err(Error::Io)?;
+        fs::write(self.port_file_name(&gp.slug), gp.port.to_string()).map_err(Error::Io)?;
+        fs::write(self.status_file_name(&gp.slug), gp.status.to_string()).map_err(Error::Io)?;
+
+        Ok(())
     }
 
-    fn update_status(&self, _slug: &String, _new_status: Status) -> Result<(), Error> {
-        Ok(())
+    fn update_status(&self, slug: &String, new_status: Status) -> Result<(), Error> {
+        fs::write(self.status_file_name(slug), new_status.to_string()).map_err(Error::Io)
     }
 
     fn load(&self, slug: &String) -> Result<Option<Goopy>, Error> {
         let gp_path = self.base_dir.join(slug);
 
         if Path::new(&gp_path).is_dir() {
-            let created_time = fs::metadata(gp_path)
+            let created_time = fs::metadata(&gp_path)
                 .and_then(|m| m.created())
                 .map_err(Error::Io)?;
+
+            let port = fs::read_to_string(self.port_file_name(slug))
+                .map_err(Error::Io)?
+                .trim()
+                .parse()
+                .map_err(|_| Error::Invalid)?;
+            let status = fs::read_to_string(self.status_file_name(slug))
+                .map_err(Error::Io)?
+                .trim()
+                .parse()?;
 
             return Ok(Some(Goopy::from_stored(
                 slug.clone(),
                 999,
                 created_time.into(),
-                Status::Done
+                &gp_path,
+                port,
+                status
             )));
         }
 
@@ -49,10 +72,9 @@ impl GoopyStore for SimpleFsStore {
     }
 
     fn delete(&self, slug: &String) -> Result<(), Error> {
-        match fs::remove_dir(self.base_dir.join(slug)) {
-            Ok(_) => Ok(()),
-            Err(e) => Err(Error::Io(e))
-        }
+        fs::remove_file(self.port_file_name(slug)).map_err(Error::Io)?;
+        fs::remove_file(self.status_file_name(slug)).map_err(Error::Io)?;
+        fs::remove_dir(self.base_dir.join(slug)).map_err(Error::Io)
     }
 
     fn list(&self) -> Result<Vec<Goopy>, Error> {
@@ -62,11 +84,7 @@ impl GoopyStore for SimpleFsStore {
             .filter(|e| e.path().is_dir())
             .map(|dir| {
                 let slug = dir.file_name().to_string_lossy().to_string();
-                let created = dir.metadata()
-                    .and_then(|m| m.created())
-                    .map_err(Error::Io)?;
-
-                Ok(Goopy::from_stored(slug, 999, created.into(), Status::Done))
+                self.load(&slug)?.ok_or(Error::NotFound)
             })
             .collect::<Result<Vec<_>, _>>()
     }
