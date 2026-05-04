@@ -71,10 +71,35 @@ impl GoopyStore for SimpleFsStore {
         Ok(None)
     }
 
-    fn delete(&self, slug: &String) -> Result<(), Error> {
+    fn archive(&self, slug: &String) -> Result<(), Error> {
+        let working_dir = self.base_dir.join(slug);
+        let new_dir = self.base_dir.join(format!("_{}", slug));
+        fs::rename(working_dir, new_dir).map_err(Error::Io)?;
         fs::remove_file(self.port_file_name(slug)).map_err(Error::Io)?;
-        fs::remove_file(self.status_file_name(slug)).map_err(Error::Io)?;
-        fs::remove_dir(self.base_dir.join(slug)).map_err(Error::Io)
+        fs::remove_file(self.status_file_name(slug)).map_err(Error::Io)
+    }
+
+    fn delete(&self, slug: &String) -> Result<(), Error> {
+        // these two files might be removed in advanced by `archive`, so it's okay if they are
+        // missing here
+        fs::remove_file(self.port_file_name(slug)).or_else(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        }).map_err(Error::Io)?;
+
+        fs::remove_file(self.status_file_name(slug)).or_else(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        }).map_err(Error::Io)?;
+
+        fs::remove_dir(self.base_dir.join(slug)).map_err(Error::Io)?;
+        fs::remove_dir(self.base_dir.join(format!("_{}",slug))).map_err(Error::Io)
     }
 
     fn list(&self) -> Result<Vec<Goopy>, Error> {

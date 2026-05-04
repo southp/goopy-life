@@ -113,8 +113,8 @@ where
             let result = provisioner.deprovision(&goopy_clone);
             match result {
                 Ok(_) => {
-                    if let Err(e) = store.update_status(&goopy_clone.slug, Status::Archived) {
-                        eprintln!("despawning: update {} error: {:?}", goopy_clone.slug, e);
+                    if let Err(e) = store.archive(&goopy_clone.slug) {
+                        eprintln!("despawning: archive {} error: {:?}", goopy_clone.slug, e);
                     }
                 },
                 Err(err) => {
