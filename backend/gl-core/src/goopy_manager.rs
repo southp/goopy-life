@@ -113,8 +113,9 @@ where
             let result = provisioner.deprovision(&goopy_clone);
             match result {
                 Ok(_) => {
-                    if let Err(e) = store.archive(&goopy_clone.slug) {
-                        eprintln!("despawning: archive {} error: {:?}", goopy_clone.slug, e);
+                    // TODO: consider to introduce archiving operation.
+                    if let Err(e) = store.delete(&goopy_clone.slug) {
+                        eprintln!("despawning: delete {} error: {:?}", goopy_clone.slug, e);
                     }
                 },
                 Err(err) => {

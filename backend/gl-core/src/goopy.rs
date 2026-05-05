@@ -3,7 +3,7 @@ use crate::shared_types::*;
 use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Goopy {
     pub slug: String,
     pub life_in_days: i32,
