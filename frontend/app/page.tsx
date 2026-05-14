@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 type Status = { kind: 'idle' }
 	| { kind: 'busy' }
@@ -8,9 +8,23 @@ type Status = { kind: 'idle' }
 ;
 
 function GoButton({ status, onClick }: {status: Status, onClick: () => void }) {
+	const [countDown, setCountDown] = useState<number>(3);
+	useEffect(() => {
+		if (status.kind !== 'done'){
+			return;
+		}
+		if (countDown === 0) {
+			// location.assign(status.url);
+			return;
+		}
+
+		const id = setTimeout(() => setCountDown(countDown - 1), 1000);
+		return () => clearTimeout(id);
+	}, [countDown, status.kind]);
+
 	if (status.kind === 'idle') {
 		return (
-			<button className="ghost-button idle" onClick={onClick}>
+			<button className="go-button idle" onClick={ onClick }>
 				Ghost now!
 			</button>
 		);
@@ -18,23 +32,21 @@ function GoButton({ status, onClick }: {status: Status, onClick: () => void }) {
 
 	if (status.kind === 'busy') {
 		return (
-			<p> Ohhhh ... I am busy ... </p>
+			<span className="spinner"></span>
 		);
 	}
 
 	if (status.kind === 'done') {
 		return (
-			<>
-				<p> Your Ghost instance is ready at: <br/>
-					<a href={status.url} >
-						https://foo.goopy.life
-					</a>
-				</p>
-				<p> Redirect you in 5 ...</p>
-			</>
+			<div className="go-button-done-message">
+				<p> Your Ghost instance is ready at:</p>
+				<a className="go-button-url" href={status.url} >
+					https://foo.goopy.life
+				</a>
+				<p className="go-button-countdown">Redirecting in {countDown}...</p>
+			</div>
 		)
 	}
-
 }
 
 export default function Home() {
