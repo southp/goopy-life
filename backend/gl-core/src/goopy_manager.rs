@@ -17,8 +17,9 @@ pub struct GoopyManager<
     pub domain: String,
     pub ssl_email: String,
     pub goopy_life_in_days: i32,
-    pub store: Arc<Store>,
-    pub provisioner: Arc<Provisioner>,
+
+    store: Arc<Store>,
+    provisioner: Arc<Provisioner>,
 
     // TODO: This will also need to be cleaned up regularly
     jobs: HashMap<ThreadId, JoinHandle<()>>,
