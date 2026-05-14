@@ -1,15 +1,6 @@
-@import "tailwindcss";
-
 :root {
   --background: #ffffff;
   --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -19,8 +10,92 @@
   }
 }
 
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
 body {
+  margin: 0;
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* page.tsx */
+
+.page-wrapper {
+  display: flex;
+  min-height: 100vh;
+  align-items: center;
+  justify-content: center;
+  background-color: #fafafa;
+}
+
+@media (prefers-color-scheme: dark) {
+  .page-wrapper {
+    background-color: #000;
+  }
+}
+
+.page-main {
+  display: flex;
+  min-height: 100vh;
+  width: 100%;
+  max-width: 48rem;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  background-color: #fff;
+}
+
+@media (prefers-color-scheme: dark) {
+  .page-main {
+    background-color: #000;
+  }
+}
+
+.hero-emoji {
+  font-size: 8rem;
+  line-height: 1;
+  filter: hue-rotate(180deg) brightness(1.5);
+  opacity: 0.85;
+  text-shadow: 0 0 20px rgba(255, 255, 255, 0.8);
+}
+
+.ghost-button {
+  display: flex;
+  height: 3rem;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 9999px;
+  background-color: var(--foreground);
+  padding: 0 1.25rem;
+  color: var(--background);
+  text-decoration: none;
+  transition-property: color, background-color, border-color;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: 150ms;
+}
+
+.ghost-button:hover {
+  background-color: #383838;
+}
+
+@media (prefers-color-scheme: dark) {
+  .ghost-button:hover {
+    background-color: #ccc;
+  }
+}
+
+@media (min-width: 48rem) {
+  .ghost-button {
+    width: 158px;
+  }
 }
