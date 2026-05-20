@@ -14,7 +14,7 @@ function GoButton({ status, onClick }: {status: Status, onClick: () => void }) {
 			return;
 		}
 		if (countDown === 0) {
-			// location.assign(status.url);
+			location.assign(status.url);
 			return;
 		}
 
@@ -57,7 +57,7 @@ export default function Home() {
 		setTimeout(() => {
 			setStatus( {
 				kind: "done",
-				url: "https://foo.southp.dev",
+				url: "https://bar.southp.dev/ghost/",
 
 			} );
 		}, 3000);
@@ -67,7 +67,9 @@ export default function Home() {
 		<div className="page-wrapper">
 			<main className="page-main">
 				<span className="hero-emoji">💩</span>
-				<GoButton status={ status } onClick={ onClick } />
+				<div className="cta-area">
+					<GoButton status={ status } onClick={ onClick } />
+				</div>
 			</main>
 		</div>
 	);

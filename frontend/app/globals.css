@@ -18,20 +18,12 @@ body {
 	-moz-osx-font-smoothing: grayscale;
 }
 
-/* page.tsx */
-
 .page-wrapper {
 	display: flex;
 	min-height: 100vh;
 	align-items: center;
 	justify-content: center;
-	background-color: #fafafa;
-}
-
-@media (prefers-color-scheme: dark) {
-	.page-wrapper {
-		background-color: #000;
-	}
+	background-color: #000;
 }
 
 .page-main {
@@ -43,13 +35,7 @@ body {
 	align-items: center;
 	justify-content: center;
 	gap: 1rem;
-	background-color: #fff;
-}
-
-@media (prefers-color-scheme: dark) {
-	.page-main {
-		background-color: #000;
-	}
+	background-color: #000;
 }
 
 .hero-emoji {
@@ -58,6 +44,10 @@ body {
 	filter: hue-rotate(180deg) brightness(1.5);
 	opacity: 0.85;
 	text-shadow: 0 0 20px rgba(255, 255, 255, 0.8);
+}
+
+.cta-area {
+	height: 8rem;
 }
 
 .go-button {
@@ -103,8 +93,8 @@ body {
 
 .spinner {
 	display: inline-block;
-	width: 1.25rem;
-	height: 1.25rem;
+	width: 2rem;
+	height: 2rem;
 	border: 2px solid transparent;
 	border-top-color: currentColor;
 	border-radius: 50%;
