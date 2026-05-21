@@ -49,6 +49,7 @@ where
         }
     }
 
+    #[tracing::instrument(skip(self))]
     pub fn spawn(&mut self, slug: String, port: u32) -> Result<ThreadId, Error> {
         if let Some(_) = self.get(&slug)? {
             return Err(Error::AlreadyExists);
@@ -61,6 +62,8 @@ where
             &self.base_dir.join(&slug),
             port,
             Status::Spawning,
+            self.provisioner.kind(),
+            env!("CARGO_PKG_VERSION").to_string(),
         );
 
         self.store.save(&new_goopy)?;
@@ -74,15 +77,15 @@ where
             match provisioner.provision(&goopy_clone) {
                 Ok(_) => {
                     if let Err(e) = store.update_status(&goopy_clone.slug, Status::Done) {
-                        eprintln!("spawning: update {} error: {:?}", goopy_clone.slug, e);
+                        tracing::error!("spawning: update {} error: {:?}", goopy_clone.slug, e);
                     }
                 },
                 Err(err) => {
-                    eprintln!("provisioning for goopy: {} failed: {:?}", goopy_clone.slug, err);
+                    tracing::error!("provisioning for goopy: {} failed: {:?}", goopy_clone.slug, err);
 
                     if let Err(e) = store.update_status(&goopy_clone.slug, Status::Failed)
                     {
-                        eprintln!("spawning: update {} error: {:?}", goopy_clone.slug, e);
+                        tracing::error!("spawning: update {} error: {:?}", goopy_clone.slug, e);
                     }
                 }
             }
@@ -94,6 +97,7 @@ where
         Ok(id)
     }
 
+    #[tracing::instrument(skip(self))]
     pub fn despawn(&mut self, slug: String) -> Result<ThreadId, Error> {
         let Some(goopy) = self.get(&slug)? else {
             return Err(Error::NotFound);
@@ -116,15 +120,15 @@ where
                 Ok(_) => {
                     // TODO: consider to introduce archiving operation.
                     if let Err(e) = store.delete(&goopy_clone.slug) {
-                        eprintln!("despawning: delete {} error: {:?}", goopy_clone.slug, e);
+                        tracing::error!("despawning: delete {} error: {:?}", goopy_clone.slug, e);
                     }
                 },
                 Err(err) => {
-                    eprintln!("deprovisioning for goopy: {} failed: {:?}", goopy_clone.slug, err);
+                    tracing::error!("deprovisioning for goopy: {} failed: {:?}", goopy_clone.slug, err);
 
                     if let Err(e) = store.update_status(&goopy_clone.slug, Status::Failed)
                     {
-                        eprintln!("despawning: update {} error: {:?}", goopy_clone.slug, e);
+                        tracing::error!("despawning: update {} error: {:?}", goopy_clone.slug, e);
                     }
                 }
             }
@@ -162,7 +166,7 @@ where
     fn drop(&mut self) {
         for (_, handle) in self.jobs.drain() {
             if let Err(e) = handle.join() {
-                eprintln!("worker thread panicked: {:?}", e);
+                tracing::error!("worker thread panicked: {:?}", e);
             }
         }
     }

@@ -1,4 +1,10 @@
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ProvisionerKind {
+    Hello,
+    Ghost,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Status {
     Empty,
     Failed,

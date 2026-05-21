@@ -10,7 +10,9 @@ pub struct Goopy {
     pub created_at: DateTime<Utc>,
     pub status: Status,
     pub working_dir: PathBuf,
-    pub port: u32
+    pub port: u32,
+    pub provisioner_kind: ProvisionerKind,
+    pub service_version: String,
 }
 
 impl Goopy {
@@ -21,6 +23,8 @@ impl Goopy {
         working_dir: &Path,
         port: u32,
         status: Status,
+        provisioner_kind: ProvisionerKind,
+        service_version: String,
     ) -> Result<Self, Error> {
         if life_in_days <= 0 {
             return Err(Error::Invalid);
@@ -37,10 +41,21 @@ impl Goopy {
             working_dir: working_dir.into(),
             port,
             status,
+            provisioner_kind,
+            service_version,
         })
     }
 
-    pub(crate) fn from_stored(slug: String, life_in_days: i32, created_at: DateTime<Utc>, working_dir: &Path, port: u32, status: Status) -> Self {
+    pub(crate) fn from_stored(
+        slug: String,
+        life_in_days: i32,
+        created_at: DateTime<Utc>,
+        working_dir: &Path,
+        port: u32,
+        status: Status,
+        provisioner_kind: ProvisionerKind,
+        service_version: String,
+    ) -> Self {
         Self {
             slug,
             life_in_days,
@@ -48,6 +63,8 @@ impl Goopy {
             working_dir: working_dir.into(),
             port,
             status,
+            provisioner_kind,
+            service_version,
         }
     }
 }

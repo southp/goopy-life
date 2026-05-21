@@ -13,6 +13,11 @@ impl GhostLocalProvisioner {
 }
 
 impl GoopyProvisioner for GhostLocalProvisioner {
+    fn kind(&self) -> ProvisionerKind {
+        ProvisionerKind::Ghost
+    }
+
+    #[tracing::instrument(skip(self))]
     fn provision(&self, goopy: &Goopy) -> Result<(), Error> {
         let result = std::fs::create_dir_all(&goopy.working_dir).and_then(|_| {
             Command::new("ghost")
@@ -43,6 +48,7 @@ impl GoopyProvisioner for GhostLocalProvisioner {
         }
     }
 
+    #[tracing::instrument(skip(self))]
     fn deprovision(&self, goopy: &Goopy) -> Result<(), Error> {
         let result = Command::new("ghost")
             .args(["uninstall", "-f"])
