@@ -6,12 +6,6 @@ Goopy.life is the accountless, sandboxing service for Ghost; just like poopy.lif
 
 Users can create an ephemeral Ghost instance on Goopy.Life by just one click. The created instance will live for a limited of time with minimal resource that should be just enough for exploring Ghost but inadequate for any production usage. 
 
-## Getting Started
+## Everything is WIP 🚧
 
-### Production
-
-Please visit https://goopy.life
-
-## Development
-
-Please see @docs/DEVELOPMENT.md for more info.
+So nothing good to see here 🙈
