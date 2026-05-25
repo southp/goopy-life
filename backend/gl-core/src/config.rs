@@ -2,6 +2,10 @@ use std::path::{Path, PathBuf};
 
 use crate::shared_types::{Error, ProvisionerKind};
 
+// Design note: a fully abstract design would store these as `dyn RegistryConfig` /
+// `dyn AllocatorConfig` traits. We use concrete structs instead — the number of
+// registry and allocator implementations is small and well-bounded for the
+// foreseeable future, so the extra indirection isn't worth it.
 #[derive(Debug, serde::Deserialize)]
 pub struct RegistryConfig {
     pub path: PathBuf,
@@ -43,6 +47,11 @@ impl Config {
             .map_err(|e| Error::Config(format!("could not parse {}: {}", path.display(), e)))?;
         if cfg.life_in_days <= 0 {
             return Err(Error::Config("life_in_days must be > 0".into()));
+        }
+        if cfg.port_range_start >= cfg.port_range_end {
+            return Err(Error::Config(
+                "port_range_start must be less than port_range_end".into(),
+            ));
         }
         Ok(cfg)
     }

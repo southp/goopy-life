@@ -30,11 +30,11 @@ bind_address = "0.0.0.0:3000"
 sweep_interval_secs = 86400
 
 [registry]
-# Path to the SQLite database file
+# Registry data path
 path = "/opt/goopy-life/goopy.db"
 
 [allocator]
-# ZFS pool name (used in production; ignored in dev_mode)
+# Storage pool name
 pool = "goopy"
 # Disk quota per instance (MB)
 quota_mb = 512
