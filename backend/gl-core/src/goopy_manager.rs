@@ -1,6 +1,6 @@
 use crate::goopy::*;
 use crate::goopy_provisioner::*;
-use crate::goopy_store::*;
+use crate::goopy_registry::*;
 use crate::shared_types::*;
 
 use chrono::Utc;
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::thread::{JoinHandle, ThreadId};
 
 pub struct GoopyManager<
-    Store: GoopyStore + Send + Sync + 'static,
+    Registry: GoopyRegistry + Send + Sync + 'static,
     Provisioner: GoopyProvisioner + Send + Sync + 'static,
 > {
     pub base_dir: PathBuf,
@@ -18,16 +18,16 @@ pub struct GoopyManager<
     pub ssl_email: String,
     pub goopy_life_in_days: i32,
 
-    store: Arc<Store>,
+    registry: Arc<Registry>,
     provisioner: Arc<Provisioner>,
 
     // TODO: This will also need to be cleaned up regularly
     jobs: HashMap<ThreadId, JoinHandle<()>>,
 }
 
-impl<Store, Provisioner> GoopyManager<Store, Provisioner>
+impl<Registry, Provisioner> GoopyManager<Registry, Provisioner>
 where
-    Store: GoopyStore + Send + Sync + 'static,
+    Registry: GoopyRegistry + Send + Sync + 'static,
     Provisioner: GoopyProvisioner + Send + Sync + 'static,
 {
     pub fn new(
@@ -35,7 +35,7 @@ where
         domain: String,
         ssl_email: String,
         goopy_life_in_days: i32,
-        store: Store,
+        registry: Registry,
         provisioner: Provisioner,
     ) -> Self {
         Self {
@@ -43,7 +43,7 @@ where
             domain,
             ssl_email,
             goopy_life_in_days,
-            store: Arc::new(store),
+            registry: Arc::new(registry),
             provisioner: Arc::new(provisioner),
             jobs: HashMap::new(),
         }
@@ -66,10 +66,10 @@ where
             env!("CARGO_PKG_VERSION").to_string(),
         )?;
 
-        self.store.save(&new_goopy)?;
+        self.registry.save(&new_goopy)?;
 
         // now, spawn the job
-        let store = Arc::clone(&self.store);
+        let registry = Arc::clone(&self.registry);
         let goopy_clone = new_goopy.clone();
         let provisioner = Arc::clone(&self.provisioner);
         let span = tracing::Span::current();
@@ -78,14 +78,14 @@ where
             let _guard = span.enter();
             match provisioner.provision(&goopy_clone) {
                 Ok(_) => {
-                    if let Err(e) = store.update_status(&goopy_clone.slug, Status::Done) {
+                    if let Err(e) = registry.update_status(&goopy_clone.slug, Status::Done) {
                         tracing::error!("spawning: update {} error: {:?}", goopy_clone.slug, e);
                     }
                 },
                 Err(err) => {
                     tracing::error!("provisioning for goopy: {} failed: {:?}", goopy_clone.slug, err);
 
-                    if let Err(e) = store.update_status(&goopy_clone.slug, Status::Failed)
+                    if let Err(e) = registry.update_status(&goopy_clone.slug, Status::Failed)
                     {
                         tracing::error!("spawning: update {} error: {:?}", goopy_clone.slug, e);
                     }
@@ -110,10 +110,10 @@ where
         }
 
         // annotate the status
-        self.store.update_status(&slug, Status::Despawning)?;
+        self.registry.update_status(&slug, Status::Despawning)?;
 
         let goopy_clone = goopy.clone();
-        let store = Arc::clone(&self.store);
+        let registry = Arc::clone(&self.registry);
         let provisioner = Arc::clone(&self.provisioner);
         let span = tracing::Span::current();
 
@@ -123,14 +123,14 @@ where
             match result {
                 Ok(_) => {
                     // TODO: consider to introduce archiving operation.
-                    if let Err(e) = store.delete(&goopy_clone.slug) {
+                    if let Err(e) = registry.delete(&goopy_clone.slug) {
                         tracing::error!("despawning: delete {} error: {:?}", goopy_clone.slug, e);
                     }
                 },
                 Err(err) => {
                     tracing::error!("deprovisioning for goopy: {} failed: {:?}", goopy_clone.slug, err);
 
-                    if let Err(e) = store.update_status(&goopy_clone.slug, Status::Failed)
+                    if let Err(e) = registry.update_status(&goopy_clone.slug, Status::Failed)
                     {
                         tracing::error!("despawning: update {} error: {:?}", goopy_clone.slug, e);
                     }
@@ -146,11 +146,11 @@ where
     }
 
     pub fn get(&self, slug: &String) -> Result<Option<Goopy>, Error> {
-        self.store.load(slug)
+        self.registry.load(slug)
     }
 
     pub fn list(&self) -> Result<Vec<Goopy>, Error> {
-        self.store.list()
+        self.registry.list()
     }
 
     pub fn is_job_finished(&self, job_id: &ThreadId) -> Option<bool> {
@@ -162,9 +162,9 @@ where
     }
 }
 
-impl<Store, Provisioner> Drop for GoopyManager<Store, Provisioner>
+impl<Registry, Provisioner> Drop for GoopyManager<Registry, Provisioner>
 where
-    Store: GoopyStore + Send + Sync + 'static,
+    Registry: GoopyRegistry + Send + Sync + 'static,
     Provisioner: GoopyProvisioner + Send + Sync + 'static,
 {
     fn drop(&mut self) {

@@ -10,3 +10,4 @@ url = "2"
 toml = "1.1.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rusqlite = { version = "0.31", features = ["bundled"] }

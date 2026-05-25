@@ -1,7 +1,8 @@
 use gl_core::*;
-use gl_core::goopy_store::simple_fs_store::SimpleFsStore;
+use gl_core::goopy_registry::sqlite_store::SqliteStore;
 use gl_core::goopy_provisioner::ghost_local_provisioner::GhostLocalProvisioner;
 use indicatif::{MultiProgress, ProgressBar};
+use std::path::Path;
 use std::time::Duration;
 use clap::{Parser, Subcommand};
 
@@ -53,12 +54,15 @@ fn main() {
         tracing::warn!("config file not found: {}; proceeding with defaults", cli.config.display());
     }
 
+    let registry = SqliteStore::new(Path::new(":memory:"))
+        .expect("failed to open in-memory SQLite store");
+
     let mut gm = GoopyManager::new(
         "./test-temp".into(),
         "localhost".into(),
         "bar@example.com".into(),
         32,
-        SimpleFsStore::new("./test-temp"),
+        registry,
         GhostLocalProvisioner::new(),
     );
     let mp = MultiProgress::new();

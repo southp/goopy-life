@@ -52,6 +52,18 @@ impl std::fmt::Display for ProvisionerKind {
     }
 }
 
+impl std::str::FromStr for ProvisionerKind {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "Hello" => Ok(ProvisionerKind::Hello),
+            "Ghost" => Ok(ProvisionerKind::Ghost),
+            _ => Err(Error::Invalid),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum Error {
     NotFound,
