@@ -20,7 +20,7 @@ fn main() {
     let _cfg = match gl_core::Config::from_file(&cli.config) {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("Error loading config: {}", e);
+            tracing::error!("Error loading config: {}", e);
             std::process::exit(1);
         }
     };

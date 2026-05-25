@@ -55,7 +55,7 @@ where
             return Err(Error::AlreadyExists);
         }
 
-        let new_goopy = Goopy::from_stored(
+        let new_goopy = Goopy::new(
             slug.clone(),
             self.goopy_life_in_days,
             Utc::now(),
@@ -64,7 +64,7 @@ where
             Status::Spawning,
             self.provisioner.kind(),
             env!("CARGO_PKG_VERSION").to_string(),
-        );
+        )?;
 
         self.store.save(&new_goopy)?;
 
@@ -72,8 +72,10 @@ where
         let store = Arc::clone(&self.store);
         let goopy_clone = new_goopy.clone();
         let provisioner = Arc::clone(&self.provisioner);
+        let span = tracing::Span::current();
 
         let handle = std::thread::spawn(move || {
+            let _guard = span.enter();
             match provisioner.provision(&goopy_clone) {
                 Ok(_) => {
                     if let Err(e) = store.update_status(&goopy_clone.slug, Status::Done) {
@@ -113,8 +115,10 @@ where
         let goopy_clone = goopy.clone();
         let store = Arc::clone(&self.store);
         let provisioner = Arc::clone(&self.provisioner);
+        let span = tracing::Span::current();
 
         let handle = std::thread::spawn(move || {
+            let _guard = span.enter();
             let result = provisioner.deprovision(&goopy_clone);
             match result {
                 Ok(_) => {

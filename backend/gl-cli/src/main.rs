@@ -45,10 +45,12 @@ fn main() {
         match gl_core::Config::from_file(&cli.config) {
             Ok(_cfg) => tracing::info!("loaded config from {}", cli.config.display()),
             Err(e) => {
-                eprintln!("Error loading config: {}", e);
+                tracing::error!("Error loading config: {}", e);
                 std::process::exit(1);
             }
         }
+    } else {
+        tracing::warn!("config file not found: {}; proceeding with defaults", cli.config.display());
     }
 
     let mut gm = GoopyManager::new(
