@@ -10,6 +10,10 @@ use clap::{Parser, Subcommand};
 #[command(version = "0.1")]
 #[command(about = "Mainly a quick playground for now. Would it become a real CLI tool? Who knows.", long_about = None)]
 struct Cli {
+    /// Path to the config file
+    #[arg(long, default_value = "./config.toml")]
+    config: std::path::PathBuf,
+
     #[command(subcommand)]
     command: Cmd,
 }
@@ -31,6 +35,24 @@ enum Cmd {
 }
 
 fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
+    let cli = Cli::parse();
+
+    if cli.config.exists() {
+        match gl_core::Config::from_file(&cli.config) {
+            Ok(_cfg) => tracing::info!("loaded config from {}", cli.config.display()),
+            Err(e) => {
+                tracing::error!("Error loading config: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        tracing::warn!("config file not found: {}; proceeding with defaults", cli.config.display());
+    }
+
     let mut gm = GoopyManager::new(
         "./test-temp".into(),
         "localhost".into(),
@@ -39,8 +61,6 @@ fn main() {
         SimpleFsStore::new("./test-temp"),
         GhostLocalProvisioner::new(),
     );
-
-    let cli = Cli::parse();
     let mp = MultiProgress::new();
     let mut spinners = vec![];
     let mut jobs = vec![];
