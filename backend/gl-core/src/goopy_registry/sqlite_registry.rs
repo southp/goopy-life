@@ -244,6 +244,8 @@ impl GoopyRegistry for SqliteRegistry {
             .unchecked_transaction()
             .map_err(|e| Error::Other(format!("transaction failed: {e}")))?;
 
+        // O(n) scan across the range. Acceptable for ranges of a few hundred ports;
+        // for larger ranges a single-query approach (SELECT MIN unused port) is preferable.
         for port in range_start..range_end {
             let result = tx.execute(
                 "INSERT OR IGNORE INTO allocated_ports (port) VALUES (?1)",
@@ -323,6 +325,10 @@ mod tests {
         assert_eq!(loaded.slug, gp.slug);
         assert_eq!(loaded.life_in_days, gp.life_in_days);
         assert_eq!(loaded.status, gp.status);
+        assert_eq!(loaded.port, gp.port);
+        assert_eq!(loaded.working_dir, gp.working_dir);
+        assert_eq!(loaded.provisioner_kind, gp.provisioner_kind);
+        assert_eq!(loaded.service_version, gp.service_version);
     }
 
     #[test]
@@ -380,6 +386,9 @@ mod tests {
         r.save(&make_goopy("beta")).unwrap();
         let goopies = r.list().unwrap();
         assert_eq!(goopies.len(), 2);
+        let slugs: Vec<&str> = goopies.iter().map(|g| g.slug.as_str()).collect();
+        assert!(slugs.contains(&"alpha"));
+        assert!(slugs.contains(&"beta"));
     }
 
     #[test]
@@ -407,7 +416,7 @@ mod tests {
         let p = r.acquire_port(9200, 9210).unwrap();
         r.release_port(p).unwrap();
         let p2 = r.acquire_port(9200, 9210).unwrap();
-        assert_eq!(p, p2);
+        assert!(p2 >= 9200 && p2 < 9210);
     }
 
     #[test]

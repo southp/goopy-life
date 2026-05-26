@@ -42,11 +42,11 @@ fn main() {
 
     let cli = Cli::parse();
 
-    let db_path = if cli.config.exists() {
+    let (db_path, base_dir) = if cli.config.exists() {
         match gl_core::Config::from_file(&cli.config) {
             Ok(cfg) => {
                 tracing::info!("loaded config from {}", cli.config.display());
-                cfg.registry.path
+                (cfg.registry.path, cfg.base_dir)
             }
             Err(e) => {
                 tracing::error!("Error loading config: {}", e);
@@ -58,14 +58,14 @@ fn main() {
             "config file not found: {}; using ./registry.db",
             cli.config.display()
         );
-        PathBuf::from("./registry.db")
+        (PathBuf::from("./registry.db"), PathBuf::from("./test-temp"))
     };
 
     let registry = SqliteRegistry::new(&db_path)
         .expect("failed to open SQLite registry");
 
     let mut gm = GoopyManager::new(
-        "./test-temp".into(),
+        base_dir,
         "localhost".into(),
         "bar@example.com".into(),
         32,

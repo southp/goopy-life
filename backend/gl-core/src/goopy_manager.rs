@@ -145,7 +145,7 @@ where
         Ok(id)
     }
 
-    pub fn get(&self, slug: &String) -> Result<Option<Goopy>, Error> {
+    pub fn get(&self, slug: &str) -> Result<Option<Goopy>, Error> {
         self.registry.load(slug)
     }
 
