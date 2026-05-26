@@ -38,11 +38,16 @@ impl StorageAllocator for ZfsAllocator {
 
         let output = std::process::Command::new("zfs")
             .args(["create", "-o", &quota_arg, "-o", &mountpoint_arg, &dataset])
+            .env("LANG", "C")
             .output()
             .map_err(|e| Error::Other(format!("failed to run zfs create: {}", e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("already exists") {
+                info!(%dataset, "ZFS dataset already present, treating as success");
+                return Ok(());
+            }
             error!(%dataset, %stderr, "zfs create failed");
             return Err(Error::Other(format!(
                 "zfs create failed for dataset '{}' (exit status: {}): {}",
@@ -67,6 +72,7 @@ impl StorageAllocator for ZfsAllocator {
 
         let output = std::process::Command::new("zfs")
             .args(["destroy", &dataset])
+            .env("LANG", "C")
             .output()
             .map_err(|e| Error::Other(format!("failed to run zfs destroy: {}", e)))?;
 
@@ -162,6 +168,23 @@ mod tests {
         allocator.release(&path).expect("second release should succeed (idempotent)");
 
         // Cleanup guard (no-op if already gone)
+        std::process::Command::new("zfs")
+            .args(["destroy", &dataset])
+            .status()
+            .ok();
+    }
+
+    #[test]
+    #[ignore]
+    fn allocate_is_idempotent() {
+        let allocator = ZfsAllocator::new(TESTPOOL.to_string(), 100);
+        let path = PathBuf::from(format!("/{}/goopy-zfs-test-alloc-idem", TESTPOOL));
+        let dataset = format!("{}/goopy-zfs-test-alloc-idem", TESTPOOL);
+
+        allocator.allocate(&path).expect("first allocate should succeed");
+        allocator.allocate(&path).expect("second allocate should succeed (idempotent)");
+
+        // Cleanup
         std::process::Command::new("zfs")
             .args(["destroy", &dataset])
             .status()

@@ -62,7 +62,7 @@ mod tests {
     fn release_removes_directory() {
         let base = tempdir().unwrap();
         let target = base.path().join("goopy-release");
-        std::fs::create_dir(&target).unwrap();
+        PlainDirAllocator.allocate(&target).expect("setup: allocate should succeed");
 
         PlainDirAllocator.release(&target).expect("release should succeed");
         assert!(!target.exists(), "directory should be gone after release");
