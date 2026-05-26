@@ -1,7 +1,8 @@
 use gl_core::*;
-use gl_core::goopy_store::simple_fs_store::SimpleFsStore;
+use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
 use gl_core::goopy_provisioner::ghost_local_provisioner::GhostLocalProvisioner;
 use indicatif::{MultiProgress, ProgressBar};
+use std::path::PathBuf;
 use std::time::Duration;
 use clap::{Parser, Subcommand};
 
@@ -41,24 +42,34 @@ fn main() {
 
     let cli = Cli::parse();
 
-    if cli.config.exists() {
+    let (db_path, base_dir) = if cli.config.exists() {
         match gl_core::Config::from_file(&cli.config) {
-            Ok(_cfg) => tracing::info!("loaded config from {}", cli.config.display()),
+            Ok(cfg) => {
+                tracing::info!("loaded config from {}", cli.config.display());
+                (cfg.registry.path, cfg.base_dir)
+            }
             Err(e) => {
                 tracing::error!("Error loading config: {}", e);
                 std::process::exit(1);
             }
         }
     } else {
-        tracing::warn!("config file not found: {}; proceeding with defaults", cli.config.display());
-    }
+        tracing::warn!(
+            "config file not found: {}; using ./registry.db",
+            cli.config.display()
+        );
+        (PathBuf::from("./registry.db"), PathBuf::from("./test-temp"))
+    };
+
+    let registry = SqliteRegistry::new(&db_path)
+        .expect("failed to open SQLite registry");
 
     let mut gm = GoopyManager::new(
-        "./test-temp".into(),
+        base_dir,
         "localhost".into(),
         "bar@example.com".into(),
         32,
-        SimpleFsStore::new("./test-temp"),
+        registry,
         GhostLocalProvisioner::new(),
     );
     let mp = MultiProgress::new();
