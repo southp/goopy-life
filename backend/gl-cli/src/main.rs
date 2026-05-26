@@ -1,8 +1,8 @@
 use gl_core::*;
-use gl_core::goopy_registry::sqlite_store::SqliteStore;
+use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
 use gl_core::goopy_provisioner::ghost_local_provisioner::GhostLocalProvisioner;
 use indicatif::{MultiProgress, ProgressBar};
-use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 use clap::{Parser, Subcommand};
 
@@ -42,20 +42,27 @@ fn main() {
 
     let cli = Cli::parse();
 
-    if cli.config.exists() {
+    let db_path = if cli.config.exists() {
         match gl_core::Config::from_file(&cli.config) {
-            Ok(_cfg) => tracing::info!("loaded config from {}", cli.config.display()),
+            Ok(cfg) => {
+                tracing::info!("loaded config from {}", cli.config.display());
+                cfg.registry.path
+            }
             Err(e) => {
                 tracing::error!("Error loading config: {}", e);
                 std::process::exit(1);
             }
         }
     } else {
-        tracing::warn!("config file not found: {}; proceeding with defaults", cli.config.display());
-    }
+        tracing::warn!(
+            "config file not found: {}; using ./registry.db",
+            cli.config.display()
+        );
+        PathBuf::from("./registry.db")
+    };
 
-    let registry = SqliteStore::new(Path::new(":memory:"))
-        .expect("failed to open in-memory SQLite store");
+    let registry = SqliteRegistry::new(&db_path)
+        .expect("failed to open SQLite registry");
 
     let mut gm = GoopyManager::new(
         "./test-temp".into(),

@@ -1,14 +1,14 @@
-pub mod sqlite_store;
+pub mod sqlite_registry;
 
 use crate::goopy::Goopy;
 use crate::shared_types::*;
 
 pub trait GoopyRegistry {
     fn save(&self, gp: &Goopy) -> Result<(), Error>;
-    fn load(&self, slug: &String) -> Result<Option<Goopy>, Error>;
-    fn delete(&self, slug: &String) -> Result<(), Error>;
+    fn load(&self, slug: &str) -> Result<Option<Goopy>, Error>;
+    fn delete(&self, slug: &str) -> Result<(), Error>;
     fn list(&self) -> Result<Vec<Goopy>, Error>;
-    fn update_status(&self, slug: &String, new_status: Status) -> Result<(), Error>;
+    fn update_status(&self, slug: &str, new_status: Status) -> Result<(), Error>;
 
     /// Find the lowest unused port in `[range_start, range_end)`, mark it as
     /// allocated, and return it.  Returns `Error::Other` if the entire range is
