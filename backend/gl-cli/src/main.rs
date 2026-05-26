@@ -32,7 +32,17 @@ enum Cmd {
         slugs: Vec<String>,
     },
     /// List all the available goopies
-    List {}
+    List {},
+    /// Allocate storage at the given path (PlainDirAllocator smoke test)
+    Alloc {
+        #[arg(long)]
+        path: std::path::PathBuf,
+    },
+    /// Release storage at the given path (PlainDirAllocator smoke test)
+    Dealloc {
+        #[arg(long)]
+        path: std::path::PathBuf,
+    },
 }
 
 fn main() {
@@ -109,6 +119,24 @@ fn main() {
                     }
                 }
                 spinners.push(spinner);
+            }
+        }
+        Cmd::Alloc { path } => {
+            match PlainDirAllocator.allocate(&path) {
+                Ok(()) => println!("allocated: {}", path.display()),
+                Err(e) => {
+                    eprintln!("alloc failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Cmd::Dealloc { path } => {
+            match PlainDirAllocator.release(&path) {
+                Ok(()) => println!("released: {}", path.display()),
+                Err(e) => {
+                    eprintln!("dealloc failed: {}", e);
+                    std::process::exit(1);
+                }
             }
         }
         Cmd::List {} => {
