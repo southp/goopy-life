@@ -329,6 +329,7 @@ mod tests {
         assert_eq!(loaded.working_dir, gp.working_dir);
         assert_eq!(loaded.provisioner_kind, gp.provisioner_kind);
         assert_eq!(loaded.service_version, gp.service_version);
+        assert_eq!(loaded.created_at, gp.created_at);
     }
 
     #[test]
@@ -413,10 +414,10 @@ mod tests {
     #[test]
     fn release_port() {
         let r = registry();
-        let p = r.acquire_port(9200, 9210).unwrap();
+        let p = r.acquire_port(9200, 9201).unwrap(); // only 1 port in range
+        assert!(r.acquire_port(9200, 9201).is_err()); // range is exhausted
         r.release_port(p).unwrap();
-        let p2 = r.acquire_port(9200, 9210).unwrap();
-        assert!(p2 >= 9200 && p2 < 9210);
+        assert!(r.acquire_port(9200, 9201).is_ok()); // port is available again
     }
 
     #[test]
