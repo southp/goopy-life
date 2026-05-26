@@ -38,7 +38,7 @@ impl StorageAllocator for ZfsAllocator {
 
         let output = std::process::Command::new("zfs")
             .args(["create", "-o", &quota_arg, "-o", &mountpoint_arg, &dataset])
-            .env("LANG", "C")
+            .env("LC_ALL", "C")
             .output()
             .map_err(|e| Error::Other(format!("failed to run zfs create: {}", e)))?;
 
@@ -72,7 +72,7 @@ impl StorageAllocator for ZfsAllocator {
 
         let output = std::process::Command::new("zfs")
             .args(["destroy", &dataset])
-            .env("LANG", "C")
+            .env("LC_ALL", "C")
             .output()
             .map_err(|e| Error::Other(format!("failed to run zfs destroy: {}", e)))?;
 
@@ -154,6 +154,12 @@ mod tests {
             .output()
             .expect("zfs list should run");
         assert!(!output.status.success(), "dataset should be gone after release");
+
+        // Cleanup guard (no-op if already gone)
+        std::process::Command::new("zfs")
+            .args(["destroy", &dataset])
+            .status()
+            .ok();
     }
 
     #[test]
@@ -183,6 +189,12 @@ mod tests {
 
         allocator.allocate(&path).expect("first allocate should succeed");
         allocator.allocate(&path).expect("second allocate should succeed (idempotent)");
+
+        let list_output = std::process::Command::new("zfs")
+            .args(["list", &dataset])
+            .output()
+            .expect("zfs list should run");
+        assert!(list_output.status.success(), "dataset should still exist after second allocate");
 
         // Cleanup
         std::process::Command::new("zfs")
