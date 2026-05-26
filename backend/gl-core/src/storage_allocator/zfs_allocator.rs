@@ -72,6 +72,10 @@ impl StorageAllocator for ZfsAllocator {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("does not exist") {
+                info!(%dataset, "ZFS dataset already absent, treating as success");
+                return Ok(());
+            }
             error!(%dataset, %stderr, "zfs destroy failed");
             return Err(Error::Other(format!(
                 "zfs destroy failed for dataset '{}' (exit status: {}): {}",
@@ -91,26 +95,38 @@ mod tests {
 
     /// These tests require a live ZFS pool named "testpool".
     /// Run with: cargo test -- --include-ignored
+    const TESTPOOL: &str = "testpool";
 
     #[test]
     #[ignore]
     fn allocate_creates_dataset() {
-        let pool = "testpool";
-        let allocator = ZfsAllocator::new(pool.to_string(), 100);
-        let path = PathBuf::from("/testpool/goopy-zfs-test-alloc");
+        let allocator = ZfsAllocator::new(TESTPOOL.to_string(), 100);
+        let path = PathBuf::from(format!("/{}/goopy-zfs-test-alloc", TESTPOOL));
+        let dataset = format!("{}/goopy-zfs-test-alloc", TESTPOOL);
 
         allocator.allocate(&path).expect("allocate should succeed");
 
         // Verify dataset exists
-        let output = std::process::Command::new("zfs")
-            .args(["list", &format!("{}/goopy-zfs-test-alloc", pool)])
+        let list_output = std::process::Command::new("zfs")
+            .args(["list", &dataset])
             .output()
             .expect("zfs list should run");
-        assert!(output.status.success(), "dataset should exist after allocate");
+        assert!(list_output.status.success(), "dataset should exist after allocate");
+
+        // Verify mountpoint was set correctly
+        let mp_output = std::process::Command::new("zfs")
+            .args(["get", "-H", "-o", "value", "mountpoint", &dataset])
+            .output()
+            .expect("zfs get mountpoint should run");
+        assert_eq!(
+            String::from_utf8_lossy(&mp_output.stdout).trim(),
+            path.to_str().unwrap(),
+            "mountpoint should match path argument"
+        );
 
         // Cleanup
         std::process::Command::new("zfs")
-            .args(["destroy", &format!("{}/goopy-zfs-test-alloc", pool)])
+            .args(["destroy", &dataset])
             .status()
             .ok();
     }
@@ -118,16 +134,12 @@ mod tests {
     #[test]
     #[ignore]
     fn release_destroys_dataset() {
-        let pool = "testpool";
-        let allocator = ZfsAllocator::new(pool.to_string(), 100);
-        let path = PathBuf::from("/testpool/goopy-zfs-test-release");
-        let dataset = format!("{}/goopy-zfs-test-release", pool);
+        let allocator = ZfsAllocator::new(TESTPOOL.to_string(), 100);
+        let path = PathBuf::from(format!("/{}/goopy-zfs-test-release", TESTPOOL));
+        let dataset = format!("{}/goopy-zfs-test-release", TESTPOOL);
 
-        // Setup
-        std::process::Command::new("zfs")
-            .args(["create", &dataset])
-            .status()
-            .expect("setup: zfs create should succeed");
+        // Setup: create via allocate so the dataset mirrors production state
+        allocator.allocate(&path).expect("setup: allocate should succeed");
 
         allocator.release(&path).expect("release should succeed");
 
@@ -136,5 +148,23 @@ mod tests {
             .output()
             .expect("zfs list should run");
         assert!(!output.status.success(), "dataset should be gone after release");
+    }
+
+    #[test]
+    #[ignore]
+    fn release_is_idempotent() {
+        let allocator = ZfsAllocator::new(TESTPOOL.to_string(), 100);
+        let path = PathBuf::from(format!("/{}/goopy-zfs-test-idempotent", TESTPOOL));
+        let dataset = format!("{}/goopy-zfs-test-idempotent", TESTPOOL);
+
+        allocator.allocate(&path).expect("setup: allocate should succeed");
+        allocator.release(&path).expect("first release should succeed");
+        allocator.release(&path).expect("second release should succeed (idempotent)");
+
+        // Cleanup guard (no-op if already gone)
+        std::process::Command::new("zfs")
+            .args(["destroy", &dataset])
+            .status()
+            .ok();
     }
 }
