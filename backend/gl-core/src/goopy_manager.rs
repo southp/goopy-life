@@ -17,6 +17,8 @@ pub struct GoopyManager<
     pub domain: String,
     pub ssl_email: String,
     pub goopy_life_in_days: i32,
+    pub port_range_start: u32,
+    pub port_range_end: u32,
 
     registry: Arc<Registry>,
     provisioner: Arc<Provisioner>,
@@ -35,6 +37,8 @@ where
         domain: String,
         ssl_email: String,
         goopy_life_in_days: i32,
+        port_range_start: u32,
+        port_range_end: u32,
         registry: Registry,
         provisioner: Provisioner,
     ) -> Self {
@@ -43,6 +47,8 @@ where
             domain,
             ssl_email,
             goopy_life_in_days,
+            port_range_start,
+            port_range_end,
             registry: Arc::new(registry),
             provisioner: Arc::new(provisioner),
             jobs: HashMap::new(),
@@ -50,8 +56,10 @@ where
     }
 
     #[tracing::instrument(skip(self))]
-    pub fn spawn(&mut self, port: u32) -> Result<(String, ThreadId), Error> {
+    pub fn spawn(&mut self) -> Result<(String, ThreadId), Error> {
         const MAX_RETRIES: usize = 10;
+
+        let port = self.registry.acquire_port(self.port_range_start, self.port_range_end)?;
 
         let mut new_goopy = None;
         for _ in 0..MAX_RETRIES {
@@ -76,13 +84,17 @@ where
                     tracing::warn!(slug = %slug, "slug collision, retrying");
                     continue;
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    let _ = self.registry.release_port(port);
+                    return Err(e);
+                }
             }
         }
 
-        let new_goopy = new_goopy.ok_or_else(|| {
-            Error::Other("slug generation failed: too many collisions".into())
-        })?;
+        let Some(new_goopy) = new_goopy else {
+            let _ = self.registry.release_port(port);
+            return Err(Error::Other("slug generation failed: too many collisions".into()));
+        };
 
         let slug = new_goopy.slug.clone();
 
@@ -135,14 +147,17 @@ where
         let provisioner = Arc::clone(&self.provisioner);
         let span = tracing::Span::current();
 
+        let port = goopy.port;
         let handle = std::thread::spawn(move || {
             let _guard = span.enter();
             let result = provisioner.deprovision(&goopy_clone);
             match result {
                 Ok(_) => {
-                    // TODO: consider to introduce archiving operation.
                     if let Err(e) = registry.delete(&goopy_clone.slug) {
                         tracing::error!("despawning: delete {} error: {:?}", goopy_clone.slug, e);
+                    }
+                    if let Err(e) = registry.release_port(port) {
+                        tracing::error!("despawning: release port {} error: {:?}", port, e);
                     }
                 },
                 Err(err) => {
@@ -154,7 +169,6 @@ where
                     }
                 }
             }
-            // remove the instance through the "provisioner"
         });
 
         let id = handle.thread().id();
