@@ -71,6 +71,9 @@ pub enum Error {
     AlreadyExists,
     Config(String),
     Io(std::io::Error),
+    /// General database operation failure (connection open, DML, etc.).
+    /// `SchemaMigration` covers only DDL executed in `new()`; all other
+    /// `SqliteRegistry` errors map here.
     Registry(String),
     SchemaMigration(String),
     PortExhausted,
