@@ -21,10 +21,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Spawn one or more goopies test test
+    /// Spawn one or more goopies
     Spawn {
-        #[arg(num_args = 1.., required = true)]
-        slugs: Vec<String>,
+        /// Number of instances to spawn
+        #[arg(default_value = "1")]
+        count: u32,
     },
     /// Despawn one or more goopies
     Despawn {
@@ -87,16 +88,20 @@ fn main() {
     let mut jobs = vec![];
 
     match cli.command {
-        Cmd::Spawn { slugs } => {
+        Cmd::Spawn { count } => {
             let port_base = 50000;
 
-            for (i, s) in slugs.iter().enumerate() {
+            for i in 0..count {
                 let spinner = mp.add(ProgressBar::new_spinner());
-                spinner.set_message(format!("Spawning {} ...", s));
+                spinner.set_message("Spawning ...".to_string());
                 spinner.enable_steady_tick(Duration::from_millis(100));
 
-                match gm.spawn(s.to_string(), port_base + i as u32) {
-                    Ok(job_id) => jobs.push(job_id),
+                match gm.spawn(port_base + i) {
+                    Ok((slug, job_id)) => {
+                        spinner.set_message(format!("Spawning {slug} ..."));
+                        println!("spawned: {slug}");
+                        jobs.push(job_id);
+                    }
                     Err(e) => {
                         println!("Spawn failed: {:?}", e);
                         spinner.finish_with_message(format!("Failed due to: {:?}", e));
@@ -154,7 +159,7 @@ fn main() {
         }
     }
 
-    while jobs.iter().map(|job_id| gm.is_job_finished(job_id).unwrap()).any(|s| s == false) {
+    while jobs.iter().map(|job_id| gm.is_job_finished(job_id).unwrap()).any(|s| !s) {
         std::thread::sleep(Duration::from_secs(1));
     }
 

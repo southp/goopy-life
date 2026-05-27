@@ -50,23 +50,42 @@ where
     }
 
     #[tracing::instrument(skip(self))]
-    pub fn spawn(&mut self, slug: String, port: u32) -> Result<ThreadId, Error> {
-        if let Some(_) = self.get(&slug)? {
-            return Err(Error::AlreadyExists);
+    pub fn spawn(&mut self, port: u32) -> Result<(String, ThreadId), Error> {
+        const MAX_RETRIES: usize = 10;
+
+        let mut new_goopy = None;
+        for _ in 0..MAX_RETRIES {
+            let slug = crate::slug_generator::generate_slug();
+            // Goopy::new() is pure (no I/O, no side-effects); safe to call on every retry.
+            let candidate = Goopy::new(
+                slug.clone(),
+                self.goopy_life_in_days,
+                Utc::now(),
+                &self.base_dir.join(&slug),
+                port,
+                Status::Spawning,
+                self.provisioner.kind(),
+                env!("CARGO_PKG_VERSION").to_string(),
+            )?;
+
+            match self.registry.save(&candidate) {
+                Ok(()) => {
+                    new_goopy = Some(candidate);
+                    break;
+                }
+                Err(Error::AlreadyExists) => {
+                    tracing::warn!(slug = %slug, "slug collision, retrying");
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
         }
 
-        let new_goopy = Goopy::new(
-            slug.clone(),
-            self.goopy_life_in_days,
-            Utc::now(),
-            &self.base_dir.join(&slug),
-            port,
-            Status::Spawning,
-            self.provisioner.kind(),
-            env!("CARGO_PKG_VERSION").to_string(),
-        )?;
+        let new_goopy = new_goopy.ok_or_else(|| {
+            Error::Other("slug generation failed: too many collisions".into())
+        })?;
 
-        self.registry.save(&new_goopy)?;
+        let slug = new_goopy.slug.clone();
 
         // now, spawn the job
         let registry = Arc::clone(&self.registry);
@@ -96,7 +115,7 @@ where
         let id = handle.thread().id();
         self.jobs.insert(id, handle);
 
-        Ok(id)
+        Ok((slug, id))
     }
 
     #[tracing::instrument(skip(self))]
@@ -173,5 +192,60 @@ where
                 tracing::error!("worker thread panicked: {:?}", e);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::goopy::Goopy;
+    use crate::goopy_provisioner::GoopyProvisioner;
+    use crate::goopy_registry::GoopyRegistry;
+    use std::sync::Mutex;
+
+    struct CollideOnceRegistry {
+        save_calls: Mutex<u32>,
+    }
+
+    impl GoopyRegistry for CollideOnceRegistry {
+        fn save(&self, _gp: &Goopy) -> Result<(), Error> {
+            let mut n = self.save_calls.lock().unwrap();
+            *n += 1;
+            if *n == 1 {
+                Err(Error::AlreadyExists)
+            } else {
+                Ok(())
+            }
+        }
+        fn load(&self, _slug: &str) -> Result<Option<Goopy>, Error> { Ok(None) }
+        fn delete(&self, _slug: &str) -> Result<(), Error> { Ok(()) }
+        fn list(&self) -> Result<Vec<Goopy>, Error> { Ok(vec![]) }
+        fn update_status(&self, _slug: &str, _new_status: Status) -> Result<(), Error> { Ok(()) }
+        fn acquire_port(&self, range_start: u32, _range_end: u32) -> Result<u32, Error> { Ok(range_start) }
+        fn release_port(&self, _port: u32) -> Result<(), Error> { Ok(()) }
+    }
+
+    struct NoopProvisioner;
+
+    impl GoopyProvisioner for NoopProvisioner {
+        fn provision(&self, _goopy: &Goopy) -> Result<(), Error> { Ok(()) }
+        fn deprovision(&self, _goopy: &Goopy) -> Result<(), Error> { Ok(()) }
+        fn kind(&self) -> ProvisionerKind { ProvisionerKind::Hello }
+    }
+
+    #[test]
+    fn spawn_retries_on_collision() {
+        let mut gm = GoopyManager::new(
+            std::path::PathBuf::from("/tmp/test-goopy"),
+            "test.example".into(),
+            "test@example.com".into(),
+            7,
+            CollideOnceRegistry { save_calls: Mutex::new(0) },
+            NoopProvisioner,
+        );
+
+        // First save returns AlreadyExists; spawn must retry and succeed on the second attempt.
+        let result = gm.spawn(8080);
+        assert!(result.is_ok(), "spawn should succeed after retrying a slug collision");
     }
 }
