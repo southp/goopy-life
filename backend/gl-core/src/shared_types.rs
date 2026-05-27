@@ -71,6 +71,9 @@ pub enum Error {
     AlreadyExists,
     Config(String),
     Io(std::io::Error),
+    Registry(String),
+    SchemaMigration(String),
+    PortExhausted,
     Other(String),
 }
 
@@ -91,6 +94,9 @@ impl std::fmt::Display for Error {
             Error::AlreadyExists => write!(f, "already exists"),
             Error::Config(msg) => write!(f, "config error: {}", msg),
             Error::Io(e) => write!(f, "io error: {}", e),
+            Error::Registry(msg) => write!(f, "registry error: {}", msg),
+            Error::SchemaMigration(msg) => write!(f, "schema migration error: {}", msg),
+            Error::PortExhausted => write!(f, "port range exhausted"),
             Error::Other(msg) => write!(f, "{}", msg),
         }
     }
