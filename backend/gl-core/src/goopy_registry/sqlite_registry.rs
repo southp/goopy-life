@@ -115,7 +115,7 @@ impl GoopyRegistry for SqliteRegistry {
             Err(rusqlite::Error::SqliteFailure(err, _))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
-                tracing::error!(slug = %gp.slug, "save failed: already exists");
+                tracing::warn!(slug = %gp.slug, "save failed: already exists");
                 Err(Error::AlreadyExists)
             }
             Err(e) => {

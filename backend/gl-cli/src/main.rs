@@ -159,7 +159,7 @@ fn main() {
         }
     }
 
-    while jobs.iter().map(|job_id| gm.is_job_finished(job_id).unwrap()).any(|s| s == false) {
+    while jobs.iter().map(|job_id| gm.is_job_finished(job_id).unwrap()).any(|s| !s) {
         std::thread::sleep(Duration::from_secs(1));
     }
 
