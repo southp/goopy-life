@@ -2,7 +2,9 @@ use std::path::Path;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::params;
 
 use crate::goopy::Goopy;
 use crate::shared_types::*;
@@ -10,18 +12,35 @@ use super::GoopyRegistry;
 
 /// SQLite-backed implementation of [`GoopyRegistry`].
 ///
-/// The database is opened (or created) at `db_path`.  Pass `":memory:"` to get
-/// an in-process ephemeral store suitable for tests or the CLI sandbox mode.
+/// Uses an `r2d2` connection pool so multiple threads can hold separate read
+/// connections simultaneously while writes serialise at the SQLite WAL level.
+///
+/// Pass `":memory:"` as `db_path` to get an in-process ephemeral store
+/// suitable for tests (pool size is capped at 1 for in-memory databases).
 pub struct SqliteRegistry {
-    conn: std::sync::Mutex<Connection>,
+    pool: Pool<SqliteConnectionManager>,
 }
 
 impl SqliteRegistry {
-    /// Open (or create) the SQLite database at `db_path` and run the schema
-    /// migration to ensure the required tables exist.
+    /// Open (or create) the SQLite database at `db_path`, enable WAL mode,
+    /// and run the schema migration to ensure the required tables exist.
     pub fn new(db_path: &Path) -> Result<Self, Error> {
-        let conn = Connection::open(db_path)
-            .map_err(|e| Error::Registry(format!("sqlite open failed: {e}")))?;
+        let manager = SqliteConnectionManager::file(db_path);
+
+        // In-memory databases are per-connection, so cap at 1 to keep state
+        // consistent.  File-backed databases use WAL and can serve many readers.
+        let pool_size = if db_path == Path::new(":memory:") { 1 } else { 8 };
+
+        let pool = Pool::builder()
+            .max_size(pool_size)
+            .build(manager)
+            .map_err(|e| Error::Registry(format!("pool creation failed: {e}")))?;
+
+        let conn = pool.get()
+            .map_err(|e| Error::Registry(format!("initial connection failed: {e}")))?;
+
+        conn.execute_batch("PRAGMA journal_mode=WAL;")
+            .map_err(|e| Error::Registry(format!("WAL mode failed: {e}")))?;
 
         conn.execute_batch(
             "
@@ -44,9 +63,7 @@ impl SqliteRegistry {
         )
         .map_err(|e| Error::SchemaMigration(format!("schema creation failed: {e}")))?;
 
-        Ok(Self {
-            conn: std::sync::Mutex::new(conn),
-        })
+        Ok(Self { pool })
     }
 }
 
@@ -88,7 +105,8 @@ fn row_to_goopy(
 impl GoopyRegistry for SqliteRegistry {
     #[tracing::instrument(skip(self))]
     fn save(&self, gp: &Goopy) -> Result<(), Error> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get()
+            .map_err(|e| Error::Registry(format!("pool connection failed: {e}")))?;
 
         let result = conn.execute(
             "INSERT OR FAIL INTO goopies
@@ -127,7 +145,8 @@ impl GoopyRegistry for SqliteRegistry {
 
     #[tracing::instrument(skip(self))]
     fn load(&self, slug: &str) -> Result<Option<Goopy>, Error> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get()
+            .map_err(|e| Error::Registry(format!("pool connection failed: {e}")))?;
 
         let result = conn.query_row(
             "SELECT slug, life_in_days, created_at, status, working_dir,
@@ -161,7 +180,8 @@ impl GoopyRegistry for SqliteRegistry {
 
     #[tracing::instrument(skip(self))]
     fn update_status(&self, slug: &str, new_status: Status) -> Result<(), Error> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get()
+            .map_err(|e| Error::Registry(format!("pool connection failed: {e}")))?;
 
         let n = conn
             .execute(
@@ -181,7 +201,8 @@ impl GoopyRegistry for SqliteRegistry {
 
     #[tracing::instrument(skip(self))]
     fn delete(&self, slug: &str) -> Result<(), Error> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get()
+            .map_err(|e| Error::Registry(format!("pool connection failed: {e}")))?;
 
         let n = conn
             .execute("DELETE FROM goopies WHERE slug = ?1", params![slug])
@@ -198,7 +219,8 @@ impl GoopyRegistry for SqliteRegistry {
 
     #[tracing::instrument(skip(self))]
     fn list(&self) -> Result<Vec<Goopy>, Error> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get()
+            .map_err(|e| Error::Registry(format!("pool connection failed: {e}")))?;
 
         let mut stmt = conn
             .prepare(
@@ -234,14 +256,11 @@ impl GoopyRegistry for SqliteRegistry {
 
     #[tracing::instrument(skip(self))]
     fn acquire_port(&self, range_start: u32, range_end: u32) -> Result<u32, Error> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.pool.get()
+            .map_err(|e| Error::Registry(format!("pool connection failed: {e}")))?;
 
-        // SAFETY: `unchecked_transaction` is needed because the borrow checker cannot
-        // prove the MutexGuard-wrapped connection is unaliased, even though the Mutex
-        // guarantees exclusive access at runtime.  This is the canonical rusqlite
-        // pattern for transactions on a Mutex<Connection>.
         let tx = conn
-            .unchecked_transaction()
+            .transaction()
             .map_err(|e| Error::Registry(format!("transaction failed: {e}")))?;
 
         // O(n) scan across the range. Acceptable for ranges of a few hundred ports;
@@ -275,7 +294,8 @@ impl GoopyRegistry for SqliteRegistry {
 
     #[tracing::instrument(skip(self))]
     fn release_port(&self, port: u32) -> Result<(), Error> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.pool.get()
+            .map_err(|e| Error::Registry(format!("pool connection failed: {e}")))?;
 
         let n = conn
             .execute(
