@@ -50,23 +50,41 @@ where
     }
 
     #[tracing::instrument(skip(self))]
-    pub fn spawn(&mut self, slug: String, port: u32) -> Result<ThreadId, Error> {
-        if let Some(_) = self.get(&slug)? {
-            return Err(Error::AlreadyExists);
+    pub fn spawn(&mut self, port: u32) -> Result<(String, ThreadId), Error> {
+        const MAX_RETRIES: usize = 10;
+
+        let mut new_goopy = None;
+        for _ in 0..MAX_RETRIES {
+            let slug = crate::slug_generator::generate_slug();
+            let candidate = Goopy::new(
+                slug.clone(),
+                self.goopy_life_in_days,
+                Utc::now(),
+                &self.base_dir.join(&slug),
+                port,
+                Status::Spawning,
+                self.provisioner.kind(),
+                env!("CARGO_PKG_VERSION").to_string(),
+            )?;
+
+            match self.registry.save(&candidate) {
+                Ok(()) => {
+                    new_goopy = Some(candidate);
+                    break;
+                }
+                Err(Error::AlreadyExists) => {
+                    tracing::warn!(slug = %slug, "slug collision, retrying");
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
         }
 
-        let new_goopy = Goopy::new(
-            slug.clone(),
-            self.goopy_life_in_days,
-            Utc::now(),
-            &self.base_dir.join(&slug),
-            port,
-            Status::Spawning,
-            self.provisioner.kind(),
-            env!("CARGO_PKG_VERSION").to_string(),
-        )?;
+        let new_goopy = new_goopy.ok_or_else(|| {
+            Error::Other("slug generation failed: too many collisions".into())
+        })?;
 
-        self.registry.save(&new_goopy)?;
+        let slug = new_goopy.slug.clone();
 
         // now, spawn the job
         let registry = Arc::clone(&self.registry);
@@ -96,7 +114,7 @@ where
         let id = handle.thread().id();
         self.jobs.insert(id, handle);
 
-        Ok(id)
+        Ok((slug, id))
     }
 
     #[tracing::instrument(skip(self))]
