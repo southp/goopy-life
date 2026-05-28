@@ -21,7 +21,7 @@ impl SqliteRegistry {
     /// migration to ensure the required tables exist.
     pub fn new(db_path: &Path) -> Result<Self, Error> {
         let conn = Connection::open(db_path)
-            .map_err(|e| Error::Other(format!("sqlite open failed: {e}")))?;
+            .map_err(|e| Error::Registry(format!("sqlite open failed: {e}")))?;
 
         conn.execute_batch(
             "
@@ -42,7 +42,7 @@ impl SqliteRegistry {
             );
             ",
         )
-        .map_err(|e| Error::Other(format!("schema creation failed: {e}")))?;
+        .map_err(|e| Error::SchemaMigration(format!("schema creation failed: {e}")))?;
 
         Ok(Self {
             conn: std::sync::Mutex::new(conn),
@@ -115,12 +115,12 @@ impl GoopyRegistry for SqliteRegistry {
             Err(rusqlite::Error::SqliteFailure(err, _))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
-                tracing::error!(slug = %gp.slug, "save failed: already exists");
+                tracing::warn!(slug = %gp.slug, "save failed: already exists");
                 Err(Error::AlreadyExists)
             }
             Err(e) => {
                 tracing::error!(slug = %gp.slug, "save failed: {e}");
-                Err(Error::Other(format!("save failed: {e}")))
+                Err(Error::Registry(format!("save failed: {e}")))
             }
         }
     }
@@ -150,7 +150,7 @@ impl GoopyRegistry for SqliteRegistry {
 
         match result {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(Error::Other(format!("load failed: {e}"))),
+            Err(e) => Err(Error::Registry(format!("load failed: {e}"))),
             Ok((slug, life_in_days, created_at, status, working_dir, port, pk, sv)) => {
                 let gp = row_to_goopy(slug, life_in_days, created_at, status, working_dir, port, pk, sv)?;
                 tracing::debug!(slug = %gp.slug, "loaded goopy");
@@ -168,7 +168,7 @@ impl GoopyRegistry for SqliteRegistry {
                 "UPDATE goopies SET status = ?1 WHERE slug = ?2",
                 params![new_status.to_string(), slug],
             )
-            .map_err(|e| Error::Other(format!("update_status failed: {e}")))?;
+            .map_err(|e| Error::Registry(format!("update_status failed: {e}")))?;
 
         if n == 0 {
             tracing::error!(slug = %slug, "update_status: not found");
@@ -185,7 +185,7 @@ impl GoopyRegistry for SqliteRegistry {
 
         let n = conn
             .execute("DELETE FROM goopies WHERE slug = ?1", params![slug])
-            .map_err(|e| Error::Other(format!("delete failed: {e}")))?;
+            .map_err(|e| Error::Registry(format!("delete failed: {e}")))?;
 
         if n == 0 {
             tracing::error!(slug = %slug, "delete: not found");
@@ -206,7 +206,7 @@ impl GoopyRegistry for SqliteRegistry {
                         port, provisioner_kind, service_version
                  FROM goopies ORDER BY created_at",
             )
-            .map_err(|e| Error::Other(format!("prepare failed: {e}")))?;
+            .map_err(|e| Error::Registry(format!("prepare failed: {e}")))?;
 
         let goopies = stmt
             .query_map([], |row| {
@@ -221,10 +221,10 @@ impl GoopyRegistry for SqliteRegistry {
                     row.get::<_, String>("service_version")?,
                 ))
             })
-            .map_err(|e| Error::Other(format!("list query failed: {e}")))?
+            .map_err(|e| Error::Registry(format!("list query failed: {e}")))?
             .map(|r| {
                 let (slug, life_in_days, created_at, status, working_dir, port, pk, sv) =
-                    r.map_err(|e| Error::Other(format!("row error: {e}")))?;
+                    r.map_err(|e| Error::Registry(format!("row error: {e}")))?;
                 row_to_goopy(slug, life_in_days, created_at, status, working_dir, port, pk, sv)
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -242,7 +242,7 @@ impl GoopyRegistry for SqliteRegistry {
         // pattern for transactions on a Mutex<Connection>.
         let tx = conn
             .unchecked_transaction()
-            .map_err(|e| Error::Other(format!("transaction failed: {e}")))?;
+            .map_err(|e| Error::Registry(format!("transaction failed: {e}")))?;
 
         // O(n) scan across the range. Acceptable for ranges of a few hundred ports;
         // for larger ranges a single-query approach (SELECT MIN unused port) is preferable.
@@ -255,7 +255,7 @@ impl GoopyRegistry for SqliteRegistry {
             match result {
                 Ok(1) => {
                     tx.commit()
-                        .map_err(|e| Error::Other(format!("commit failed: {e}")))?;
+                        .map_err(|e| Error::Registry(format!("commit failed: {e}")))?;
                     tracing::debug!(port = port, "acquired port");
                     return Ok(port);
                 }
@@ -264,13 +264,13 @@ impl GoopyRegistry for SqliteRegistry {
                     continue;
                 }
                 Err(e) => {
-                    return Err(Error::Other(format!("acquire_port insert failed: {e}")));
+                    return Err(Error::Registry(format!("acquire_port insert failed: {e}")));
                 }
             }
         }
 
         tracing::error!("port range {range_start}..{range_end} exhausted");
-        Err(Error::Other("port range exhausted".into()))
+        Err(Error::PortExhausted)
     }
 
     #[tracing::instrument(skip(self))]
@@ -282,7 +282,7 @@ impl GoopyRegistry for SqliteRegistry {
                 "DELETE FROM allocated_ports WHERE port = ?1",
                 params![port as i64],
             )
-            .map_err(|e| Error::Other(format!("release_port failed: {e}")))?;
+            .map_err(|e| Error::Registry(format!("release_port failed: {e}")))?;
 
         if n == 0 {
             return Err(Error::NotFound);
@@ -408,7 +408,7 @@ mod tests {
         r.acquire_port(9100, 9102).unwrap();
         r.acquire_port(9100, 9102).unwrap();
         let err = r.acquire_port(9100, 9102).unwrap_err();
-        assert!(matches!(err, Error::Other(_)));
+        assert!(matches!(err, Error::PortExhausted));
     }
 
     #[test]
