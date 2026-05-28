@@ -99,8 +99,7 @@ fn main() {
 
                 match gm.spawn() {
                     Ok((slug, port, job_id)) => {
-                        spinner.set_message(format!("Spawning {slug} ..."));
-                        println!("spawned: {slug} (port {port})");
+                        spinner.set_message(format!("Spawning {slug} (port {port}) ..."));
                         jobs.push(job_id);
                     }
                     Err(e) => {

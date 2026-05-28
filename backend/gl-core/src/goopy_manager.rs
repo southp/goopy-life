@@ -170,6 +170,10 @@ where
                 Err(err) => {
                     tracing::error!("deprovisioning for goopy: {} failed: {:?}", goopy_clone.slug, err);
 
+                    // Intentionally not calling release_port here: the port stays
+                    // reserved so the stuck goopy remains visible for investigation.
+                    // The operator can retry `despawn` once the underlying issue is
+                    // resolved, which will release the port on success.
                     if let Err(e) = registry.update_status(&goopy_clone.slug, Status::Failed)
                     {
                         tracing::error!("despawning: update {} error: {:?}", goopy_clone.slug, e);
