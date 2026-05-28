@@ -56,7 +56,7 @@ where
     }
 
     #[tracing::instrument(skip(self))]
-    pub fn spawn(&mut self) -> Result<(String, ThreadId), Error> {
+    pub fn spawn(&mut self) -> Result<(String, u32, ThreadId), Error> {
         const MAX_RETRIES: usize = 10;
 
         let port = self.registry.acquire_port(self.port_range_start, self.port_range_end)?;
@@ -85,14 +85,18 @@ where
                     continue;
                 }
                 Err(e) => {
-                    let _ = self.registry.release_port(port);
+                    if let Err(rel_err) = self.registry.release_port(port) {
+                        tracing::error!("spawn: release port {} error: {:?}", port, rel_err);
+                    }
                     return Err(e);
                 }
             }
         }
 
         let Some(new_goopy) = new_goopy else {
-            let _ = self.registry.release_port(port);
+            if let Err(e) = self.registry.release_port(port) {
+                tracing::error!("spawn: release port {} error: {:?}", port, e);
+            }
             return Err(Error::Other("slug generation failed: too many collisions".into()));
         };
 
@@ -115,6 +119,9 @@ where
                 Err(err) => {
                     tracing::error!("provisioning for goopy: {} failed: {:?}", goopy_clone.slug, err);
 
+                    if let Err(e) = registry.release_port(port) {
+                        tracing::error!("spawn: release port {} error: {:?}", port, e);
+                    }
                     if let Err(e) = registry.update_status(&goopy_clone.slug, Status::Failed)
                     {
                         tracing::error!("spawning: update {} error: {:?}", goopy_clone.slug, e);
@@ -126,7 +133,7 @@ where
         let id = handle.thread().id();
         self.jobs.insert(id, handle);
 
-        Ok((slug, id))
+        Ok((slug, port, id))
     }
 
     #[tracing::instrument(skip(self))]

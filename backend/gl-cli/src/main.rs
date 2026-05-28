@@ -69,6 +69,7 @@ fn main() {
             "config file not found: {}; using ./registry.db",
             cli.config.display()
         );
+        // Dev-fallback port range: 50000–51000 (1000 ports for local testing)
         (PathBuf::from("./registry.db"), PathBuf::from("./test-temp"), 50000, 51000)
     };
 
@@ -97,9 +98,9 @@ fn main() {
                 spinner.enable_steady_tick(Duration::from_millis(100));
 
                 match gm.spawn() {
-                    Ok((slug, job_id)) => {
+                    Ok((slug, port, job_id)) => {
                         spinner.set_message(format!("Spawning {slug} ..."));
-                        println!("spawned: {slug}");
+                        println!("spawned: {slug} (port {port})");
                         jobs.push(job_id);
                     }
                     Err(e) => {
