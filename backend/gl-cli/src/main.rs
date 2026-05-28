@@ -53,11 +53,11 @@ fn main() {
 
     let cli = Cli::parse();
 
-    let (db_path, base_dir) = if cli.config.exists() {
+    let (db_path, base_dir, port_range_start, port_range_end) = if cli.config.exists() {
         match gl_core::Config::from_file(&cli.config) {
             Ok(cfg) => {
                 tracing::info!("loaded config from {}", cli.config.display());
-                (cfg.registry.path, cfg.base_dir)
+                (cfg.registry.path, cfg.base_dir, cfg.port_range_start, cfg.port_range_end)
             }
             Err(e) => {
                 tracing::error!("Error loading config: {}", e);
@@ -69,7 +69,8 @@ fn main() {
             "config file not found: {}; using ./registry.db",
             cli.config.display()
         );
-        (PathBuf::from("./registry.db"), PathBuf::from("./test-temp"))
+        // Dev-fallback port range: 50000–51000 (1000 ports for local testing)
+        (PathBuf::from("./registry.db"), PathBuf::from("./test-temp"), 50000, 51000)
     };
 
     let registry = SqliteRegistry::new(&db_path)
@@ -80,6 +81,8 @@ fn main() {
         "localhost".into(),
         "bar@example.com".into(),
         32,
+        port_range_start,
+        port_range_end,
         registry,
         GhostLocalProvisioner::new(),
     );
@@ -89,17 +92,14 @@ fn main() {
 
     match cli.command {
         Cmd::Spawn { count } => {
-            let port_base = 50000;
-
-            for i in 0..count {
+            for _ in 0..count {
                 let spinner = mp.add(ProgressBar::new_spinner());
                 spinner.set_message("Spawning ...".to_string());
                 spinner.enable_steady_tick(Duration::from_millis(100));
 
-                match gm.spawn(port_base + i) {
-                    Ok((slug, job_id)) => {
-                        spinner.set_message(format!("Spawning {slug} ..."));
-                        println!("spawned: {slug}");
+                match gm.spawn() {
+                    Ok((slug, port, job_id)) => {
+                        spinner.set_message(format!("Spawning {slug} (port {port}) ..."));
                         jobs.push(job_id);
                     }
                     Err(e) => {
