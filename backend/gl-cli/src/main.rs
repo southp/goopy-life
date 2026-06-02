@@ -1,10 +1,10 @@
-use gl_core::*;
+use clap::{Parser, Subcommand};
+use gl_core::goopy_provisioner::hello_provisioner::HelloProvisioner;
 use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
-use gl_core::goopy_provisioner::ghost_local_provisioner::GhostLocalProvisioner;
+use gl_core::*;
 use indicatif::{MultiProgress, ProgressBar};
 use std::path::PathBuf;
 use std::time::Duration;
-use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "Goopy-Life CLI")]
@@ -53,11 +53,31 @@ fn main() {
 
     let cli = Cli::parse();
 
-    let (db_path, base_dir, port_range_start, port_range_end) = if cli.config.exists() {
+    let (
+        db_path,
+        base_dir,
+        domain,
+        ssl_email,
+        life_in_days,
+        port_range_start,
+        port_range_end,
+        dev_mode,
+        allocator_cfg,
+    ) = if cli.config.exists() {
         match gl_core::Config::from_file(&cli.config) {
             Ok(cfg) => {
                 tracing::info!("loaded config from {}", cli.config.display());
-                (cfg.registry.path, cfg.base_dir, cfg.port_range_start, cfg.port_range_end)
+                (
+                    cfg.registry.path,
+                    cfg.base_dir,
+                    cfg.domain,
+                    cfg.ssl_email,
+                    cfg.life_in_days,
+                    cfg.port_range_start,
+                    cfg.port_range_end,
+                    cfg.dev_mode,
+                    cfg.allocator,
+                )
             }
             Err(e) => {
                 tracing::error!("Error loading config: {}", e);
@@ -69,22 +89,43 @@ fn main() {
             "config file not found: {}; using ./registry.db",
             cli.config.display()
         );
-        // Dev-fallback port range: 50000–51000 (1000 ports for local testing)
-        (PathBuf::from("./registry.db"), PathBuf::from("./test-temp"), 50000, 51000)
+        // Dev-fallback values
+        (
+            PathBuf::from("./registry.db"),
+            PathBuf::from("./test-temp"),
+            "localhost".to_string(),
+            "dev@example.com".to_string(),
+            32,
+            50000,
+            51000,
+            true,
+            gl_core::config::AllocatorConfig {
+                pool: String::new(),
+                quota_mb: 0,
+            },
+        )
     };
+
+    let storage: Box<dyn gl_core::StorageAllocator> = if dev_mode {
+        Box::new(PlainDirAllocator)
+    } else {
+        Box::new(gl_core::ZfsAllocator::new(allocator_cfg.pool, allocator_cfg.quota_mb))
+    };
+
+    let provisioner = HelloProvisioner::new(domain.clone(), dev_mode, storage);
 
     let registry = SqliteRegistry::new(&db_path)
         .expect("failed to open SQLite registry");
 
     let mut gm = GoopyManager::new(
         base_dir,
-        "localhost".into(),
-        "bar@example.com".into(),
-        32,
+        domain,
+        ssl_email,
+        life_in_days,
         port_range_start,
         port_range_end,
         registry,
-        GhostLocalProvisioner::new(),
+        provisioner,
     );
     let mp = MultiProgress::new();
     let mut spinners = vec![];

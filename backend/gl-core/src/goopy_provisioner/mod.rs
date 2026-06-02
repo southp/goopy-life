@@ -1,4 +1,5 @@
 pub mod ghost_local_provisioner;
+pub mod hello_provisioner;
 
 use crate::Goopy;
 use crate::shared_types::*;
