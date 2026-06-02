@@ -74,8 +74,8 @@ pub enum Error {
     /// General database operation failure (connection open, DML, etc.).
     /// `SchemaMigration` covers only DDL executed in `new()`; all other
     /// `SqliteRegistry` errors map here.
-    Registry(String),
-    SchemaMigration(String),
+    Registry(Box<dyn std::error::Error + Send + Sync>),
+    SchemaMigration(rusqlite::Error),
     PortExhausted,
     Other(String),
 }
@@ -84,6 +84,8 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Error::Io(e) => Some(e),
+            Error::Registry(e) => Some(e.as_ref()),
+            Error::SchemaMigration(e) => Some(e),
             _ => None,
         }
     }
@@ -97,8 +99,8 @@ impl std::fmt::Display for Error {
             Error::AlreadyExists => write!(f, "already exists"),
             Error::Config(msg) => write!(f, "config error: {}", msg),
             Error::Io(e) => write!(f, "io error: {}", e),
-            Error::Registry(msg) => write!(f, "registry error: {}", msg),
-            Error::SchemaMigration(msg) => write!(f, "schema migration error: {}", msg),
+            Error::Registry(e) => write!(f, "registry error: {}", e),
+            Error::SchemaMigration(e) => write!(f, "schema migration error: {}", e),
             Error::PortExhausted => write!(f, "port range exhausted"),
             Error::Other(msg) => write!(f, "{}", msg),
         }

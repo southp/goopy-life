@@ -40,19 +40,19 @@ impl SqliteRegistry {
         let pool = Pool::builder()
             .max_size(pool_size)
             .build(manager)
-            .map_err(|e| Error::Registry(format!("pool creation failed: {e}")))?;
+            .map_err(|e| Error::Registry(Box::new(e)))?;
 
         let conn = pool.get()
-            .map_err(|e| Error::Registry(format!("initial connection failed: {e}")))?;
+            .map_err(|e| Error::Registry(Box::new(e)))?;
 
         if !is_memory {
             let mode: String = conn
                 .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
-                .map_err(|e| Error::Registry(format!("WAL mode failed: {e}")))?;
+                .map_err(|e| Error::Registry(Box::new(e)))?;
             if mode != "wal" {
-                return Err(Error::Registry(format!(
-                    "WAL mode not available (got: {mode})"
-                )));
+                return Err(Error::Registry(
+                    format!("WAL mode not available (got: {mode})").into(),
+                ));
             }
         }
 
@@ -75,7 +75,7 @@ impl SqliteRegistry {
             );
             ",
         )
-        .map_err(|e| Error::SchemaMigration(format!("schema creation failed: {e}")))?;
+        .map_err(Error::SchemaMigration)?;
 
         Ok(Self { pool })
     }
@@ -120,7 +120,7 @@ impl GoopyRegistry for SqliteRegistry {
     #[tracing::instrument(skip(self))]
     fn save(&self, gp: &Goopy) -> Result<(), Error> {
         let conn = self.pool.get()
-            .map_err(|e| Error::Registry(format!("pool connection failed: {e}")))?;
+            .map_err(|e| Error::Registry(Box::new(e)))?;
 
         let result = conn.execute(
             "INSERT OR FAIL INTO goopies
@@ -152,7 +152,7 @@ impl GoopyRegistry for SqliteRegistry {
             }
             Err(e) => {
                 tracing::error!(slug = %gp.slug, "save failed: {e}");
-                Err(Error::Registry(format!("save failed: {e}")))
+                Err(Error::Registry(Box::new(e)))
             }
         }
     }
@@ -160,7 +160,7 @@ impl GoopyRegistry for SqliteRegistry {
     #[tracing::instrument(skip(self))]
     fn load(&self, slug: &str) -> Result<Option<Goopy>, Error> {
         let conn = self.pool.get()
-            .map_err(|e| Error::Registry(format!("pool connection failed: {e}")))?;
+            .map_err(|e| Error::Registry(Box::new(e)))?;
 
         let result = conn.query_row(
             "SELECT slug, life_in_days, created_at, status, working_dir,
@@ -183,7 +183,7 @@ impl GoopyRegistry for SqliteRegistry {
 
         match result {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(Error::Registry(format!("load failed: {e}"))),
+            Err(e) => Err(Error::Registry(Box::new(e))),
             Ok((slug, life_in_days, created_at, status, working_dir, port, pk, sv)) => {
                 let gp = row_to_goopy(slug, life_in_days, created_at, status, working_dir, port, pk, sv)?;
                 tracing::debug!(slug = %gp.slug, "loaded goopy");
@@ -195,14 +195,14 @@ impl GoopyRegistry for SqliteRegistry {
     #[tracing::instrument(skip(self))]
     fn update_status(&self, slug: &str, new_status: Status) -> Result<(), Error> {
         let conn = self.pool.get()
-            .map_err(|e| Error::Registry(format!("pool connection failed: {e}")))?;
+            .map_err(|e| Error::Registry(Box::new(e)))?;
 
         let n = conn
             .execute(
                 "UPDATE goopies SET status = ?1 WHERE slug = ?2",
                 params![new_status.to_string(), slug],
             )
-            .map_err(|e| Error::Registry(format!("update_status failed: {e}")))?;
+            .map_err(|e| Error::Registry(Box::new(e)))?;
 
         if n == 0 {
             tracing::error!(slug = %slug, "update_status: not found");
@@ -216,11 +216,11 @@ impl GoopyRegistry for SqliteRegistry {
     #[tracing::instrument(skip(self))]
     fn delete(&self, slug: &str) -> Result<(), Error> {
         let conn = self.pool.get()
-            .map_err(|e| Error::Registry(format!("pool connection failed: {e}")))?;
+            .map_err(|e| Error::Registry(Box::new(e)))?;
 
         let n = conn
             .execute("DELETE FROM goopies WHERE slug = ?1", params![slug])
-            .map_err(|e| Error::Registry(format!("delete failed: {e}")))?;
+            .map_err(|e| Error::Registry(Box::new(e)))?;
 
         if n == 0 {
             tracing::error!(slug = %slug, "delete: not found");
@@ -234,7 +234,7 @@ impl GoopyRegistry for SqliteRegistry {
     #[tracing::instrument(skip(self))]
     fn list(&self) -> Result<Vec<Goopy>, Error> {
         let conn = self.pool.get()
-            .map_err(|e| Error::Registry(format!("pool connection failed: {e}")))?;
+            .map_err(|e| Error::Registry(Box::new(e)))?;
 
         let mut stmt = conn
             .prepare(
@@ -242,7 +242,7 @@ impl GoopyRegistry for SqliteRegistry {
                         port, provisioner_kind, service_version
                  FROM goopies ORDER BY created_at",
             )
-            .map_err(|e| Error::Registry(format!("prepare failed: {e}")))?;
+            .map_err(|e| Error::Registry(Box::new(e)))?;
 
         let goopies = stmt
             .query_map([], |row| {
@@ -257,10 +257,10 @@ impl GoopyRegistry for SqliteRegistry {
                     row.get::<_, String>("service_version")?,
                 ))
             })
-            .map_err(|e| Error::Registry(format!("list query failed: {e}")))?
+            .map_err(|e| Error::Registry(Box::new(e)))?
             .map(|r| {
                 let (slug, life_in_days, created_at, status, working_dir, port, pk, sv) =
-                    r.map_err(|e| Error::Registry(format!("row error: {e}")))?;
+                    r.map_err(|e| Error::Registry(Box::new(e)))?;
                 row_to_goopy(slug, life_in_days, created_at, status, working_dir, port, pk, sv)
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -271,11 +271,11 @@ impl GoopyRegistry for SqliteRegistry {
     #[tracing::instrument(skip(self))]
     fn acquire_port(&self, range_start: u32, range_end: u32) -> Result<u32, Error> {
         let mut conn = self.pool.get()
-            .map_err(|e| Error::Registry(format!("pool connection failed: {e}")))?;
+            .map_err(|e| Error::Registry(Box::new(e)))?;
 
         let tx = conn
             .transaction()
-            .map_err(|e| Error::Registry(format!("transaction failed: {e}")))?;
+            .map_err(|e| Error::Registry(Box::new(e)))?;
 
         // O(n) scan across the range. Acceptable for ranges of a few hundred ports;
         // for larger ranges a single-query approach (SELECT MIN unused port) is preferable.
@@ -288,7 +288,7 @@ impl GoopyRegistry for SqliteRegistry {
             match result {
                 Ok(1) => {
                     tx.commit()
-                        .map_err(|e| Error::Registry(format!("commit failed: {e}")))?;
+                        .map_err(|e| Error::Registry(Box::new(e)))?;
                     tracing::debug!(port = port, "acquired port");
                     return Ok(port);
                 }
@@ -297,7 +297,7 @@ impl GoopyRegistry for SqliteRegistry {
                     continue;
                 }
                 Err(e) => {
-                    return Err(Error::Registry(format!("acquire_port insert failed: {e}")));
+                    return Err(Error::Registry(Box::new(e)));
                 }
             }
         }
@@ -309,14 +309,14 @@ impl GoopyRegistry for SqliteRegistry {
     #[tracing::instrument(skip(self))]
     fn release_port(&self, port: u32) -> Result<(), Error> {
         let conn = self.pool.get()
-            .map_err(|e| Error::Registry(format!("pool connection failed: {e}")))?;
+            .map_err(|e| Error::Registry(Box::new(e)))?;
 
         let n = conn
             .execute(
                 "DELETE FROM allocated_ports WHERE port = ?1",
                 params![port as i64],
             )
-            .map_err(|e| Error::Registry(format!("release_port failed: {e}")))?;
+            .map_err(|e| Error::Registry(Box::new(e)))?;
 
         if n == 0 {
             return Err(Error::NotFound);
