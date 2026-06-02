@@ -39,7 +39,7 @@ impl GoopyProvisioner for GhostLocalProvisioner {
                 if cmd.status.success() {
                     return Ok(());
                 } else {
-                    return Err(Error::Other(format!("stderr: {}", String::from_utf8_lossy(&cmd.stderr))));
+                    return Err(Error::Subprocess(format!("stderr: {}", String::from_utf8_lossy(&cmd.stderr))));
                 }
             },
             Err(err) => {
@@ -60,7 +60,7 @@ impl GoopyProvisioner for GhostLocalProvisioner {
                 if cmd.status.success() {
                     return Ok(());
                 } else {
-                    return Err(Error::Other(format!("stderr: {}", String::from_utf8_lossy(&cmd.stderr))));
+                    return Err(Error::Subprocess(format!("stderr: {}", String::from_utf8_lossy(&cmd.stderr))));
 
                 }
             }

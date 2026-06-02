@@ -29,12 +29,12 @@ impl SysRunner for RealSysRunner {
         let output = Command::new(program)
             .args(args)
             .output()
-            .map_err(|e| Error::Other(format!("failed to run {program}: {e}")))?;
+            .map_err(Error::Io)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             error!(program, %stderr, "command failed");
-            return Err(Error::Other(format!(
+            return Err(Error::Subprocess(format!(
                 "{program} failed (exit {}): {}",
                 output.status,
                 stderr.trim()
@@ -50,21 +50,19 @@ impl SysRunner for RealSysRunner {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .spawn()
-            .map_err(|e| Error::Other(format!("failed to spawn sudo tee: {e}")))?;
+            .map_err(Error::Io)?;
 
         child
             .stdin
             .take()
-            .ok_or_else(|| Error::Other("sudo tee stdin not available".to_string()))?
+            .ok_or_else(|| Error::Subprocess("sudo tee stdin not available".to_string()))?
             .write_all(content.as_bytes())
-            .map_err(|e| Error::Other(format!("failed to write to sudo tee stdin: {e}")))?;
+            .map_err(Error::Io)?;
 
-        let status = child
-            .wait()
-            .map_err(|e| Error::Other(format!("sudo tee wait failed: {e}")))?;
+        let status = child.wait().map_err(Error::Io)?;
 
         if !status.success() {
-            return Err(Error::Other(format!(
+            return Err(Error::Subprocess(format!(
                 "sudo tee {path} exited with status {status}"
             )));
         }

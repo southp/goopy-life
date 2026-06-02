@@ -27,7 +27,7 @@ impl StorageAllocator for ZfsAllocator {
     fn allocate(&self, path: &Path) -> Result<(), Error> {
         let slug = path
             .file_name()
-            .ok_or_else(|| Error::Other(format!("path has no final component: {}", path.display())))?
+            .ok_or(Error::Invalid)?
             .to_string_lossy()
             .into_owned();
         let dataset = format!("{}/{}", self.pool, slug);
@@ -40,7 +40,7 @@ impl StorageAllocator for ZfsAllocator {
             .args(["create", "-o", &quota_arg, "-o", &mountpoint_arg, &dataset])
             .env("LC_ALL", "C")
             .output()
-            .map_err(|e| Error::Other(format!("failed to run zfs create: {}", e)))?;
+            .map_err(Error::Io)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -49,7 +49,7 @@ impl StorageAllocator for ZfsAllocator {
                 return Ok(());
             }
             error!(%dataset, %stderr, "zfs create failed");
-            return Err(Error::Other(format!(
+            return Err(Error::Subprocess(format!(
                 "zfs create failed for dataset '{}' (exit status: {}): {}",
                 dataset, output.status, stderr.trim()
             )));
@@ -63,7 +63,7 @@ impl StorageAllocator for ZfsAllocator {
     fn release(&self, path: &Path) -> Result<(), Error> {
         let slug = path
             .file_name()
-            .ok_or_else(|| Error::Other(format!("path has no final component: {}", path.display())))?
+            .ok_or(Error::Invalid)?
             .to_string_lossy()
             .into_owned();
         let dataset = format!("{}/{}", self.pool, slug);
@@ -74,7 +74,7 @@ impl StorageAllocator for ZfsAllocator {
             .args(["destroy", &dataset])
             .env("LC_ALL", "C")
             .output()
-            .map_err(|e| Error::Other(format!("failed to run zfs destroy: {}", e)))?;
+            .map_err(Error::Io)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -83,7 +83,7 @@ impl StorageAllocator for ZfsAllocator {
                 return Ok(());
             }
             error!(%dataset, %stderr, "zfs destroy failed");
-            return Err(Error::Other(format!(
+            return Err(Error::Subprocess(format!(
                 "zfs destroy failed for dataset '{}' (exit status: {}): {}",
                 dataset, output.status, stderr.trim()
             )));

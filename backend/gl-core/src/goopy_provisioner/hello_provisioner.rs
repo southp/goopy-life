@@ -194,12 +194,8 @@ server {{
         };
         let pid = pid_str.trim();
 
-        if pid.is_empty() {
-            return Err(Error::Other("PID file is empty".to_string()));
-        }
-
-        if !pid.chars().all(|c| c.is_ascii_digit()) {
-            return Err(Error::Other(format!("invalid PID in file: {pid:?}")));
+        if pid.is_empty() || !pid.chars().all(|c| c.is_ascii_digit()) {
+            return Err(Error::Invalid);
         }
 
         info!(%pid, "killing dev server");
@@ -240,8 +236,7 @@ fn spawn_detached(
     working_dir: &Path,
     log_path: &Path,
 ) -> Result<u32, Error> {
-    let log_file = std::fs::File::create(log_path)
-        .map_err(|e| Error::Other(format!("failed to create log file: {e}")))?;
+    let log_file = std::fs::File::create(log_path).map_err(Error::Io)?;
 
     let mut cmd = std::process::Command::new(program);
     cmd.args(args)
@@ -249,9 +244,7 @@ fn spawn_detached(
         .stdout(std::process::Stdio::null())
         .stderr(log_file);
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| Error::Other(format!("failed to spawn {program}: {e}")))?;
+    let mut child = cmd.spawn().map_err(Error::Io)?;
 
     // Give the process a moment to start up (or crash).
     // 200 ms gives the process time to crash on import errors; well-behaved servers start in < 50 ms on this hardware.
@@ -261,7 +254,7 @@ fn spawn_detached(
     match child.try_wait() {
         Ok(Some(status)) => {
             let log = std::fs::read_to_string(log_path).unwrap_or_default();
-            Err(Error::Other(format!(
+            Err(Error::Subprocess(format!(
                 "{program} exited immediately (status {status})\n{log}"
             )))
         }
@@ -271,7 +264,7 @@ fn spawn_detached(
             std::mem::forget(child);
             Ok(pid)
         }
-        Err(e) => Err(Error::Other(format!("failed to check {program} status: {e}"))),
+        Err(e) => Err(Error::Io(e)),
     }
 }
 
@@ -279,13 +272,13 @@ fn kill_pid(pid: &str) -> Result<(), Error> {
     let out = std::process::Command::new("kill")
         .args([pid.trim()])
         .output()
-        .map_err(|e| Error::Other(format!("kill failed to execute: {e}")))?;
+        .map_err(Error::Io)?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         if stderr.contains("No such process") {
             debug!(%pid, "process already gone");
         } else {
-            return Err(Error::Other(format!("kill {pid}: {}", stderr.trim())));
+            return Err(Error::Subprocess(format!("kill {pid}: {}", stderr.trim())));
         }
     }
     Ok(())

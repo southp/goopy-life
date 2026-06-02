@@ -97,7 +97,7 @@ where
             if let Err(e) = self.registry.release_port(port) {
                 tracing::error!("spawn: release port {} error: {:?}", port, e);
             }
-            return Err(Error::Other("slug generation failed: too many collisions".into()));
+            return Err(Error::SlugExhausted);
         };
 
         let slug = new_goopy.slug.clone();
