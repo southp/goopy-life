@@ -4,6 +4,7 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::OptionalExtension;
 use rusqlite::params;
 
 use crate::goopy::Goopy;
@@ -65,7 +66,7 @@ impl SqliteRegistry {
                 created_at       TEXT    NOT NULL,
                 status           TEXT    NOT NULL,
                 working_dir      TEXT    NOT NULL,
-                port             INTEGER NOT NULL,
+                port             INTEGER NOT NULL UNIQUE,
                 provisioner_kind TEXT    NOT NULL,
                 service_version  TEXT    NOT NULL
             );
@@ -270,40 +271,42 @@ impl GoopyRegistry for SqliteRegistry {
 
     #[tracing::instrument(skip(self))]
     fn acquire_port(&self, range_start: u32, range_end: u32) -> Result<u32, Error> {
-        let mut conn = self.pool.get()
+        let conn = self.pool.get()
             .map_err(|e| Error::Registry(format!("pool connection failed: {e}")))?;
 
-        let tx = conn
-            .transaction()
-            .map_err(|e| Error::Registry(format!("transaction failed: {e}")))?;
+        // Single atomic statement: a recursive CTE generates every candidate port
+        // in [range_start, range_end), then INSERT … RETURNING picks the lowest
+        // one not yet present in allocated_ports.
+        let port: Option<i64> = conn
+            .query_row(
+                "INSERT INTO allocated_ports (port)
+                 SELECT port FROM (
+                     WITH RECURSIVE candidates(port) AS (
+                         SELECT ?1
+                         UNION ALL
+                         SELECT port + 1 FROM candidates WHERE port + 1 < ?2
+                     )
+                     SELECT port FROM candidates
+                     WHERE port NOT IN (SELECT port FROM allocated_ports)
+                     LIMIT 1
+                 )
+                 RETURNING port",
+                params![range_start as i64, range_end as i64],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| Error::Registry(format!("acquire_port failed: {e}")))?;
 
-        // O(n) scan across the range. Acceptable for ranges of a few hundred ports;
-        // for larger ranges a single-query approach (SELECT MIN unused port) is preferable.
-        for port in range_start..range_end {
-            let result = tx.execute(
-                "INSERT OR IGNORE INTO allocated_ports (port) VALUES (?1)",
-                params![port as i64],
-            );
-
-            match result {
-                Ok(1) => {
-                    tx.commit()
-                        .map_err(|e| Error::Registry(format!("commit failed: {e}")))?;
-                    tracing::debug!(port = port, "acquired port");
-                    return Ok(port);
-                }
-                Ok(_) => {
-                    // Row already existed (OR IGNORE silently skipped it)
-                    continue;
-                }
-                Err(e) => {
-                    return Err(Error::Registry(format!("acquire_port insert failed: {e}")));
-                }
+        match port {
+            Some(p) => {
+                tracing::debug!(port = p, "acquired port");
+                Ok(p as u32)
+            }
+            None => {
+                tracing::error!("port range {range_start}..{range_end} exhausted");
+                Err(Error::PortExhausted)
             }
         }
-
-        tracing::error!("port range {range_start}..{range_end} exhausted");
-        Err(Error::PortExhausted)
     }
 
     #[tracing::instrument(skip(self))]
@@ -414,11 +417,25 @@ mod tests {
         assert!(matches!(err, Error::NotFound));
     }
 
+    fn make_goopy_on_port(slug: &str, port: u32) -> Goopy {
+        Goopy::new(
+            slug.to_string(),
+            7,
+            chrono::Utc::now(),
+            &PathBuf::from(format!("/tmp/{slug}")),
+            port,
+            Status::Spawning,
+            ProvisionerKind::Ghost,
+            "0.1.0".to_string(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn list() {
         let r = registry();
-        r.save(&make_goopy("alpha")).unwrap();
-        r.save(&make_goopy("beta")).unwrap();
+        r.save(&make_goopy_on_port("alpha", 8080)).unwrap();
+        r.save(&make_goopy_on_port("beta", 8081)).unwrap();
         let goopies = r.list().unwrap();
         assert_eq!(goopies.len(), 2);
         let slugs: Vec<&str> = goopies.iter().map(|g| g.slug.as_str()).collect();
