@@ -3,7 +3,7 @@ use crate::goopy_provisioner::*;
 use crate::goopy_registry::*;
 use crate::shared_types::*;
 
-use chrono::Utc;
+use chrono::{self, Utc};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -196,6 +196,47 @@ where
         self.registry.list()
     }
 
+    /// Despawn all expired goopy instances.
+    ///
+    /// An instance is considered expired when `now > created_at + life_in_days`.
+    /// Only instances with status `Done` or `Failed` are swept; those still
+    /// `Spawning` or `Despawning` are left alone to avoid interfering with
+    /// in-progress operations.
+    ///
+    /// Meant to be called periodically (e.g. via `tokio::time::interval` in
+    /// `gl-serv`).
+    #[tracing::instrument(skip(self))]
+    pub fn sweep(&mut self) -> Result<u32, Error> {
+        let now = Utc::now();
+        let goopies = self.list()?;
+        let mut swept = 0u32;
+
+        for gp in goopies {
+            if gp.status == Status::Spawning || gp.status == Status::Despawning {
+                continue;
+            }
+
+            let expires_at = gp.created_at + chrono::Duration::days(gp.life_in_days as i64);
+            if now > expires_at {
+                tracing::info!(
+                    slug = %gp.slug,
+                    status = %gp.status,
+                    expired_at = %expires_at,
+                    "sweeping expired instance"
+                );
+                match self.despawn(gp.slug) {
+                    Ok(_) => swept += 1,
+                    Err(e) => {
+                        tracing::error!(error = %e, "sweep: despawn failed, skipping");
+                    }
+                }
+            }
+        }
+
+        tracing::info!(swept, "sweep complete");
+        Ok(swept)
+    }
+
     pub fn is_job_finished(&self, job_id: &ThreadId) -> bool {
         self.jobs
             .get(job_id)
@@ -272,5 +313,159 @@ mod tests {
         // First save returns AlreadyExists; spawn must retry and succeed on the second attempt.
         let result = gm.spawn();
         assert!(result.is_ok(), "spawn should succeed after retrying a slug collision");
+    }
+
+    #[test]
+    fn sweep_removes_expired_instances() {
+        use crate::goopy_registry::sqlite_registry::SqliteRegistry;
+        use std::path::Path;
+
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+
+        // Insert an expired goopy: created 10 days ago, lives 7 days
+        let expired = Goopy::new(
+            "expired-slug".to_string(),
+            7,
+            Utc::now() - chrono::Duration::days(10),
+            &PathBuf::from("/tmp/expired-slug"),
+            9000,
+            Status::Done,
+            ProvisionerKind::Hello,
+            "0.1.0".to_string(),
+        )
+        .unwrap();
+        registry.save(&expired).unwrap();
+        registry.acquire_port(9000, 9001).unwrap();
+
+        // Insert a non-expired goopy: created now, lives 7 days
+        let alive = Goopy::new(
+            "alive-slug".to_string(),
+            7,
+            Utc::now(),
+            &PathBuf::from("/tmp/alive-slug"),
+            9001,
+            Status::Done,
+            ProvisionerKind::Hello,
+            "0.1.0".to_string(),
+        )
+        .unwrap();
+        registry.save(&alive).unwrap();
+        registry.acquire_port(9001, 9002).unwrap();
+
+        let mut gm = GoopyManager::new(
+            PathBuf::from("/tmp"),
+            "test.example".into(),
+            "test@example.com".into(),
+            7,
+            9000,
+            9100,
+            registry,
+            NoopProvisioner,
+        );
+
+        let swept = gm.sweep().unwrap();
+        assert_eq!(swept, 1);
+
+        // Wait for the despawn background thread to finish
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Expired should be gone
+        assert!(gm.get("expired-slug").unwrap().is_none());
+        // Alive should remain
+        assert!(gm.get("alive-slug").unwrap().is_some());
+    }
+
+    #[test]
+    fn sweep_skips_in_progress_instances() {
+        use crate::goopy_registry::sqlite_registry::SqliteRegistry;
+        use std::path::Path;
+
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+
+        // Insert an expired goopy with Spawning status — should be skipped
+        let spawning = Goopy::new(
+            "spawning-slug".to_string(),
+            7,
+            Utc::now() - chrono::Duration::days(10),
+            &PathBuf::from("/tmp/spawning-slug"),
+            9000,
+            Status::Spawning,
+            ProvisionerKind::Hello,
+            "0.1.0".to_string(),
+        )
+        .unwrap();
+        registry.save(&spawning).unwrap();
+        registry.acquire_port(9000, 9001).unwrap();
+
+        // Insert an expired goopy with Despawning status — should be skipped
+        let despawning = Goopy::new(
+            "despawning-slug".to_string(),
+            7,
+            Utc::now() - chrono::Duration::days(10),
+            &PathBuf::from("/tmp/despawning-slug"),
+            9001,
+            Status::Despawning,
+            ProvisionerKind::Hello,
+            "0.1.0".to_string(),
+        )
+        .unwrap();
+        registry.save(&despawning).unwrap();
+        registry.acquire_port(9001, 9002).unwrap();
+
+        let mut gm = GoopyManager::new(
+            PathBuf::from("/tmp"),
+            "test.example".into(),
+            "test@example.com".into(),
+            7,
+            9000,
+            9100,
+            registry,
+            NoopProvisioner,
+        );
+
+        let swept = gm.sweep().unwrap();
+        assert_eq!(swept, 0);
+
+        // Both should still exist
+        assert!(gm.get("spawning-slug").unwrap().is_some());
+        assert!(gm.get("despawning-slug").unwrap().is_some());
+    }
+
+    #[test]
+    fn sweep_no_expired_instances() {
+        use crate::goopy_registry::sqlite_registry::SqliteRegistry;
+        use std::path::Path;
+
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+
+        // Insert a non-expired goopy
+        let alive = Goopy::new(
+            "fresh-slug".to_string(),
+            7,
+            Utc::now(),
+            &PathBuf::from("/tmp/fresh-slug"),
+            9000,
+            Status::Done,
+            ProvisionerKind::Hello,
+            "0.1.0".to_string(),
+        )
+        .unwrap();
+        registry.save(&alive).unwrap();
+        registry.acquire_port(9000, 9001).unwrap();
+
+        let mut gm = GoopyManager::new(
+            PathBuf::from("/tmp"),
+            "test.example".into(),
+            "test@example.com".into(),
+            7,
+            9000,
+            9100,
+            registry,
+            NoopProvisioner,
+        );
+
+        let swept = gm.sweep().unwrap();
+        assert_eq!(swept, 0);
+        assert!(gm.get("fresh-slug").unwrap().is_some());
     }
 }
