@@ -25,11 +25,17 @@ impl SqliteRegistry {
     /// Open (or create) the SQLite database at `db_path`, enable WAL mode,
     /// and run the schema migration to ensure the required tables exist.
     pub fn new(db_path: &Path) -> Result<Self, Error> {
-        let manager = SqliteConnectionManager::file(db_path);
+        let is_memory = db_path == Path::new(":memory:");
 
-        // In-memory databases are per-connection, so cap at 1 to keep state
-        // consistent.  File-backed databases use WAL and can serve many readers.
-        let pool_size = if db_path == Path::new(":memory:") { 1 } else { 8 };
+        let manager = SqliteConnectionManager::file(db_path)
+            .with_init(|conn| {
+                conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
+                Ok(())
+            });
+
+        // Only the literal ":memory:" path is recognised as in-memory; URI-form
+        // in-memory databases (file::memory:?cache=shared) are not supported.
+        let pool_size = if is_memory { 1 } else { 8 };
 
         let pool = Pool::builder()
             .max_size(pool_size)
@@ -39,8 +45,16 @@ impl SqliteRegistry {
         let conn = pool.get()
             .map_err(|e| Error::Registry(format!("initial connection failed: {e}")))?;
 
-        conn.execute_batch("PRAGMA journal_mode=WAL;")
-            .map_err(|e| Error::Registry(format!("WAL mode failed: {e}")))?;
+        if !is_memory {
+            let mode: String = conn
+                .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+                .map_err(|e| Error::Registry(format!("WAL mode failed: {e}")))?;
+            if mode != "wal" {
+                return Err(Error::Registry(format!(
+                    "WAL mode not available (got: {mode})"
+                )));
+            }
+        }
 
         conn.execute_batch(
             "
