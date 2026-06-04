@@ -1,0 +1,23 @@
+# gl-cli example configuration — dev mode out of the box
+#
+# Copy this file to config.toml and adjust as needed.
+# Run the CLI without --prod to stay in dev mode (safe default).
+
+base_dir        = "./test-temp"
+domain          = "localhost"
+ssl_email       = "dev@example.com"
+life_in_days    = 7
+provisioner_kind = "Hello"
+port_range_start = 50000
+port_range_end   = 51000
+dev_mode        = true        # ignored by CLI; use --prod flag to switch
+cors_origin     = "http://localhost:3000"
+bind_address    = "127.0.0.1:8080"
+
+[registry]
+path = "./registry.db"
+
+[allocator]
+# Only used in production mode (--prod). Ignored in dev mode.
+pool     = ""
+quota_mb = 0

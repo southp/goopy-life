@@ -1,9 +1,10 @@
 use clap::{Parser, Subcommand};
 use gl_core::goopy_provisioner::hello_provisioner::HelloProvisioner;
 use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
+use gl_core::sys_utils::{DryRunSysRunner, RealSysRunner};
 use gl_core::*;
 use indicatif::{MultiProgress, ProgressBar};
-use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Parser)]
@@ -14,6 +15,17 @@ struct Cli {
     /// Path to the config file
     #[arg(long, default_value = "./config.toml")]
     config: std::path::PathBuf,
+
+    /// Use production mode (default: dev mode)
+    ///
+    /// Without this flag the CLI always operates in dev mode regardless of
+    /// what `dev_mode` is set to in config.toml.
+    #[arg(long)]
+    prod: bool,
+
+    /// Print privileged commands without executing them
+    #[arg(long)]
+    dry_run: bool,
 
     #[command(subcommand)]
     command: Cmd,
@@ -34,12 +46,12 @@ enum Cmd {
     },
     /// List all the available goopies
     List {},
-    /// Allocate storage at the given path (PlainDirAllocator smoke test)
+    /// Allocate storage at the given path using the configured allocator
     Alloc {
         #[arg(long)]
         path: std::path::PathBuf,
     },
-    /// Release storage at the given path (PlainDirAllocator smoke test)
+    /// Release storage at the given path using the configured allocator
     Dealloc {
         #[arg(long)]
         path: std::path::PathBuf,
@@ -53,77 +65,78 @@ fn main() {
 
     let cli = Cli::parse();
 
-    let (
-        db_path,
-        base_dir,
-        domain,
-        ssl_email,
-        life_in_days,
-        port_range_start,
-        port_range_end,
-        dev_mode,
-        allocator_cfg,
-    ) = if cli.config.exists() {
-        match gl_core::Config::from_file(&cli.config) {
-            Ok(cfg) => {
-                tracing::info!("loaded config from {}", cli.config.display());
-                (
-                    cfg.registry.path,
-                    cfg.base_dir,
-                    cfg.domain,
-                    cfg.ssl_email,
-                    cfg.life_in_days,
-                    cfg.port_range_start,
-                    cfg.port_range_end,
-                    cfg.dev_mode,
-                    cfg.allocator,
-                )
-            }
-            Err(e) => {
-                tracing::error!("Error loading config: {}", e);
-                std::process::exit(1);
-            }
-        }
-    } else {
-        tracing::warn!(
-            "config file not found: {}; using ./registry.db",
+    // Config file is required — no silent fallback.
+    if !cli.config.exists() {
+        eprintln!(
+            "error: config file not found: {}\n\
+             Copy config.toml.example and adjust it to get started.",
             cli.config.display()
         );
-        // Dev-fallback values
-        (
-            PathBuf::from("./registry.db"),
-            PathBuf::from("./test-temp"),
-            "localhost".to_string(),
-            "dev@example.com".to_string(),
-            32,
-            50000,
-            51000,
-            true,
-            gl_core::config::AllocatorConfig {
-                pool: String::new(),
-                quota_mb: 0,
-            },
-        )
+        std::process::exit(1);
+    }
+
+    let cfg = match gl_core::Config::from_file(&cli.config) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: failed to load config from {}: {e}", cli.config.display());
+            std::process::exit(1);
+        }
     };
 
-    let storage: Box<dyn gl_core::StorageAllocator> = if dev_mode {
-        Box::new(PlainDirAllocator)
+    // Only HelloProvisioner is implemented in this CLI; Ghost is still a stub.
+    if cfg.provisioner_kind != ProvisionerKind::Hello {
+        eprintln!(
+            "error: unsupported provisioner_kind '{}'. Only 'Hello' is supported by this CLI.",
+            cfg.provisioner_kind
+        );
+        std::process::exit(1);
+    }
+
+    // --prod overrides config; absent → dev mode (safe default).
+    let dev_mode = !cli.prod;
+
+    tracing::info!(
+        config = %cli.config.display(),
+        db = %cfg.registry.path.display(),
+        base_dir = %cfg.base_dir.display(),
+        domain = %cfg.domain,
+        life_in_days = cfg.life_in_days,
+        port_range_start = cfg.port_range_start,
+        port_range_end = cfg.port_range_end,
+        dev_mode,
+        dry_run = cli.dry_run,
+        "configuration loaded"
+    );
+
+    let storage: Arc<dyn StorageAllocator> = if dev_mode {
+        Arc::new(PlainDirAllocator)
     } else {
-        Box::new(gl_core::ZfsAllocator::new(allocator_cfg.pool, allocator_cfg.quota_mb))
+        Arc::new(ZfsAllocator::new(cfg.allocator.pool, cfg.allocator.quota_mb))
     };
 
-    let provisioner = HelloProvisioner::new(domain.clone(), dev_mode, storage);
+    let sys: Arc<dyn SysRunner> = if cli.dry_run {
+        Arc::new(DryRunSysRunner)
+    } else {
+        Arc::new(RealSysRunner)
+    };
 
-    let registry = SqliteRegistry::new(&db_path)
+    let provisioner = HelloProvisioner::new(
+        cfg.domain.clone(),
+        dev_mode,
+        Arc::clone(&storage),
+        sys,
+    );
+
+    let registry = SqliteRegistry::new(&cfg.registry.path)
         .expect("failed to open SQLite registry");
 
     let mut gm = GoopyManager::new(
-        base_dir,
-        domain,
-        ssl_email,
-        life_in_days,
-        port_range_start,
-        port_range_end,
+        cfg.base_dir,
+        cfg.domain,
+        cfg.ssl_email,
+        cfg.life_in_days,
+        cfg.port_range_start,
+        cfg.port_range_end,
         registry,
         provisioner,
     );
@@ -168,19 +181,19 @@ fn main() {
             }
         }
         Cmd::Alloc { path } => {
-            match PlainDirAllocator.allocate(&path) {
+            match storage.allocate(&path) {
                 Ok(()) => println!("allocated: {}", path.display()),
                 Err(e) => {
-                    eprintln!("alloc failed: {}", e);
+                    eprintln!("alloc failed: {e}");
                     std::process::exit(1);
                 }
             }
         }
         Cmd::Dealloc { path } => {
-            match PlainDirAllocator.release(&path) {
+            match storage.release(&path) {
                 Ok(()) => println!("released: {}", path.display()),
                 Err(e) => {
-                    eprintln!("dealloc failed: {}", e);
+                    eprintln!("dealloc failed: {e}");
                     std::process::exit(1);
                 }
             }
