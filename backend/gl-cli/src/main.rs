@@ -83,10 +83,11 @@ fn main() {
         }
     };
 
-    // Only HelloProvisioner is implemented in this CLI; Ghost is still a stub.
+    // Only HelloProvisioner is wired up in this CLI.
     if cfg.provisioner_kind != ProvisionerKind::Hello {
         eprintln!(
-            "error: unsupported provisioner_kind '{}'. Only 'Hello' is supported by this CLI.",
+            "error: unsupported provisioner_kind '{}'. \
+             'GhostLocal' requires the ghost CLI and is not yet wired up in this binary.",
             cfg.provisioner_kind
         );
         std::process::exit(1);
@@ -95,17 +96,16 @@ fn main() {
     // --prod overrides config; absent → dev mode (safe default).
     let dev_mode = !cli.prod;
 
-    tracing::info!(
-        config = %cli.config.display(),
-        db = %cfg.registry.path.display(),
-        base_dir = %cfg.base_dir.display(),
-        domain = %cfg.domain,
-        life_in_days = cfg.life_in_days,
-        port_range_start = cfg.port_range_start,
-        port_range_end = cfg.port_range_end,
-        dev_mode,
-        dry_run = cli.dry_run,
-        "configuration loaded"
+    println!(
+        "Config: {}\n  db:         {}\n  base_dir:   {}\n  domain:     {}\n  port range: {}–{}\n  mode:       {}\n  dry_run:    {}",
+        cli.config.display(),
+        cfg.registry.path.display(),
+        cfg.base_dir.display(),
+        cfg.domain,
+        cfg.port_range_start,
+        cfg.port_range_end,
+        if dev_mode { "dev" } else { "production" },
+        cli.dry_run,
     );
 
     let storage: Arc<dyn StorageAllocator> = if dev_mode {
@@ -184,7 +184,7 @@ fn main() {
             match storage.allocate(&path) {
                 Ok(()) => println!("allocated: {}", path.display()),
                 Err(e) => {
-                    eprintln!("alloc failed: {e}");
+                    tracing::error!(error = %e, "alloc failed");
                     std::process::exit(1);
                 }
             }
@@ -193,7 +193,7 @@ fn main() {
             match storage.release(&path) {
                 Ok(()) => println!("released: {}", path.display()),
                 Err(e) => {
-                    eprintln!("dealloc failed: {e}");
+                    tracing::error!(error = %e, "dealloc failed");
                     std::process::exit(1);
                 }
             }

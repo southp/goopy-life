@@ -1,10 +1,8 @@
 use std::fs;
-use std::os::unix::process::CommandExt as _;
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 
-use tracing::{debug, info, instrument};
+use tracing::{info, instrument};
 
 use super::GoopyProvisioner;
 use crate::shared_types::*;
@@ -77,7 +75,7 @@ Description=Goopy Hello - {slug}
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/python3 {working_dir}/server.py
+ExecStart=/usr/bin/python3 "{working_dir}/server.py"
 Restart=on-failure
 WorkingDirectory={working_dir}
 
@@ -191,56 +189,16 @@ server {{
 
     // ── Dev-mode helpers ────────────────────────────────────────────────
 
-    fn spawn_dev_server(working_dir: &Path) -> Result<(), Error> {
+    fn spawn_dev_server(&self, working_dir: &Path) -> Result<(), Error> {
         info!(working_dir = %working_dir.display(), "spawning dev server");
-
-        // Redirect stderr to server.log so startup errors are preserved for inspection.
         let log_path = working_dir.join("server.log");
-        let log_file = std::fs::File::create(&log_path)
-            .map_err(|e| Error::Other(format!("failed to create server.log: {e}")))?;
-
-        // Pass "server.py" as a bare name: python3's CWD is set to working_dir
-        // by .current_dir(), so the path resolves correctly even when working_dir
-        // is relative (passing working_dir.join("server.py") would be re-resolved
-        // relative to python3's own CWD and produce a wrong double-segment path).
-        let mut child = Command::new("python3")
-            .arg("server.py")
-            .current_dir(working_dir)
-            .process_group(0)
-            .stdout(std::process::Stdio::null())
-            .stderr(log_file)
-            .spawn()
-            .map_err(|e| Error::Other(format!("failed to spawn python3: {e}")))?;
-
-        // Give python3 a moment to start up (or crash).
-        std::thread::sleep(std::time::Duration::from_millis(200));
-
-        // Check for an immediate exit — python3 binds its port synchronously, so
-        // any startup error (script not found, port in use, syntax error) surfaces
-        // well within 200 ms.
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let log = fs::read_to_string(&log_path).unwrap_or_default();
-                return Err(Error::Other(format!(
-                    "python3 exited immediately (status {status})\n{log}"
-                )));
-            }
-            Ok(None) => {} // still running — good
-            Err(e) => {
-                return Err(Error::Other(format!("failed to check python3 status: {e}")));
-            }
-        }
-
-        let pid = child.id();
-        // Detach: forget the Child so that Drop does not wait on the process.
-        std::mem::forget(child);
-
+        let pid = self.sys.spawn_detached("python3", &["server.py"], working_dir, &log_path)?;
         let pid_path = working_dir.join("server.pid");
         info!(%pid, pid_path = %pid_path.display(), "writing PID file");
         fs::write(&pid_path, pid.to_string()).map_err(Error::Io)
     }
 
-    fn kill_dev_server(working_dir: &Path) -> Result<(), Error> {
+    fn kill_dev_server(&self, working_dir: &Path) -> Result<(), Error> {
         let pid_path = working_dir.join("server.pid");
         if !pid_path.exists() {
             info!(pid_path = %pid_path.display(), "no PID file found, nothing to kill");
@@ -250,23 +208,34 @@ server {{
         let pid_str = fs::read_to_string(&pid_path).map_err(Error::Io)?;
         let pid = pid_str.trim();
 
+        if pid.is_empty() {
+            return Err(Error::Other("PID file is empty".to_string()));
+        }
+
         if !pid.chars().all(|c| c.is_ascii_digit()) {
             return Err(Error::Other(format!("invalid PID in file: {pid:?}")));
         }
 
         info!(%pid, "killing dev server");
-
-        // kill may fail if the process already exited — that is fine.
-        match Command::new("kill").args([pid]).output() {
-            Ok(out) if !out.status.success() => {
-                debug!(%pid, status = %out.status, "kill returned non-zero (process may have already exited)");
-            }
-            Err(e) => {
-                debug!(%pid, error = %e, "kill command failed to execute");
-            }
-            _ => {}
-        }
+        self.sys.kill_pid(pid)?;
         let _ = fs::remove_file(&pid_path);
+        Ok(())
+    }
+
+    // ── Inner provision (post-allocate steps) ───────────────────────────
+
+    fn provision_inner(&self, goopy: &Goopy) -> Result<(), Error> {
+        Self::write_server_script(&goopy.working_dir, &goopy.slug, goopy.port)?;
+
+        if self.dev_mode {
+            self.spawn_dev_server(&goopy.working_dir)?;
+        } else {
+            self.write_service_file(&goopy.slug, &goopy.working_dir)?;
+            self.enable_service(&goopy.slug)?;
+            self.write_nginx_config(&goopy.slug, &self.domain, goopy.port)?;
+            self.enable_nginx_site(&goopy.slug)?;
+            self.reload_nginx()?;
+        }
         Ok(())
     }
 }
@@ -281,19 +250,10 @@ impl GoopyProvisioner for HelloProvisioner {
         // Step 1: allocate storage
         self.storage.allocate(&goopy.working_dir)?;
 
-        // Step 2: write the Python server script
-        Self::write_server_script(&goopy.working_dir, &goopy.slug, goopy.port)?;
-
-        if self.dev_mode {
-            // Dev mode: just spawn the process and record PID
-            Self::spawn_dev_server(&goopy.working_dir)?;
-        } else {
-            // Production mode: systemd + nginx
-            self.write_service_file(&goopy.slug, &goopy.working_dir)?;
-            self.enable_service(&goopy.slug)?;
-            self.write_nginx_config(&goopy.slug, &self.domain, goopy.port)?;
-            self.enable_nginx_site(&goopy.slug)?;
-            self.reload_nginx()?;
+        // Step 2: all post-allocate steps; release storage on failure (C1)
+        if let Err(e) = self.provision_inner(goopy) {
+            let _ = self.storage.release(&goopy.working_dir);
+            return Err(e);
         }
 
         info!(slug = %goopy.slug, "provisioning complete");
@@ -303,7 +263,7 @@ impl GoopyProvisioner for HelloProvisioner {
     #[instrument(skip(self), fields(slug = %goopy.slug, dev_mode = self.dev_mode))]
     fn deprovision(&self, goopy: &Goopy) -> Result<(), Error> {
         if self.dev_mode {
-            Self::kill_dev_server(&goopy.working_dir)?;
+            self.kill_dev_server(&goopy.working_dir)?;
         } else {
             // Production: tear down in reverse order
             self.stop_service(&goopy.slug)?;
@@ -398,7 +358,7 @@ mod tests {
 
         // Clean up the spawned process
         let pid = fs::read_to_string(&pid_path).unwrap();
-        let _ = Command::new("kill").args([pid.trim()]).output();
+        let _ = std::process::Command::new("kill").args([pid.trim()]).output();
     }
 
     /// Verifies that `deprovision` in dev mode removes the working directory.

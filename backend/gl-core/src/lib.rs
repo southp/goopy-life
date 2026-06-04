@@ -14,4 +14,6 @@ pub use shared_types::*;
 pub use goopy_manager::*;
 pub use slug_generator::generate_slug;
 pub use storage_allocator::{StorageAllocator, ZfsAllocator, PlainDirAllocator};
-pub use sys_utils::{SysRunner, RealSysRunner, DryRunSysRunner, MockSysRunner};
+pub use sys_utils::{SysRunner, RealSysRunner, DryRunSysRunner};
+#[cfg(any(test, feature = "test-utils"))]
+pub use sys_utils::{MockSysRunner, MockCall};
