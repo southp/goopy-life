@@ -121,11 +121,11 @@ server {{
 
     // ── Helpers: file writing ───────────────────────────────────────────
 
-    fn write_server_script(working_dir: &Path, slug: &str, port: u32) -> Result<(), Error> {
+    fn write_server_script(&self, working_dir: &Path, slug: &str, port: u32) -> Result<(), Error> {
         let content = Self::render_server_py(slug, port);
         let path = working_dir.join("server.py");
         info!(path = %path.display(), "writing server.py");
-        fs::write(&path, content).map_err(Error::Io)
+        self.sys.write(&path, &content)
     }
 
     // ── Production provisioning steps ───────────────────────────────────
@@ -200,12 +200,14 @@ server {{
 
     fn kill_dev_server(&self, working_dir: &Path) -> Result<(), Error> {
         let pid_path = working_dir.join("server.pid");
-        if !pid_path.exists() {
-            info!(pid_path = %pid_path.display(), "no PID file found, nothing to kill");
-            return Ok(());
-        }
-
-        let pid_str = fs::read_to_string(&pid_path).map_err(Error::Io)?;
+        let pid_str = match fs::read_to_string(&pid_path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                info!(pid_path = %pid_path.display(), "no PID file found, nothing to kill");
+                return Ok(());
+            }
+            Err(e) => return Err(Error::Io(e)),
+        };
         let pid = pid_str.trim();
 
         if pid.is_empty() {
@@ -218,14 +220,13 @@ server {{
 
         info!(%pid, "killing dev server");
         self.sys.kill_pid(pid)?;
-        fs::remove_file(&pid_path).map_err(Error::Io)?;
-        Ok(())
+        self.sys.remove_file(&pid_path)
     }
 
     // ── Inner provision (post-allocate steps) ───────────────────────────
 
     fn provision_inner(&self, goopy: &Goopy) -> Result<(), Error> {
-        Self::write_server_script(&goopy.working_dir, &goopy.slug, goopy.port)?;
+        self.write_server_script(&goopy.working_dir, &goopy.slug, goopy.port)?;
 
         if self.dev_mode {
             self.spawn_dev_server(&goopy.working_dir)?;
@@ -268,7 +269,9 @@ impl GoopyProvisioner for HelloProvisioner {
             self.stop_service(&goopy.slug)
                 .and_then(|_| self.remove_nginx_site(&goopy.slug))
         };
-        let _ = self.storage.release(&goopy.working_dir);
+        if let Err(e) = self.storage.release(&goopy.working_dir) {
+            tracing::warn!(error = %e, slug = %goopy.slug, "storage release failed during deprovision");
+        }
         result?;
         info!(slug = %goopy.slug, "deprovisioning complete");
         Ok(())

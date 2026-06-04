@@ -58,7 +58,7 @@ impl std::str::FromStr for ProvisionerKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "Hello" => Ok(ProvisionerKind::Hello),
-            "GhostLocal" => Ok(ProvisionerKind::GhostLocal),
+            "GhostLocal" | "Ghost" => Ok(ProvisionerKind::GhostLocal),
             _ => Err(Error::Invalid),
         }
     }

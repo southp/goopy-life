@@ -85,15 +85,6 @@ fn main() {
         }
     };
 
-    // Only HelloProvisioner is wired up in this CLI.
-    if cfg.provisioner_kind != ProvisionerKind::Hello {
-        tracing::error!(
-            provisioner_kind = %cfg.provisioner_kind,
-            "unsupported provisioner_kind; 'GhostLocal' requires the ghost CLI and is not yet wired up in this binary"
-        );
-        std::process::exit(1);
-    }
-
     // --prod overrides config; absent → dev mode (safe default).
     let dev_mode = !cli.prod;
     if cfg.dev_mode != dev_mode {
@@ -128,66 +119,7 @@ fn main() {
         Arc::new(RealSysRunner)
     };
 
-    let provisioner = HelloProvisioner::new(
-        cfg.domain.clone(),
-        dev_mode,
-        Arc::clone(&storage),
-        sys,
-    );
-
-    let registry = SqliteRegistry::new(&cfg.registry.path)
-        .expect("failed to open SQLite registry");
-
-    let mut gm = GoopyManager::new(
-        cfg.base_dir,
-        cfg.domain,
-        cfg.ssl_email,
-        cfg.life_in_days,
-        cfg.port_range_start,
-        cfg.port_range_end,
-        registry,
-        provisioner,
-    );
-    let mp = MultiProgress::new();
-    let mut spinners = vec![];
-    let mut jobs = vec![];
-
     match cli.command {
-        Cmd::Spawn { count } => {
-            for _ in 0..count {
-                let spinner = mp.add(ProgressBar::new_spinner());
-                spinner.set_message("Spawning ...".to_string());
-                spinner.enable_steady_tick(Duration::from_millis(100));
-
-                match gm.spawn() {
-                    Ok((slug, port, job_id)) => {
-                        spinner.set_message(format!("Spawning {slug} (port {port}) ..."));
-                        jobs.push(job_id);
-                    }
-                    Err(e) => {
-                        println!("Spawn failed: {:?}", e);
-                        spinner.finish_with_message(format!("Failed due to: {:?}", e));
-                    }
-                }
-                spinners.push(spinner);
-            }
-        }
-        Cmd::Despawn { slugs } => {
-            for s in slugs.iter() {
-                let spinner = mp.add(ProgressBar::new_spinner());
-                spinner.set_message(format!("Despawning {} ...", s));
-                spinner.enable_steady_tick(Duration::from_millis(100));
-
-                match gm.despawn(s.to_string()) {
-                    Ok(job_id) => jobs.push(job_id),
-                    Err(e) => {
-                        println!("Despawn failed: {:?}", e);
-                        std::process::exit(1);
-                    }
-                }
-                spinners.push(spinner);
-            }
-        }
         Cmd::Alloc { path } => {
             match storage.allocate(&path) {
                 Ok(()) => println!("allocated: {}", path.display()),
@@ -206,24 +138,97 @@ fn main() {
                 }
             }
         }
-        Cmd::List {} => {
-            match gm.list() {
-                Ok(goopies) => {
-                    for gp in goopies {
-                        println!("{:?}", gp);
+        cmd => {
+            // Spawn, Despawn, List — all require HelloProvisioner/GoopyManager.
+            if cfg.provisioner_kind != ProvisionerKind::Hello {
+                tracing::error!(
+                    provisioner_kind = %cfg.provisioner_kind,
+                    "unsupported provisioner_kind; 'GhostLocal' requires the ghost CLI and is not yet wired up in this binary"
+                );
+                std::process::exit(1);
+            }
+
+            let provisioner = HelloProvisioner::new(
+                cfg.domain.clone(),
+                dev_mode,
+                Arc::clone(&storage),
+                sys,
+            );
+
+            let registry = SqliteRegistry::new(&cfg.registry.path)
+                .expect("failed to open SQLite registry");
+
+            let mut gm = GoopyManager::new(
+                cfg.base_dir,
+                cfg.domain,
+                cfg.ssl_email,
+                cfg.life_in_days,
+                cfg.port_range_start,
+                cfg.port_range_end,
+                registry,
+                provisioner,
+            );
+            let mp = MultiProgress::new();
+            let mut spinners = vec![];
+            let mut jobs = vec![];
+
+            match cmd {
+                Cmd::Spawn { count } => {
+                    for _ in 0..count {
+                        let spinner = mp.add(ProgressBar::new_spinner());
+                        spinner.set_message("Spawning ...".to_string());
+                        spinner.enable_steady_tick(Duration::from_millis(100));
+
+                        match gm.spawn() {
+                            Ok((slug, port, job_id)) => {
+                                spinner.set_message(format!("Spawning {slug} (port {port}) ..."));
+                                jobs.push(job_id);
+                            }
+                            Err(e) => {
+                                println!("Spawn failed: {:?}", e);
+                                spinner.finish_with_message(format!("Failed due to: {:?}", e));
+                            }
+                        }
+                        spinners.push(spinner);
                     }
                 }
-                Err(e) => {
-                    println!("List failed: {:?}", e);
-                    std::process::exit(1);
+                Cmd::Despawn { slugs } => {
+                    for s in slugs.iter() {
+                        let spinner = mp.add(ProgressBar::new_spinner());
+                        spinner.set_message(format!("Despawning {} ...", s));
+                        spinner.enable_steady_tick(Duration::from_millis(100));
+
+                        match gm.despawn(s.to_string()) {
+                            Ok(job_id) => jobs.push(job_id),
+                            Err(e) => {
+                                println!("Despawn failed: {:?}", e);
+                                std::process::exit(1);
+                            }
+                        }
+                        spinners.push(spinner);
+                    }
                 }
+                Cmd::List {} => {
+                    match gm.list() {
+                        Ok(goopies) => {
+                            for gp in goopies {
+                                println!("{:?}", gp);
+                            }
+                        }
+                        Err(e) => {
+                            println!("List failed: {:?}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                _ => unreachable!(),
             }
+
+            while jobs.iter().map(|job_id| gm.is_job_finished(job_id).unwrap()).any(|s| !s) {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+
+            spinners.iter().for_each(|s| s.finish_with_message(format!("{} done!", s.message())));
         }
     }
-
-    while jobs.iter().map(|job_id| gm.is_job_finished(job_id).unwrap()).any(|s| !s) {
-        std::thread::sleep(Duration::from_secs(1));
-    }
-
-    spinners.iter().for_each(|s| s.finish_with_message(format!("{} done!", s.message())));
 }

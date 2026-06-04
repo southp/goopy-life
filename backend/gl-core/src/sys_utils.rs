@@ -31,6 +31,8 @@ pub trait SysRunner: Send + Sync {
     ) -> Result<u32, Error>;
     /// Write `content` to `path`. Intercepted by `DryRunSysRunner`.
     fn write(&self, path: &Path, content: &str) -> Result<(), Error>;
+    /// Remove `path`. Intercepted by `DryRunSysRunner`.
+    fn remove_file(&self, path: &Path) -> Result<(), Error>;
     /// Send SIGTERM to the process with the given string PID.
     /// Returns `Ok` if the process was signalled or was already gone (ESRCH).
     /// Returns `Err` if the `kill` binary itself could not be executed.
@@ -143,6 +145,10 @@ impl SysRunner for RealSysRunner {
         std::fs::write(path, content).map_err(Error::Io)
     }
 
+    fn remove_file(&self, path: &Path) -> Result<(), Error> {
+        std::fs::remove_file(path).map_err(Error::Io)
+    }
+
     fn kill_pid(&self, pid: &str) -> Result<(), Error> {
         match Command::new("kill").args([pid]).output() {
             Ok(out) if !out.status.success() => {
@@ -194,6 +200,11 @@ impl SysRunner for DryRunSysRunner {
         Ok(())
     }
 
+    fn remove_file(&self, path: &Path) -> Result<(), Error> {
+        println!("[dry-run] would remove: {}", path.display());
+        Ok(())
+    }
+
     fn kill_pid(&self, pid: &str) -> Result<(), Error> {
         println!("[dry-run] would kill PID {pid}");
         Ok(())
@@ -229,6 +240,9 @@ pub enum MockCall {
     Write {
         path: std::path::PathBuf,
         content: String,
+    },
+    RemoveFile {
+        path: std::path::PathBuf,
     },
     KillPid {
         pid: String,
@@ -295,6 +309,14 @@ impl SysRunner for MockSysRunner {
             path: path.to_path_buf(),
             content: content.to_string(),
         });
+        Ok(())
+    }
+
+    fn remove_file(&self, path: &Path) -> Result<(), Error> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(MockCall::RemoveFile { path: path.to_path_buf() });
         Ok(())
     }
 
