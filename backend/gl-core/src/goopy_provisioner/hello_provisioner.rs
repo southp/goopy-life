@@ -192,11 +192,14 @@ server {{
     // ── Dev-mode helpers ────────────────────────────────────────────────
 
     fn spawn_dev_server(working_dir: &Path) -> Result<(), Error> {
-        let script = working_dir.join("server.py");
-        info!(script = %script.display(), "spawning dev server");
+        info!(working_dir = %working_dir.display(), "spawning dev server");
 
+        // Pass "server.py" as a bare name: python3's CWD is set to working_dir
+        // by .current_dir(), so the path resolves correctly even when working_dir
+        // is relative (passing working_dir.join("server.py") would be re-resolved
+        // relative to python3's own CWD and produce a wrong double-segment path).
         let child = Command::new("python3")
-            .args([script.to_string_lossy().as_ref()])
+            .arg("server.py")
             .current_dir(working_dir)
             .process_group(0)
             .stdout(std::process::Stdio::null())
