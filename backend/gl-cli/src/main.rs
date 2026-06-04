@@ -60,17 +60,19 @@ enum Cmd {
 
 fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
         .init();
 
     let cli = Cli::parse();
 
     // Config file is required — no silent fallback.
     if !cli.config.exists() {
-        eprintln!(
-            "error: config file not found: {}\n\
-             Copy config.toml.example and adjust it to get started.",
-            cli.config.display()
+        tracing::error!(
+            path = %cli.config.display(),
+            "config file not found; copy config.toml.example and adjust it to get started"
         );
         std::process::exit(1);
     }
@@ -78,23 +80,29 @@ fn main() {
     let cfg = match gl_core::Config::from_file(&cli.config) {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("error: failed to load config from {}: {e}", cli.config.display());
+            tracing::error!(error = %e, path = %cli.config.display(), "failed to load config");
             std::process::exit(1);
         }
     };
 
     // Only HelloProvisioner is wired up in this CLI.
     if cfg.provisioner_kind != ProvisionerKind::Hello {
-        eprintln!(
-            "error: unsupported provisioner_kind '{}'. \
-             'GhostLocal' requires the ghost CLI and is not yet wired up in this binary.",
-            cfg.provisioner_kind
+        tracing::error!(
+            provisioner_kind = %cfg.provisioner_kind,
+            "unsupported provisioner_kind; 'GhostLocal' requires the ghost CLI and is not yet wired up in this binary"
         );
         std::process::exit(1);
     }
 
     // --prod overrides config; absent → dev mode (safe default).
     let dev_mode = !cli.prod;
+    if cfg.dev_mode != dev_mode {
+        tracing::warn!(
+            config_dev_mode = cfg.dev_mode,
+            effective_dev_mode = dev_mode,
+            "config.toml dev_mode differs from effective mode; pass --prod to enable production mode"
+        );
+    }
 
     println!(
         "Config: {}\n  db:         {}\n  base_dir:   {}\n  domain:     {}\n  port range: {}–{}\n  mode:       {}\n  dry_run:    {}",

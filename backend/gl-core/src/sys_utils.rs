@@ -29,6 +29,8 @@ pub trait SysRunner: Send + Sync {
         working_dir: &Path,
         log_path: &Path,
     ) -> Result<u32, Error>;
+    /// Write `content` to `path`. Intercepted by `DryRunSysRunner`.
+    fn write(&self, path: &Path, content: &str) -> Result<(), Error>;
     /// Send SIGTERM to the process with the given string PID.
     /// Returns `Ok` if the process was signalled or was already gone (ESRCH).
     /// Returns `Err` if the `kill` binary itself could not be executed.
@@ -137,6 +139,10 @@ impl SysRunner for RealSysRunner {
         Ok(pid)
     }
 
+    fn write(&self, path: &Path, content: &str) -> Result<(), Error> {
+        std::fs::write(path, content).map_err(Error::Io)
+    }
+
     fn kill_pid(&self, pid: &str) -> Result<(), Error> {
         match Command::new("kill").args([pid]).output() {
             Ok(out) if !out.status.success() => {
@@ -183,6 +189,11 @@ impl SysRunner for DryRunSysRunner {
         Ok(0)
     }
 
+    fn write(&self, path: &Path, content: &str) -> Result<(), Error> {
+        println!("[dry-run] would write: {} ({} bytes)", path.display(), content.len());
+        Ok(())
+    }
+
     fn kill_pid(&self, pid: &str) -> Result<(), Error> {
         println!("[dry-run] would kill PID {pid}");
         Ok(())
@@ -214,6 +225,10 @@ pub enum MockCall {
         args: Vec<String>,
         working_dir: std::path::PathBuf,
         log_path: std::path::PathBuf,
+    },
+    Write {
+        path: std::path::PathBuf,
+        content: String,
     },
     KillPid {
         pid: String,
@@ -273,6 +288,14 @@ impl SysRunner for MockSysRunner {
             log_path: log_path.to_path_buf(),
         });
         Ok(0)
+    }
+
+    fn write(&self, path: &Path, content: &str) -> Result<(), Error> {
+        self.calls.lock().unwrap().push(MockCall::Write {
+            path: path.to_path_buf(),
+            content: content.to_string(),
+        });
+        Ok(())
     }
 
     fn kill_pid(&self, pid: &str) -> Result<(), Error> {

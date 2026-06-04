@@ -24,8 +24,8 @@ use crate::Goopy;
 /// In **dev mode** (`dev_mode = true`), it spawns `python3 server.py` as a
 /// detached background process and records the PID for later cleanup.
 pub struct HelloProvisioner {
-    pub domain: String,
-    pub dev_mode: bool,
+    pub(crate) domain: String,
+    pub(crate) dev_mode: bool,
     storage: Arc<dyn StorageAllocator>,
     sys: Arc<dyn SysRunner>,
 }
@@ -195,7 +195,7 @@ server {{
         let pid = self.sys.spawn_detached("python3", &["server.py"], working_dir, &log_path)?;
         let pid_path = working_dir.join("server.pid");
         info!(%pid, pid_path = %pid_path.display(), "writing PID file");
-        fs::write(&pid_path, pid.to_string()).map_err(Error::Io)
+        self.sys.write(&pid_path, &pid.to_string())
     }
 
     fn kill_dev_server(&self, working_dir: &Path) -> Result<(), Error> {
@@ -218,7 +218,7 @@ server {{
 
         info!(%pid, "killing dev server");
         self.sys.kill_pid(pid)?;
-        let _ = fs::remove_file(&pid_path);
+        fs::remove_file(&pid_path).map_err(Error::Io)?;
         Ok(())
     }
 
@@ -262,17 +262,14 @@ impl GoopyProvisioner for HelloProvisioner {
 
     #[instrument(skip(self), fields(slug = %goopy.slug, dev_mode = self.dev_mode))]
     fn deprovision(&self, goopy: &Goopy) -> Result<(), Error> {
-        if self.dev_mode {
-            self.kill_dev_server(&goopy.working_dir)?;
+        let result = if self.dev_mode {
+            self.kill_dev_server(&goopy.working_dir)
         } else {
-            // Production: tear down in reverse order
-            self.stop_service(&goopy.slug)?;
-            self.remove_nginx_site(&goopy.slug)?;
-        }
-
-        // Release storage last
-        self.storage.release(&goopy.working_dir)?;
-
+            self.stop_service(&goopy.slug)
+                .and_then(|_| self.remove_nginx_site(&goopy.slug))
+        };
+        let _ = self.storage.release(&goopy.working_dir);
+        result?;
         info!(slug = %goopy.slug, "deprovisioning complete");
         Ok(())
     }
