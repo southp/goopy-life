@@ -194,18 +194,42 @@ server {{
     fn spawn_dev_server(working_dir: &Path) -> Result<(), Error> {
         info!(working_dir = %working_dir.display(), "spawning dev server");
 
+        // Redirect stderr to server.log so startup errors are preserved for inspection.
+        let log_path = working_dir.join("server.log");
+        let log_file = std::fs::File::create(&log_path)
+            .map_err(|e| Error::Other(format!("failed to create server.log: {e}")))?;
+
         // Pass "server.py" as a bare name: python3's CWD is set to working_dir
         // by .current_dir(), so the path resolves correctly even when working_dir
         // is relative (passing working_dir.join("server.py") would be re-resolved
         // relative to python3's own CWD and produce a wrong double-segment path).
-        let child = Command::new("python3")
+        let mut child = Command::new("python3")
             .arg("server.py")
             .current_dir(working_dir)
             .process_group(0)
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(log_file)
             .spawn()
             .map_err(|e| Error::Other(format!("failed to spawn python3: {e}")))?;
+
+        // Give python3 a moment to start up (or crash).
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // Check for an immediate exit — python3 binds its port synchronously, so
+        // any startup error (script not found, port in use, syntax error) surfaces
+        // well within 200 ms.
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let log = fs::read_to_string(&log_path).unwrap_or_default();
+                return Err(Error::Other(format!(
+                    "python3 exited immediately (status {status})\n{log}"
+                )));
+            }
+            Ok(None) => {} // still running — good
+            Err(e) => {
+                return Err(Error::Other(format!("failed to check python3 status: {e}")));
+            }
+        }
 
         let pid = child.id();
         // Detach: forget the Child so that Drop does not wait on the process.
