@@ -107,7 +107,9 @@ fn main() {
         cli.dry_run,
     );
 
-    let storage: Arc<dyn StorageAllocator> = if dev_mode {
+    let storage: Arc<dyn StorageAllocator> = if cli.dry_run {
+        Arc::new(DryRunStorageAllocator)
+    } else if dev_mode {
         Arc::new(PlainDirAllocator)
     } else {
         Arc::new(ZfsAllocator::new(cfg.allocator.pool, cfg.allocator.quota_mb))

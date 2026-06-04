@@ -403,6 +403,15 @@ mod tests {
 
         let calls = mock_sys.recorded_calls();
 
+        let writes: Vec<&Path> = calls
+            .iter()
+            .filter_map(|c| if let MockCall::Write { path, .. } = c { Some(path.as_path()) } else { None })
+            .collect();
+        assert!(
+            writes.iter().any(|p| p.ends_with("server.py")),
+            "should write server.py"
+        );
+
         let sudo_writes: Vec<&str> = calls
             .iter()
             .filter_map(|c| {
