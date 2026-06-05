@@ -34,7 +34,9 @@ sweep_interval_secs = 86400
 path = "/opt/goopy-life/goopy.db"
 
 [allocator]
-# Storage pool name
+# Which allocator to use: "PlainDir" (plain filesystem) or "Zfs" (ZFS datasets)
+kind = "Zfs"
+# Storage pool name (Zfs only)
 pool = "goopy"
-# Disk quota per instance (MB)
+# Disk quota per instance in MB (Zfs only)
 quota_mb = 512

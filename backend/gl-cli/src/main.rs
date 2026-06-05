@@ -102,10 +102,9 @@ fn main() {
         if dev_mode { "dev" } else { "production" },
     );
 
-    let storage: Arc<dyn StorageAllocator> = if dev_mode {
-        Arc::new(PlainDirAllocator)
-    } else {
-        Arc::new(ZfsAllocator::new(cfg.allocator.pool, cfg.allocator.quota_mb))
+    let storage: Arc<dyn StorageAllocator> = match cfg.allocator.kind {
+        AllocatorKind::PlainDir => Arc::new(PlainDirAllocator),
+        AllocatorKind::Zfs => Arc::new(ZfsAllocator::new(cfg.allocator.pool, cfg.allocator.quota_mb)),
     };
 
     let sys: Arc<dyn SysRunner> = Arc::new(RealSysRunner);

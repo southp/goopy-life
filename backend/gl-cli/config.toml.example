@@ -18,6 +18,6 @@ bind_address    = "127.0.0.1:8080"
 path = "./registry.db"
 
 [allocator]
-# Only used in production mode (--prod). Ignored in dev mode.
-pool     = ""
-quota_mb = 0
+# Which allocator to use: "PlainDir" (plain filesystem) or "Zfs" (ZFS datasets)
+kind = "PlainDir"
+# pool and quota_mb are only needed for kind = "Zfs"

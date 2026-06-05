@@ -1,4 +1,31 @@
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum AllocatorKind {
+    PlainDir,
+    Zfs,
+}
+
+impl std::fmt::Display for AllocatorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AllocatorKind::PlainDir => write!(f, "PlainDir"),
+            AllocatorKind::Zfs => write!(f, "Zfs"),
+        }
+    }
+}
+
+impl std::str::FromStr for AllocatorKind {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "PlainDir" => Ok(AllocatorKind::PlainDir),
+            "Zfs" => Ok(AllocatorKind::Zfs),
+            _ => Err(Error::Invalid),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ProvisionerKind {
     Hello,
     GhostLocal,

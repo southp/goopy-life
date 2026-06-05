@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::shared_types::{Error, ProvisionerKind};
+use crate::shared_types::{AllocatorKind, Error, ProvisionerKind};
 
 // Design note: a fully abstract design would store these as `dyn RegistryConfig` /
 // `dyn AllocatorConfig` traits. We use concrete structs instead — the number of
@@ -13,7 +13,12 @@ pub struct RegistryConfig {
 
 #[derive(Debug, serde::Deserialize)]
 pub struct AllocatorConfig {
+    pub kind: AllocatorKind,
+    /// ZFS pool name. Required when `kind = "Zfs"`; ignored otherwise.
+    #[serde(default)]
     pub pool: String,
+    /// Per-instance disk quota in MB. Required when `kind = "Zfs"`; ignored otherwise.
+    #[serde(default)]
     pub quota_mb: u64,
 }
 
