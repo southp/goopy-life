@@ -175,7 +175,7 @@ fn main() {
                                 jobs.push(job_id);
                             }
                             Err(e) => {
-                                println!("Spawn failed: {:?}", e);
+                                tracing::error!(error = ?e, "spawn failed");
                                 spinner.finish_with_message(format!("Failed due to: {:?}", e));
                             }
                         }
@@ -191,7 +191,7 @@ fn main() {
                         match gm.despawn(s.to_string()) {
                             Ok(job_id) => jobs.push(job_id),
                             Err(e) => {
-                                println!("Despawn failed: {:?}", e);
+                                tracing::error!(error = ?e, "despawn failed");
                                 std::process::exit(1);
                             }
                         }
@@ -211,7 +211,9 @@ fn main() {
                         }
                     }
                 }
-                _ => unreachable!(),
+                Cmd::Alloc { .. } | Cmd::Dealloc { .. } => {
+                    unreachable!("Alloc/Dealloc must not reach the provisioner branch")
+                }
             }
 
             while jobs.iter().map(|job_id| gm.is_job_finished(job_id)).any(|s| !s) {

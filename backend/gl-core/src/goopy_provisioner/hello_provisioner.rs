@@ -3,6 +3,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tracing::{debug, info, instrument};
+#[cfg(unix)]
+use libc;
 
 use super::GoopyProvisioner;
 use crate::shared_types::*;
@@ -24,8 +26,8 @@ use crate::Goopy;
 /// In **dev mode** (`dev_mode = true`), it spawns `python3 server.py` as a
 /// detached background process and records the PID for later cleanup.
 pub struct HelloProvisioner {
-    pub(crate) domain: String,
-    pub(crate) dev_mode: bool,
+    domain: String,
+    dev_mode: bool,
     storage: Arc<dyn StorageAllocator>,
     sys: Arc<dyn SysRunner>,
 }
@@ -260,6 +262,7 @@ fn spawn_detached(
         .map_err(|e| Error::Other(format!("failed to spawn {program}: {e}")))?;
 
     // Give the process a moment to start up (or crash).
+    // 200 ms gives the process time to crash on import errors; well-behaved servers start in < 50 ms on this hardware.
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     // Check for an immediate exit — startup errors surface well within 200 ms.
@@ -282,16 +285,22 @@ fn spawn_detached(
 
 /// Send SIGTERM to the process with the given string PID.
 /// Returns `Ok` if the process was signalled or was already gone (ESRCH).
-/// Returns `Err` if the `kill` binary itself could not be executed.
+/// Returns `Err` on any other OS error.
+#[cfg(unix)]
 fn kill_pid(pid: &str) -> Result<(), Error> {
-    match std::process::Command::new("kill").args([pid]).output() {
-        Ok(out) if !out.status.success() => {
-            debug!(%pid, status = %out.status, "kill returned non-zero (process may have already exited)");
-            Ok(())
+    let pid_i: i32 = pid
+        .parse()
+        .map_err(|_| Error::Other(format!("invalid PID: {pid:?}")))?;
+    // SAFETY: pid_i is a valid positive integer parsed above.
+    let rc = unsafe { libc::kill(pid_i, libc::SIGTERM) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::ESRCH) {
+            return Err(Error::Io(err));
         }
-        Err(e) => Err(Error::Other(format!("kill command failed to execute: {e}"))),
-        _ => Ok(()),
+        debug!(%pid, "process already gone (ESRCH)");
     }
+    Ok(())
 }
 
 impl GoopyProvisioner for HelloProvisioner {
@@ -482,41 +491,57 @@ mod tests {
             "should write nginx config"
         );
 
-        let runs: Vec<(&str, &[String])> = calls
+        let verb_seq: Vec<&str> = calls
             .iter()
-            .filter_map(|c| {
-                if let MockCall::Run { program, args } = c {
-                    Some((program.as_str(), args.as_slice()))
-                } else {
-                    None
-                }
-            })
+            .filter_map(|c| if let MockCall::Run { args, .. } = c { Some(args) } else { None })
+            .flat_map(|args| args.iter().map(|s| s.as_str()))
+            .filter(|a| ["daemon-reload", "enable", "start", "ln", "reload"].contains(a))
             .collect();
+        assert_eq!(verb_seq, ["daemon-reload", "enable", "start", "ln", "reload"]);
+    }
 
+    /// Verifies that `deprovision` in production mode issues the expected sequence
+    /// of privileged system calls — without executing them.
+    #[test]
+    fn prod_deprovision_calls_expected_sys_commands() {
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("test-goopy-prod-deprov");
+
+        let mock_sys = Arc::new(MockSysRunner::new());
+        let sys: Arc<dyn SysRunner> = mock_sys.clone();
+        let provisioner = HelloProvisioner::new(
+            "goopy.life".to_string(),
+            false,
+            Arc::new(PlainDirAllocator),
+            sys,
+        );
+
+        let goopy = test_goopy(&working_dir);
+        provisioner.deprovision(&goopy).expect("prod deprovision should succeed");
+
+        let calls = mock_sys.recorded_calls();
+
+        // Verify ordered stop → disable → daemon-reload → reload verb sequence.
+        let verb_seq: Vec<&str> = calls
+            .iter()
+            .filter_map(|c| if let MockCall::Run { args, .. } = c { Some(args) } else { None })
+            .flat_map(|args| args.iter().map(|s| s.as_str()))
+            .filter(|a| ["stop", "disable", "daemon-reload", "reload"].contains(a))
+            .collect();
+        assert_eq!(verb_seq, ["stop", "disable", "daemon-reload", "reload"]);
+
+        // Verify rm was issued for the systemd service file and nginx configs.
+        let run_args: Vec<&[String]> = calls
+            .iter()
+            .filter_map(|c| if let MockCall::Run { args, .. } = c { Some(args.as_slice()) } else { None })
+            .collect();
         assert!(
-            runs.iter().any(|(_, args)| args.iter().any(|a| a == "daemon-reload")),
-            "should daemon-reload systemd"
+            run_args.iter().any(|args| args.iter().any(|a| a.contains("/etc/systemd/system/"))),
+            "should remove systemd service file"
         );
         assert!(
-            runs.iter().any(|(_, args)| args.iter().any(|a| a == "enable")),
-            "should enable service"
-        );
-        assert!(
-            runs.iter().any(|(_, args)| args.iter().any(|a| a == "start")),
-            "should start service"
-        );
-        assert!(
-            runs.iter().any(|(_, args)| args.iter().any(|a| a == "ln")),
-            "should create nginx symlink"
-        );
-        assert!(
-            runs.iter().any(|(_, args)| args.iter().any(|a| a == "-t")),
-            "should test nginx config"
-        );
-        assert!(
-            runs.iter()
-                .any(|(_, args)| args.iter().any(|a| a == "reload") && args.iter().any(|a| a == "nginx")),
-            "should reload nginx"
+            run_args.iter().any(|args| args.iter().any(|a| a.contains("/etc/nginx/sites-available/"))),
+            "should remove nginx config"
         );
     }
 }

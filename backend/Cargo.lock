@@ -367,6 +367,7 @@ name = "gl-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "libc",
  "r2d2",
  "r2d2_sqlite",
  "rand 0.9.4",

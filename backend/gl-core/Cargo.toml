@@ -7,6 +7,7 @@ edition = "2024"
 test-utils = []
 
 [dependencies]
+libc.workspace = true
 tokio.workspace = true
 toml.workspace = true
 serde.workspace = true

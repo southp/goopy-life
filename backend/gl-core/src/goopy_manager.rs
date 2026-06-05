@@ -197,7 +197,10 @@ where
     }
 
     pub fn is_job_finished(&self, job_id: &ThreadId) -> bool {
-        self.jobs.get(job_id).is_some_and(|h| h.is_finished())
+        self.jobs
+            .get(job_id)
+            .expect("job_id not tracked; callers must only pass IDs returned by spawn()")
+            .is_finished()
     }
 }
 
