@@ -1,8 +1,6 @@
-pub mod dry_run_allocator;
 pub mod plain_dir_allocator;
 pub mod zfs_allocator;
 
-pub use dry_run_allocator::DryRunStorageAllocator;
 pub use plain_dir_allocator::PlainDirAllocator;
 pub use zfs_allocator::ZfsAllocator;
 

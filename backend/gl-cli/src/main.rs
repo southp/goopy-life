@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use gl_core::goopy_provisioner::hello_provisioner::HelloProvisioner;
 use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
-use gl_core::sys_utils::{DryRunSysRunner, RealSysRunner};
+use gl_core::sys_utils::RealSysRunner;
 use gl_core::*;
 use indicatif::{MultiProgress, ProgressBar};
 use std::sync::Arc;
@@ -22,10 +22,6 @@ struct Cli {
     /// what `dev_mode` is set to in config.toml.
     #[arg(long)]
     prod: bool,
-
-    /// Print privileged commands without executing them
-    #[arg(long)]
-    dry_run: bool,
 
     #[command(subcommand)]
     command: Cmd,
@@ -96,7 +92,7 @@ fn main() {
     }
 
     println!(
-        "Config: {}\n  db:         {}\n  base_dir:   {}\n  domain:     {}\n  port range: {}–{}\n  mode:       {}\n  dry_run:    {}",
+        "Config: {}\n  db:         {}\n  base_dir:   {}\n  domain:     {}\n  port range: {}–{}\n  mode:       {}",
         cli.config.display(),
         cfg.registry.path.display(),
         cfg.base_dir.display(),
@@ -104,22 +100,15 @@ fn main() {
         cfg.port_range_start,
         cfg.port_range_end,
         if dev_mode { "dev" } else { "production" },
-        cli.dry_run,
     );
 
-    let storage: Arc<dyn StorageAllocator> = if cli.dry_run {
-        Arc::new(DryRunStorageAllocator)
-    } else if dev_mode {
+    let storage: Arc<dyn StorageAllocator> = if dev_mode {
         Arc::new(PlainDirAllocator)
     } else {
         Arc::new(ZfsAllocator::new(cfg.allocator.pool, cfg.allocator.quota_mb))
     };
 
-    let sys: Arc<dyn SysRunner> = if cli.dry_run {
-        Arc::new(DryRunSysRunner)
-    } else {
-        Arc::new(RealSysRunner)
-    };
+    let sys: Arc<dyn SysRunner> = Arc::new(RealSysRunner);
 
     match cli.command {
         Cmd::Alloc { path } => {

@@ -10,9 +10,8 @@ use crate::shared_types::Error;
 
 /// Abstraction over privileged system operations.
 ///
-/// Implementations range from `RealSysRunner` (executes commands for real) to
-/// `DryRunSysRunner` (prints what would run) and `MockSysRunner` (records calls
-/// for use in unit tests).
+/// Implementations: `RealSysRunner` (executes commands for real) and
+/// `MockSysRunner` (records calls for use in unit tests).
 pub trait SysRunner: Send + Sync {
     /// Run a program and wait for it to exit successfully.
     fn run(&self, program: &str, args: &[&str]) -> Result<(), Error>;
@@ -29,9 +28,9 @@ pub trait SysRunner: Send + Sync {
         working_dir: &Path,
         log_path: &Path,
     ) -> Result<u32, Error>;
-    /// Write `content` to `path`. Intercepted by `DryRunSysRunner`.
+    /// Write `content` to `path`.
     fn write(&self, path: &Path, content: &str) -> Result<(), Error>;
-    /// Remove `path`. Intercepted by `DryRunSysRunner`.
+    /// Remove `path`.
     fn remove_file(&self, path: &Path) -> Result<(), Error>;
     /// Send SIGTERM to the process with the given string PID.
     /// Returns `Ok` if the process was signalled or was already gone (ESRCH).
@@ -158,56 +157,6 @@ impl SysRunner for RealSysRunner {
             Err(e) => Err(Error::Other(format!("kill command failed to execute: {e}"))),
             _ => Ok(()),
         }
-    }
-}
-
-// ── DryRunSysRunner ───────────────────────────────────────────────────────────
-
-/// Prints what would be executed without running anything.
-///
-/// Useful with the `--dry-run` CLI flag to preview privileged operations.
-pub struct DryRunSysRunner;
-
-impl SysRunner for DryRunSysRunner {
-    fn run(&self, program: &str, args: &[&str]) -> Result<(), Error> {
-        println!("[dry-run] would run: {program} {}", args.join(" "));
-        Ok(())
-    }
-
-    fn sudo_write(&self, path: &str, content: &str) -> Result<(), Error> {
-        println!("[dry-run] would sudo_write to: {path} ({} bytes)", content.len());
-        Ok(())
-    }
-
-    fn spawn_detached(
-        &self,
-        program: &str,
-        args: &[&str],
-        working_dir: &Path,
-        log_path: &Path,
-    ) -> Result<u32, Error> {
-        println!(
-            "[dry-run] would spawn: {program} {} in {} (log: {})",
-            args.join(" "),
-            working_dir.display(),
-            log_path.display()
-        );
-        Ok(0)
-    }
-
-    fn write(&self, path: &Path, content: &str) -> Result<(), Error> {
-        println!("[dry-run] would write: {} ({} bytes)", path.display(), content.len());
-        Ok(())
-    }
-
-    fn remove_file(&self, path: &Path) -> Result<(), Error> {
-        println!("[dry-run] would remove: {}", path.display());
-        Ok(())
-    }
-
-    fn kill_pid(&self, pid: &str) -> Result<(), Error> {
-        println!("[dry-run] would kill PID {pid}");
-        Ok(())
     }
 }
 
