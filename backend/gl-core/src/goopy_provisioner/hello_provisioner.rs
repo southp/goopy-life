@@ -119,25 +119,14 @@ server {{
         format!("goopy-hello-{slug}")
     }
 
-    // ── Helpers: file writing ───────────────────────────────────────────
-
-    fn write_server_script(&self, working_dir: &Path, slug: &str, port: u32) -> Result<(), Error> {
-        let content = Self::render_server_py(slug, port);
-        let path = working_dir.join("server.py");
-        info!(path = %path.display(), "writing server.py");
-        self.sys.write(&path, &content)
-    }
-
     // ── Production provisioning steps ───────────────────────────────────
 
-    #[instrument(skip(self, working_dir), fields(slug))]
     fn write_service_file(&self, slug: &str, working_dir: &Path) -> Result<(), Error> {
         let content = Self::render_service_file(slug, working_dir);
         let path = format!("/etc/systemd/system/{}.service", Self::service_name(slug));
         self.sys.sudo_write(&path, &content)
     }
 
-    #[instrument(skip(self), fields(slug))]
     fn enable_service(&self, slug: &str) -> Result<(), Error> {
         let svc = format!("{}.service", Self::service_name(slug));
         self.sys.run("sudo", &["systemctl", "daemon-reload"])?;
@@ -145,21 +134,18 @@ server {{
         self.sys.run("sudo", &["systemctl", "start", &svc])
     }
 
-    #[instrument(skip(self), fields(slug))]
     fn write_nginx_config(&self, slug: &str, domain: &str, port: u32) -> Result<(), Error> {
         let content = Self::render_nginx_config(slug, domain, port);
         let path = format!("/etc/nginx/sites-available/{slug}");
         self.sys.sudo_write(&path, &content)
     }
 
-    #[instrument(skip(self), fields(slug))]
     fn enable_nginx_site(&self, slug: &str) -> Result<(), Error> {
         let available = format!("/etc/nginx/sites-available/{slug}");
         let enabled = format!("/etc/nginx/sites-enabled/{slug}");
         self.sys.run("sudo", &["ln", "-sf", &available, &enabled])
     }
 
-    #[instrument(skip(self))]
     fn reload_nginx(&self) -> Result<(), Error> {
         self.sys.run("sudo", &["nginx", "-t"])?;
         self.sys.run("sudo", &["systemctl", "reload", "nginx"])
@@ -167,7 +153,6 @@ server {{
 
     // ── Production deprovisioning steps ─────────────────────────────────
 
-    #[instrument(skip(self), fields(slug))]
     fn stop_service(&self, slug: &str) -> Result<(), Error> {
         let svc = format!("{}.service", Self::service_name(slug));
         self.sys.run("sudo", &["systemctl", "stop", &svc])?;
@@ -178,7 +163,6 @@ server {{
         self.sys.run("sudo", &["systemctl", "daemon-reload"])
     }
 
-    #[instrument(skip(self), fields(slug))]
     fn remove_nginx_site(&self, slug: &str) -> Result<(), Error> {
         let enabled = format!("/etc/nginx/sites-enabled/{slug}");
         let available = format!("/etc/nginx/sites-available/{slug}");
@@ -195,7 +179,7 @@ server {{
         let pid = self.sys.spawn_detached("python3", &["server.py"], working_dir, &log_path)?;
         let pid_path = working_dir.join("server.pid");
         info!(%pid, pid_path = %pid_path.display(), "writing PID file");
-        self.sys.write(&pid_path, &pid.to_string())
+        std::fs::write(&pid_path, pid.to_string()).map_err(Error::Io)
     }
 
     fn kill_dev_server(&self, working_dir: &Path) -> Result<(), Error> {
@@ -220,13 +204,16 @@ server {{
 
         info!(%pid, "killing dev server");
         self.sys.kill_pid(pid)?;
-        self.sys.remove_file(&pid_path)
+        std::fs::remove_file(&pid_path).map_err(Error::Io)
     }
 
     // ── Inner provision (post-allocate steps) ───────────────────────────
 
     fn provision_inner(&self, goopy: &Goopy) -> Result<(), Error> {
-        self.write_server_script(&goopy.working_dir, &goopy.slug, goopy.port)?;
+        let server_py = goopy.working_dir.join("server.py");
+        info!(path = %server_py.display(), "writing server.py");
+        std::fs::write(&server_py, Self::render_server_py(&goopy.slug, goopy.port))
+            .map_err(Error::Io)?;
 
         if self.dev_mode {
             self.spawn_dev_server(&goopy.working_dir)?;
@@ -401,16 +388,14 @@ mod tests {
         let goopy = test_goopy(&working_dir);
         provisioner.provision(&goopy).expect("prod provision should succeed");
 
-        let calls = mock_sys.recorded_calls();
+        // server.py is written via std::fs::write directly — check the file on disk.
+        let server_py = working_dir.join("server.py");
+        assert!(server_py.exists(), "server.py should be written to disk");
+        let content = fs::read_to_string(&server_py).unwrap();
+        assert!(content.contains("tasty-lucky-clover"), "server.py should contain slug");
+        assert!(content.contains("9876"), "server.py should contain port");
 
-        let writes: Vec<&Path> = calls
-            .iter()
-            .filter_map(|c| if let MockCall::Write { path, .. } = c { Some(path.as_path()) } else { None })
-            .collect();
-        assert!(
-            writes.iter().any(|p| p.ends_with("server.py")),
-            "should write server.py"
-        );
+        let calls = mock_sys.recorded_calls();
 
         let sudo_writes: Vec<&str> = calls
             .iter()

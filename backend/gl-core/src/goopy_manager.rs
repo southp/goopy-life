@@ -196,12 +196,8 @@ where
         self.registry.list()
     }
 
-    pub fn is_job_finished(&self, job_id: &ThreadId) -> Option<bool> {
-        if let Some(handle) = self.jobs.get(job_id) {
-            return Some(handle.is_finished());
-        }
-
-        None
+    pub fn is_job_finished(&self, job_id: &ThreadId) -> bool {
+        self.jobs.get(job_id).is_some_and(|h| h.is_finished())
     }
 }
 

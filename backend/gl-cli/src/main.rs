@@ -215,7 +215,7 @@ fn main() {
                 _ => unreachable!(),
             }
 
-            while jobs.iter().map(|job_id| gm.is_job_finished(job_id).unwrap()).any(|s| !s) {
+            while jobs.iter().map(|job_id| gm.is_job_finished(job_id)).any(|s| !s) {
                 std::thread::sleep(Duration::from_secs(1));
             }
 
