@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use tracing::{info, instrument};
+use tracing::{debug, info, instrument};
 
 use super::GoopyProvisioner;
 use crate::shared_types::*;
@@ -176,7 +176,7 @@ server {{
     fn spawn_dev_server(&self, working_dir: &Path) -> Result<(), Error> {
         info!(working_dir = %working_dir.display(), "spawning dev server");
         let log_path = working_dir.join("server.log");
-        let pid = self.sys.spawn_detached("python3", &["server.py"], working_dir, &log_path)?;
+        let pid = spawn_detached("python3", &["server.py"], working_dir, &log_path)?;
         let pid_path = working_dir.join("server.pid");
         info!(%pid, pid_path = %pid_path.display(), "writing PID file");
         std::fs::write(&pid_path, pid.to_string()).map_err(Error::Io)
@@ -203,7 +203,7 @@ server {{
         }
 
         info!(%pid, "killing dev server");
-        self.sys.kill_pid(pid)?;
+        kill_pid(pid)?;
         std::fs::remove_file(&pid_path).map_err(Error::Io)
     }
 
@@ -225,6 +225,72 @@ server {{
             self.reload_nginx()?;
         }
         Ok(())
+    }
+}
+
+// ── Dev-mode process helpers (hello_provisioner-specific) ───────────────────
+
+/// Spawn `program args` in `working_dir` as a detached background process,
+/// redirecting stderr to `log_path`. Waits ~200 ms and checks liveness;
+/// returns the PID on success or an error (with log contents) if the process
+/// exited immediately.
+fn spawn_detached(
+    program: &str,
+    args: &[&str],
+    working_dir: &Path,
+    log_path: &Path,
+) -> Result<u32, Error> {
+    #[cfg(unix)]
+    use std::os::unix::process::CommandExt as _;
+
+    let log_file = std::fs::File::create(log_path)
+        .map_err(|e| Error::Other(format!("failed to create log file: {e}")))?;
+
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args)
+        .current_dir(working_dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(log_file);
+
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| Error::Other(format!("failed to spawn {program}: {e}")))?;
+
+    // Give the process a moment to start up (or crash).
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // Check for an immediate exit — startup errors surface well within 200 ms.
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            let log = std::fs::read_to_string(log_path).unwrap_or_default();
+            Err(Error::Other(format!(
+                "{program} exited immediately (status {status})\n{log}"
+            )))
+        }
+        Ok(None) => {
+            let pid = child.id();
+            // Detach: forget the Child so that Drop does not wait on the process.
+            std::mem::forget(child);
+            Ok(pid)
+        }
+        Err(e) => Err(Error::Other(format!("failed to check {program} status: {e}"))),
+    }
+}
+
+/// Send SIGTERM to the process with the given string PID.
+/// Returns `Ok` if the process was signalled or was already gone (ESRCH).
+/// Returns `Err` if the `kill` binary itself could not be executed.
+fn kill_pid(pid: &str) -> Result<(), Error> {
+    match std::process::Command::new("kill").args([pid]).output() {
+        Ok(out) if !out.status.success() => {
+            debug!(%pid, status = %out.status, "kill returned non-zero (process may have already exited)");
+            Ok(())
+        }
+        Err(e) => Err(Error::Other(format!("kill command failed to execute: {e}"))),
+        _ => Ok(()),
     }
 }
 

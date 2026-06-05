@@ -1,10 +1,9 @@
 use std::io::Write;
-use std::path::Path;
 use std::process::Command;
 #[cfg(any(test, feature = "test-utils"))]
 use std::sync::Mutex;
 
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 use crate::shared_types::Error;
 
@@ -17,21 +16,6 @@ pub trait SysRunner: Send + Sync {
     fn run(&self, program: &str, args: &[&str]) -> Result<(), Error>;
     /// Write `content` to a privileged `path` via `sudo tee`.
     fn sudo_write(&self, path: &str, content: &str) -> Result<(), Error>;
-    /// Spawn `program args` in `working_dir` as a detached background process,
-    /// redirecting stderr to `log_path`. Waits ~200 ms and checks liveness;
-    /// returns the PID on success or an error (with log contents) if the process
-    /// exited immediately.
-    fn spawn_detached(
-        &self,
-        program: &str,
-        args: &[&str],
-        working_dir: &Path,
-        log_path: &Path,
-    ) -> Result<u32, Error>;
-    /// Send SIGTERM to the process with the given string PID.
-    /// Returns `Ok` if the process was signalled or was already gone (ESRCH).
-    /// Returns `Err` if the `kill` binary itself could not be executed.
-    fn kill_pid(&self, pid: &str) -> Result<(), Error>;
 }
 
 // ── RealSysRunner ─────────────────────────────────────────────────────────────
@@ -86,66 +70,6 @@ impl SysRunner for RealSysRunner {
         }
         Ok(())
     }
-
-    fn spawn_detached(
-        &self,
-        program: &str,
-        args: &[&str],
-        working_dir: &Path,
-        log_path: &Path,
-    ) -> Result<u32, Error> {
-        #[cfg(unix)]
-        use std::os::unix::process::CommandExt as _;
-
-        let log_file = std::fs::File::create(log_path)
-            .map_err(|e| Error::Other(format!("failed to create log file: {e}")))?;
-
-        let mut cmd = Command::new(program);
-        cmd.args(args)
-            .current_dir(working_dir)
-            .stdout(std::process::Stdio::null())
-            .stderr(log_file);
-
-        #[cfg(unix)]
-        cmd.process_group(0);
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| Error::Other(format!("failed to spawn {program}: {e}")))?;
-
-        // Give the process a moment to start up (or crash).
-        std::thread::sleep(std::time::Duration::from_millis(200));
-
-        // Check for an immediate exit — startup errors surface well within 200 ms.
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let log = std::fs::read_to_string(log_path).unwrap_or_default();
-                return Err(Error::Other(format!(
-                    "{program} exited immediately (status {status})\n{log}"
-                )));
-            }
-            Ok(None) => {} // still running — good
-            Err(e) => {
-                return Err(Error::Other(format!("failed to check {program} status: {e}")));
-            }
-        }
-
-        let pid = child.id();
-        // Detach: forget the Child so that Drop does not wait on the process.
-        std::mem::forget(child);
-        Ok(pid)
-    }
-
-    fn kill_pid(&self, pid: &str) -> Result<(), Error> {
-        match Command::new("kill").args([pid]).output() {
-            Ok(out) if !out.status.success() => {
-                debug!(%pid, status = %out.status, "kill returned non-zero (process may have already exited)");
-                Ok(())
-            }
-            Err(e) => Err(Error::Other(format!("kill command failed to execute: {e}"))),
-            _ => Ok(()),
-        }
-    }
 }
 
 // ── MockSysRunner ─────────────────────────────────────────────────────────────
@@ -167,15 +91,6 @@ pub enum MockCall {
     SudoWrite {
         path: String,
         content: String,
-    },
-    SpawnDetached {
-        program: String,
-        args: Vec<String>,
-        working_dir: std::path::PathBuf,
-        log_path: std::path::PathBuf,
-    },
-    KillPid {
-        pid: String,
     },
 }
 
@@ -218,27 +133,4 @@ impl SysRunner for MockSysRunner {
         Ok(())
     }
 
-    fn spawn_detached(
-        &self,
-        program: &str,
-        args: &[&str],
-        working_dir: &Path,
-        log_path: &Path,
-    ) -> Result<u32, Error> {
-        self.calls.lock().unwrap().push(MockCall::SpawnDetached {
-            program: program.to_string(),
-            args: args.iter().map(|s| s.to_string()).collect(),
-            working_dir: working_dir.to_path_buf(),
-            log_path: log_path.to_path_buf(),
-        });
-        Ok(0)
-    }
-
-    fn kill_pid(&self, pid: &str) -> Result<(), Error> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(MockCall::KillPid { pid: pid.to_string() });
-        Ok(())
-    }
 }
