@@ -1,7 +1,34 @@
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum AllocatorKind {
+    PlainDir,
+    Zfs,
+}
+
+impl std::fmt::Display for AllocatorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AllocatorKind::PlainDir => write!(f, "PlainDir"),
+            AllocatorKind::Zfs => write!(f, "Zfs"),
+        }
+    }
+}
+
+impl std::str::FromStr for AllocatorKind {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "PlainDir" => Ok(AllocatorKind::PlainDir),
+            "Zfs" => Ok(AllocatorKind::Zfs),
+            _ => Err(Error::Invalid),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ProvisionerKind {
     Hello,
-    Ghost,
+    GhostLocal,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -47,7 +74,7 @@ impl std::fmt::Display for ProvisionerKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ProvisionerKind::Hello => write!(f, "Hello"),
-            ProvisionerKind::Ghost => write!(f, "Ghost"),
+            ProvisionerKind::GhostLocal => write!(f, "GhostLocal"),
         }
     }
 }
@@ -58,7 +85,7 @@ impl std::str::FromStr for ProvisionerKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "Hello" => Ok(ProvisionerKind::Hello),
-            "Ghost" => Ok(ProvisionerKind::Ghost),
+            "GhostLocal" | "Ghost" => Ok(ProvisionerKind::GhostLocal),
             _ => Err(Error::Invalid),
         }
     }

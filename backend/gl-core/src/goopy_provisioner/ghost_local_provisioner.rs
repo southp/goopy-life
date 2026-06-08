@@ -14,7 +14,7 @@ impl GhostLocalProvisioner {
 
 impl GoopyProvisioner for GhostLocalProvisioner {
     fn kind(&self) -> ProvisionerKind {
-        ProvisionerKind::Ghost
+        ProvisionerKind::GhostLocal
     }
 
     #[tracing::instrument(skip(self))]

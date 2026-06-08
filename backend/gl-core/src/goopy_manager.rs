@@ -196,12 +196,11 @@ where
         self.registry.list()
     }
 
-    pub fn is_job_finished(&self, job_id: &ThreadId) -> Option<bool> {
-        if let Some(handle) = self.jobs.get(job_id) {
-            return Some(handle.is_finished());
-        }
-
-        None
+    pub fn is_job_finished(&self, job_id: &ThreadId) -> bool {
+        self.jobs
+            .get(job_id)
+            .expect("job_id not tracked; callers must only pass IDs returned by spawn()")
+            .is_finished()
     }
 }
 

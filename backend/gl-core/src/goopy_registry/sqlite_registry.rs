@@ -340,7 +340,7 @@ mod tests {
             &PathBuf::from(format!("/tmp/{slug}")),
             8080,
             Status::Spawning,
-            ProvisionerKind::Ghost,
+            ProvisionerKind::GhostLocal,
             "0.1.0".to_string(),
         )
         .unwrap()
