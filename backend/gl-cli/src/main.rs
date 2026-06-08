@@ -92,14 +92,23 @@ fn main() {
     }
 
     println!(
-        "Config: {}\n  db:         {}\n  base_dir:   {}\n  domain:     {}\n  port range: {}–{}\n  mode:       {}",
-        cli.config.display(),
-        cfg.registry.path.display(),
-        cfg.base_dir.display(),
-        cfg.domain,
-        cfg.port_range_start,
-        cfg.port_range_end,
-        if dev_mode { "dev" } else { "production" },
+        "Config: {path}\n  db:                {db}\n  base_dir:          {base_dir}\n  domain:            {domain}\n  ssl_email:         {ssl_email}\n  life_in_days:      {life_in_days}\n  provisioner:       {provisioner}\n  port range:        {port_start}–{port_end}\n  allocator:         {alloc_kind}\n  allocator pool:    {alloc_pool}\n  allocator quota:   {alloc_quota} MB\n  cors_origin:       {cors_origin}\n  bind_address:      {bind_address}\n  sweep_interval:    {sweep}s\n  mode:              {mode}",
+        path = cli.config.display(),
+        db = cfg.registry.path.display(),
+        base_dir = cfg.base_dir.display(),
+        domain = cfg.domain,
+        ssl_email = cfg.ssl_email,
+        life_in_days = cfg.life_in_days,
+        provisioner = cfg.provisioner_kind,
+        port_start = cfg.port_range_start,
+        port_end = cfg.port_range_end,
+        alloc_kind = cfg.allocator.kind,
+        alloc_pool = cfg.allocator.pool,
+        alloc_quota = cfg.allocator.quota_mb,
+        cors_origin = cfg.cors_origin,
+        bind_address = cfg.bind_address,
+        sweep = cfg.sweep_interval_secs,
+        mode = if dev_mode { "dev" } else { "production" },
     );
 
     let storage: Arc<dyn StorageAllocator> = match cfg.allocator.kind {

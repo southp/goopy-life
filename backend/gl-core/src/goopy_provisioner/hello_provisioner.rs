@@ -3,8 +3,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tracing::{debug, info, instrument};
-#[cfg(unix)]
-use libc;
 
 use super::GoopyProvisioner;
 use crate::shared_types::*;
@@ -242,9 +240,6 @@ fn spawn_detached(
     working_dir: &Path,
     log_path: &Path,
 ) -> Result<u32, Error> {
-    #[cfg(unix)]
-    use std::os::unix::process::CommandExt as _;
-
     let log_file = std::fs::File::create(log_path)
         .map_err(|e| Error::Other(format!("failed to create log file: {e}")))?;
 
@@ -253,9 +248,6 @@ fn spawn_detached(
         .current_dir(working_dir)
         .stdout(std::process::Stdio::null())
         .stderr(log_file);
-
-    #[cfg(unix)]
-    cmd.process_group(0);
 
     let mut child = cmd
         .spawn()
@@ -283,22 +275,18 @@ fn spawn_detached(
     }
 }
 
-/// Send SIGTERM to the process with the given string PID.
-/// Returns `Ok` if the process was signalled or was already gone (ESRCH).
-/// Returns `Err` on any other OS error.
-#[cfg(unix)]
 fn kill_pid(pid: &str) -> Result<(), Error> {
-    let pid_i: i32 = pid
-        .parse()
-        .map_err(|_| Error::Other(format!("invalid PID: {pid:?}")))?;
-    // SAFETY: pid_i is a valid positive integer parsed above.
-    let rc = unsafe { libc::kill(pid_i, libc::SIGTERM) };
-    if rc != 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() != Some(libc::ESRCH) {
-            return Err(Error::Io(err));
+    let out = std::process::Command::new("kill")
+        .args([pid.trim()])
+        .output()
+        .map_err(|e| Error::Other(format!("kill failed to execute: {e}")))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if stderr.contains("No such process") {
+            debug!(%pid, "process already gone");
+        } else {
+            return Err(Error::Other(format!("kill {pid}: {}", stderr.trim())));
         }
-        debug!(%pid, "process already gone (ESRCH)");
     }
     Ok(())
 }
