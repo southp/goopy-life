@@ -144,7 +144,11 @@ pub enum Error {
     Registry { context: &'static str, source: RegistrySource },
     SchemaMigration(rusqlite::Error),
     PortExhausted,
-    Other(String),
+    /// A subprocess (zfs, ghost, systemctl, etc.) ran but returned a non-zero
+    /// exit status.  The string contains the command name and stderr.
+    Subprocess(String),
+    /// Slug generation failed after exhausting all retry attempts.
+    SlugExhausted,
 }
 
 impl std::error::Error for Error {
@@ -169,7 +173,8 @@ impl std::fmt::Display for Error {
             Error::Registry { context, source } => write!(f, "registry error: {context}: {source}"),
             Error::SchemaMigration(e) => write!(f, "schema migration error: {}", e),
             Error::PortExhausted => write!(f, "port range exhausted"),
-            Error::Other(msg) => write!(f, "{}", msg),
+            Error::Subprocess(msg) => write!(f, "subprocess error: {}", msg),
+            Error::SlugExhausted => write!(f, "slug generation exhausted"),
         }
     }
 }
