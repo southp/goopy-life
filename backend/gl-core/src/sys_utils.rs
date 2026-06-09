@@ -55,7 +55,7 @@ impl SysRunner for RealSysRunner {
         child
             .stdin
             .take()
-            .ok_or_else(|| Error::Subprocess("sudo tee stdin not available".to_string()))?
+            .expect("stdin configured as piped")
             .write_all(content.as_bytes())
             .map_err(Error::Io)?;
 

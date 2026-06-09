@@ -27,7 +27,7 @@ impl StorageAllocator for ZfsAllocator {
     fn allocate(&self, path: &Path) -> Result<(), Error> {
         let slug = path
             .file_name()
-            .ok_or(Error::Invalid)?
+            .ok_or_else(|| Error::Subprocess(format!("path has no final component: {}", path.display())))?
             .to_string_lossy()
             .into_owned();
         let dataset = format!("{}/{}", self.pool, slug);
@@ -63,7 +63,7 @@ impl StorageAllocator for ZfsAllocator {
     fn release(&self, path: &Path) -> Result<(), Error> {
         let slug = path
             .file_name()
-            .ok_or(Error::Invalid)?
+            .ok_or_else(|| Error::Subprocess(format!("path has no final component: {}", path.display())))?
             .to_string_lossy()
             .into_owned();
         let dataset = format!("{}/{}", self.pool, slug);

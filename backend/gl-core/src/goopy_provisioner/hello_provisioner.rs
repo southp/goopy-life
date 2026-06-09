@@ -194,8 +194,12 @@ server {{
         };
         let pid = pid_str.trim();
 
-        if pid.is_empty() || !pid.chars().all(|c| c.is_ascii_digit()) {
+        if pid.is_empty() {
             return Err(Error::Invalid);
+        }
+
+        if !pid.chars().all(|c| c.is_ascii_digit()) {
+            return Err(Error::Subprocess(format!("invalid PID in file: {pid:?}")));
         }
 
         info!(%pid, "killing dev server");
