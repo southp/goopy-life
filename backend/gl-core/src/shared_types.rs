@@ -64,6 +64,47 @@ impl std::str::FromStr for ProvisionerKind {
     }
 }
 
+/// Concrete source for [`Error::Registry`] failures.
+/// Covers connection-pool timeouts, SQL errors, and configuration conditions
+/// detected during registry initialisation.
+#[derive(Debug)]
+pub enum RegistrySource {
+    Pool(r2d2::Error),
+    Sqlite(rusqlite::Error),
+    /// SQLite WAL mode could not be enabled; contains the mode string that was returned.
+    WalModeUnavailable(String),
+}
+
+impl std::fmt::Display for RegistrySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RegistrySource::Pool(e) => write!(f, "{e}"),
+            RegistrySource::Sqlite(e) => write!(f, "{e}"),
+            RegistrySource::WalModeUnavailable(got) => {
+                write!(f, "WAL mode not available (got: {got})")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RegistrySource {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            RegistrySource::Pool(e) => Some(e),
+            RegistrySource::Sqlite(e) => Some(e),
+            RegistrySource::WalModeUnavailable(_) => None,
+        }
+    }
+}
+
+impl From<r2d2::Error> for RegistrySource {
+    fn from(e: r2d2::Error) -> Self { RegistrySource::Pool(e) }
+}
+
+impl From<rusqlite::Error> for RegistrySource {
+    fn from(e: rusqlite::Error) -> Self { RegistrySource::Sqlite(e) }
+}
+
 #[derive(Debug)]
 pub enum Error {
     NotFound,
@@ -71,10 +112,9 @@ pub enum Error {
     AlreadyExists,
     Config(String),
     Io(std::io::Error),
-    /// General database operation failure (connection open, DML, etc.).
-    /// `SchemaMigration` covers only DDL executed in `new()`; all other
-    /// `SqliteRegistry` errors map here.
-    Registry(Box<dyn std::error::Error + Send + Sync>),
+    /// General database operation failure.
+    /// `context` describes what was being attempted (e.g. `"save"`, `"pool get"`).
+    Registry { context: &'static str, source: RegistrySource },
     SchemaMigration(rusqlite::Error),
     PortExhausted,
     Other(String),
@@ -84,7 +124,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Error::Io(e) => Some(e),
-            Error::Registry(e) => Some(e.as_ref()),
+            Error::Registry { source, .. } => Some(source),
             Error::SchemaMigration(e) => Some(e),
             _ => None,
         }
@@ -99,7 +139,7 @@ impl std::fmt::Display for Error {
             Error::AlreadyExists => write!(f, "already exists"),
             Error::Config(msg) => write!(f, "config error: {}", msg),
             Error::Io(e) => write!(f, "io error: {}", e),
-            Error::Registry(e) => write!(f, "registry error: {}", e),
+            Error::Registry { context, source } => write!(f, "registry error: {context}: {source}"),
             Error::SchemaMigration(e) => write!(f, "schema migration error: {}", e),
             Error::PortExhausted => write!(f, "port range exhausted"),
             Error::Other(msg) => write!(f, "{}", msg),
