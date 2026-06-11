@@ -47,47 +47,50 @@ fn default_sweep_interval_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
 
-    #[test]
-    fn valid_config_deserializes_correctly() {
-        let mut f = tempfile::NamedTempFile::new().unwrap();
-        write!(
-            f,
-            r#"
+    fn write_config(toml: &str) -> Result<Config, Error> {
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(toml.as_bytes()).unwrap();
+        Config::from_file(f.path())
+    }
+
+    const VALID_BASE: &str = r#"
 base_dir = "/tmp/goopy"
 domain = "goopy.life"
 ssl_email = "admin@goopy.life"
 life_in_days = 7
 provisioner_kind = "Hello"
-port_range_start = 40000
-port_range_end = 49999
-dev_mode = false
+port_range_start = 9000
+port_range_end = 9100
+dev_mode = true
 cors_origin = "https://goopy.life"
-bind_address = "0.0.0.0:3000"
-
+bind_address = "127.0.0.1:8080"
 [registry]
 path = "/tmp/goopy.db"
+"#;
 
+    #[test]
+    fn valid_config_deserializes_correctly() {
+        let toml = format!(
+            r#"{}
 [allocator]
 kind = "PlainDir"
-"#
-        )
-        .unwrap();
-        let cfg = Config::from_file(f.path()).expect("should parse");
+"#,
+            VALID_BASE
+        );
+        let cfg = write_config(&toml).expect("should parse");
         assert_eq!(cfg.domain, "goopy.life");
         assert_eq!(cfg.life_in_days, 7);
-        assert_eq!(cfg.port_range_start, 40000);
+        assert_eq!(cfg.port_range_start, 9000);
         assert_eq!(cfg.sweep_interval_secs, 86400);
     }
 
     #[test]
     fn missing_required_field_returns_config_error() {
-        let mut f = tempfile::NamedTempFile::new().unwrap();
         // Omit `domain`
-        write!(
-            f,
-            r#"
+        let toml = r#"
 base_dir = "/tmp/goopy"
 ssl_email = "admin@goopy.life"
 life_in_days = 7
@@ -103,11 +106,53 @@ path = "/tmp/goopy.db"
 
 [allocator]
 kind = "PlainDir"
-"#
-        )
-        .unwrap();
-        let err = Config::from_file(f.path()).unwrap_err();
+"#;
+        let err = write_config(toml).unwrap_err();
         assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[test]
+    fn valid_zfs_config_accepted() {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "Zfs"
+pool = "tank"
+quota_mb = 512
+"#,
+            VALID_BASE
+        );
+        assert!(write_config(&toml).is_ok());
+    }
+
+    #[test]
+    fn zfs_empty_pool_rejected() {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "Zfs"
+pool = ""
+quota_mb = 512
+"#,
+            VALID_BASE
+        );
+        let err = write_config(&toml).unwrap_err();
+        assert!(matches!(err, Error::Config(ref s) if s.contains("pool")));
+    }
+
+    #[test]
+    fn zfs_zero_quota_rejected() {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "Zfs"
+pool = "tank"
+quota_mb = 0
+"#,
+            VALID_BASE
+        );
+        let err = write_config(&toml).unwrap_err();
+        assert!(matches!(err, Error::Config(ref s) if s.contains("quota_mb")));
     }
 }
 
@@ -124,6 +169,18 @@ impl Config {
             return Err(Error::Config(
                 "port_range_start must be less than port_range_end".into(),
             ));
+        }
+        if let AllocatorKind::Zfs = cfg.allocator.kind {
+            if cfg.allocator.pool.is_empty() {
+                return Err(Error::Config(
+                    "allocator.pool must be set when kind = \"Zfs\"".into(),
+                ));
+            }
+            if cfg.allocator.quota_mb == 0 {
+                return Err(Error::Config(
+                    "allocator.quota_mb must be > 0 when kind = \"Zfs\"".into(),
+                ));
+            }
         }
         Ok(cfg)
     }
