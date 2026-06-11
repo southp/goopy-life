@@ -3,7 +3,7 @@ use crate::goopy_provisioner::*;
 use crate::goopy_registry::*;
 use crate::shared_types::*;
 
-use chrono::{self, Utc};
+use chrono::{Duration, Utc};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -199,24 +199,28 @@ where
     /// Despawn all expired goopy instances.
     ///
     /// An instance is considered expired when `now > created_at + life_in_days`.
-    /// Only instances with status `Done` or `Failed` are swept; those still
-    /// `Spawning` or `Despawning` are left alone to avoid interfering with
-    /// in-progress operations.
+    /// Instances with `Spawning` or `Despawning` status are skipped to avoid
+    /// interfering with in-progress operations; all other expired instances are
+    /// swept.
+    ///
+    /// Returns `(swept_count, per_despawn_errors)`. Errors from individual
+    /// `despawn` calls are collected rather than aborting the sweep early.
     ///
     /// Meant to be called periodically (e.g. via `tokio::time::interval` in
     /// `gl-serv`).
     #[tracing::instrument(skip(self))]
-    pub fn sweep(&mut self) -> Result<u32, Error> {
+    pub fn sweep(&mut self) -> Result<(u32, Vec<Error>), Error> {
         let now = Utc::now();
         let goopies = self.list()?;
         let mut swept = 0u32;
+        let mut errors: Vec<Error> = Vec::new();
 
         for gp in goopies {
             if gp.status == Status::Spawning || gp.status == Status::Despawning {
                 continue;
             }
 
-            let expires_at = gp.created_at + chrono::Duration::days(gp.life_in_days as i64);
+            let expires_at = gp.created_at + Duration::days(gp.life_in_days as i64);
             if now > expires_at {
                 tracing::info!(
                     slug = %gp.slug,
@@ -228,13 +232,14 @@ where
                     Ok(_) => swept += 1,
                     Err(e) => {
                         tracing::error!(error = %e, "sweep: despawn failed, skipping");
+                        errors.push(e);
                     }
                 }
             }
         }
 
         tracing::info!(swept, "sweep complete");
-        Ok(swept)
+        Ok((swept, errors))
     }
 
     pub fn is_job_finished(&self, job_id: &ThreadId) -> bool {
@@ -265,6 +270,8 @@ mod tests {
     use crate::goopy::Goopy;
     use crate::goopy_provisioner::GoopyProvisioner;
     use crate::goopy_registry::GoopyRegistry;
+    use crate::goopy_registry::sqlite_registry::SqliteRegistry;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
     struct CollideOnceRegistry {
@@ -297,6 +304,33 @@ mod tests {
         fn kind(&self) -> ProvisionerKind { ProvisionerKind::Hello }
     }
 
+    fn make_test_manager(registry: SqliteRegistry) -> GoopyManager<SqliteRegistry, NoopProvisioner> {
+        GoopyManager::new(
+            PathBuf::from("/tmp"),
+            "test.example".into(),
+            "test@example.com".into(),
+            7,
+            9000,
+            9100,
+            registry,
+            NoopProvisioner,
+        )
+    }
+
+    fn make_goopy(slug: &str, days_ago: i64, port: u32, status: Status) -> Goopy {
+        Goopy::new(
+            slug.to_string(),
+            7,
+            Utc::now() - Duration::days(days_ago),
+            &PathBuf::from(format!("/tmp/{slug}")),
+            port,
+            status,
+            ProvisionerKind::Hello,
+            "0.1.0".to_string(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn spawn_retries_on_collision() {
         let mut gm = GoopyManager::new(
@@ -317,57 +351,30 @@ mod tests {
 
     #[test]
     fn sweep_removes_expired_instances() {
-        use crate::goopy_registry::sqlite_registry::SqliteRegistry;
-        use std::path::Path;
-
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
 
         // Insert an expired goopy: created 10 days ago, lives 7 days
-        let expired = Goopy::new(
-            "expired-slug".to_string(),
-            7,
-            Utc::now() - chrono::Duration::days(10),
-            &PathBuf::from("/tmp/expired-slug"),
-            9000,
-            Status::Done,
-            ProvisionerKind::Hello,
-            "0.1.0".to_string(),
-        )
-        .unwrap();
+        let expired = make_goopy("expired-slug", 10, 9000, Status::Done);
         registry.save(&expired).unwrap();
         registry.acquire_port(9000, 9001).unwrap();
 
         // Insert a non-expired goopy: created now, lives 7 days
-        let alive = Goopy::new(
-            "alive-slug".to_string(),
-            7,
-            Utc::now(),
-            &PathBuf::from("/tmp/alive-slug"),
-            9001,
-            Status::Done,
-            ProvisionerKind::Hello,
-            "0.1.0".to_string(),
-        )
-        .unwrap();
+        let alive = make_goopy("alive-slug", 0, 9001, Status::Done);
         registry.save(&alive).unwrap();
         registry.acquire_port(9001, 9002).unwrap();
 
-        let mut gm = GoopyManager::new(
-            PathBuf::from("/tmp"),
-            "test.example".into(),
-            "test@example.com".into(),
-            7,
-            9000,
-            9100,
-            registry,
-            NoopProvisioner,
-        );
+        let mut gm = make_test_manager(registry);
 
-        let swept = gm.sweep().unwrap();
+        let (swept, errors) = gm.sweep().unwrap();
         assert_eq!(swept, 1);
+        assert!(errors.is_empty());
 
         // Wait for the despawn background thread to finish
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while gm.get("expired-slug").unwrap().is_some() {
+            assert!(std::time::Instant::now() < deadline, "despawn timed out");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
 
         // Expired should be gone
         assert!(gm.get("expired-slug").unwrap().is_none());
@@ -377,54 +384,23 @@ mod tests {
 
     #[test]
     fn sweep_skips_in_progress_instances() {
-        use crate::goopy_registry::sqlite_registry::SqliteRegistry;
-        use std::path::Path;
-
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
 
         // Insert an expired goopy with Spawning status — should be skipped
-        let spawning = Goopy::new(
-            "spawning-slug".to_string(),
-            7,
-            Utc::now() - chrono::Duration::days(10),
-            &PathBuf::from("/tmp/spawning-slug"),
-            9000,
-            Status::Spawning,
-            ProvisionerKind::Hello,
-            "0.1.0".to_string(),
-        )
-        .unwrap();
+        let spawning = make_goopy("spawning-slug", 10, 9000, Status::Spawning);
         registry.save(&spawning).unwrap();
         registry.acquire_port(9000, 9001).unwrap();
 
         // Insert an expired goopy with Despawning status — should be skipped
-        let despawning = Goopy::new(
-            "despawning-slug".to_string(),
-            7,
-            Utc::now() - chrono::Duration::days(10),
-            &PathBuf::from("/tmp/despawning-slug"),
-            9001,
-            Status::Despawning,
-            ProvisionerKind::Hello,
-            "0.1.0".to_string(),
-        )
-        .unwrap();
+        let despawning = make_goopy("despawning-slug", 10, 9001, Status::Despawning);
         registry.save(&despawning).unwrap();
         registry.acquire_port(9001, 9002).unwrap();
 
-        let mut gm = GoopyManager::new(
-            PathBuf::from("/tmp"),
-            "test.example".into(),
-            "test@example.com".into(),
-            7,
-            9000,
-            9100,
-            registry,
-            NoopProvisioner,
-        );
+        let mut gm = make_test_manager(registry);
 
-        let swept = gm.sweep().unwrap();
+        let (swept, errors) = gm.sweep().unwrap();
         assert_eq!(swept, 0);
+        assert!(errors.is_empty());
 
         // Both should still exist
         assert!(gm.get("spawning-slug").unwrap().is_some());
@@ -433,25 +409,38 @@ mod tests {
 
     #[test]
     fn sweep_no_expired_instances() {
-        use crate::goopy_registry::sqlite_registry::SqliteRegistry;
-        use std::path::Path;
-
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
 
         // Insert a non-expired goopy
-        let alive = Goopy::new(
-            "fresh-slug".to_string(),
-            7,
-            Utc::now(),
-            &PathBuf::from("/tmp/fresh-slug"),
-            9000,
-            Status::Done,
-            ProvisionerKind::Hello,
-            "0.1.0".to_string(),
-        )
-        .unwrap();
+        let alive = make_goopy("fresh-slug", 0, 9000, Status::Done);
         registry.save(&alive).unwrap();
         registry.acquire_port(9000, 9001).unwrap();
+
+        let mut gm = make_test_manager(registry);
+
+        let (swept, errors) = gm.sweep().unwrap();
+        assert_eq!(swept, 0);
+        assert!(errors.is_empty());
+        assert!(gm.get("fresh-slug").unwrap().is_some());
+    }
+
+    #[test]
+    fn sweep_collects_despawn_errors() {
+        struct FailingUpdateRegistry(SqliteRegistry);
+        impl GoopyRegistry for FailingUpdateRegistry {
+            fn save(&self, gp: &Goopy) -> Result<(), Error> { self.0.save(gp) }
+            fn load(&self, slug: &str) -> Result<Option<Goopy>, Error> { self.0.load(slug) }
+            fn delete(&self, slug: &str) -> Result<(), Error> { self.0.delete(slug) }
+            fn list(&self) -> Result<Vec<Goopy>, Error> { self.0.list() }
+            fn update_status(&self, _: &str, _: Status) -> Result<(), Error> { Err(Error::Invalid) }
+            fn acquire_port(&self, s: u32, e: u32) -> Result<u32, Error> { self.0.acquire_port(s, e) }
+            fn release_port(&self, p: u32) -> Result<(), Error> { self.0.release_port(p) }
+        }
+
+        let inner = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let expired = make_goopy("err-slug", 10, 9000, Status::Done);
+        inner.save(&expired).unwrap();
+        inner.acquire_port(9000, 9001).unwrap();
 
         let mut gm = GoopyManager::new(
             PathBuf::from("/tmp"),
@@ -460,12 +449,13 @@ mod tests {
             7,
             9000,
             9100,
-            registry,
+            FailingUpdateRegistry(inner),
             NoopProvisioner,
         );
 
-        let swept = gm.sweep().unwrap();
+        let (swept, errors) = gm.sweep().unwrap();
         assert_eq!(swept, 0);
-        assert!(gm.get("fresh-slug").unwrap().is_some());
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(errors[0], Error::Invalid));
     }
 }
