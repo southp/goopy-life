@@ -56,4 +56,26 @@ mod tests {
         let unique: std::collections::HashSet<&String> = slugs.iter().collect();
         assert!(unique.len() > 1, "10 slugs should not all be identical");
     }
+
+    #[test]
+    fn concurrent_generation_produces_no_panics() {
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let slugs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let handles: Vec<_> = (0..50)
+            .map(|_| {
+                let slugs = Arc::clone(&slugs);
+                thread::spawn(move || {
+                    let s = generate_slug();
+                    slugs.lock().unwrap().push(s);
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("thread should not panic");
+        }
+        let all = slugs.lock().unwrap();
+        assert_eq!(all.len(), 50, "all 50 threads should complete");
+    }
 }

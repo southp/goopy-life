@@ -68,3 +68,76 @@ impl Goopy {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use std::path::Path;
+
+    #[test]
+    fn valid_construction_succeeds() {
+        let g = Goopy::new(
+            "bold-swift-oak".to_string(),
+            7,
+            Utc::now(),
+            Path::new("/tmp/bold-swift-oak"),
+            8080,
+            Status::Spawning,
+            ProvisionerKind::Hello,
+            "0.1.0".to_string(),
+        )
+        .unwrap();
+        assert_eq!(g.slug, "bold-swift-oak");
+        assert_eq!(g.life_in_days, 7);
+        assert_eq!(g.status, Status::Spawning);
+    }
+
+    #[test]
+    fn empty_slug_returns_invalid() {
+        let err = Goopy::new(
+            "".to_string(),
+            7,
+            Utc::now(),
+            Path::new("/tmp/x"),
+            8080,
+            Status::Spawning,
+            ProvisionerKind::Hello,
+            "0.1.0".to_string(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Invalid));
+    }
+
+    #[test]
+    fn zero_life_in_days_returns_invalid() {
+        let err = Goopy::new(
+            "some-slug".to_string(),
+            0,
+            Utc::now(),
+            Path::new("/tmp/x"),
+            8080,
+            Status::Spawning,
+            ProvisionerKind::Hello,
+            "0.1.0".to_string(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Invalid));
+    }
+
+    #[test]
+    fn negative_life_in_days_returns_invalid() {
+        let err = Goopy::new(
+            "some-slug".to_string(),
+            -1,
+            Utc::now(),
+            Path::new("/tmp/x"),
+            8080,
+            Status::Spawning,
+            ProvisionerKind::Hello,
+            "0.1.0".to_string(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Invalid));
+    }
+}
