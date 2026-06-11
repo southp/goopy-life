@@ -26,7 +26,7 @@ jobs:
       run: sudo modprobe zfs
     - name: Create loopback-based test pool
       run: |
-        sudo truncate -s 512M /tmp/zfs-test-disk.img
+        truncate -s 512M /tmp/zfs-test-disk.img
         sudo zpool create testpool /tmp/zfs-test-disk.img
     - name: Build
       run: cargo build --verbose
