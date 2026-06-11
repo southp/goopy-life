@@ -20,7 +20,17 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: Install ZFS utilities
+      run: sudo apt-get install -y zfsutils-linux
+    - name: Load ZFS kernel module
+      run: sudo modprobe zfs
+    - name: Create loopback-based test pool
+      run: |
+        truncate -s 512M /tmp/zfs-test-disk.img
+        sudo zpool create testpool /tmp/zfs-test-disk.img
     - name: Build
       run: cargo build --verbose
-    - name: Run tests
+    - name: Run tests (non-ZFS)
       run: cargo test --verbose
+    - name: Run ZFS tests (root required)
+      run: sudo env "PATH=$PATH" "HOME=$HOME" cargo test -p gl-core --verbose -- --ignored
