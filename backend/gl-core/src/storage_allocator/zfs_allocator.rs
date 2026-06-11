@@ -90,6 +90,23 @@ impl StorageAllocator for ZfsAllocator {
         }
 
         info!(%dataset, "ZFS dataset destroyed");
+
+        // Remove the mount point directory. ZFS unmounts on destroy but leaves
+        // the directory behind; clean it up to reduce filesystem noise.
+        // Ignore NotFound so this step is idempotent.
+        match std::fs::remove_dir(path) {
+            Ok(()) => {
+                info!(path = %path.display(), "mount point directory removed");
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                info!(path = %path.display(), "mount point directory already absent, skipping");
+            }
+            Err(e) => {
+                error!(path = %path.display(), err = %e, "failed to remove mount point directory");
+                return Err(Error::Io(e));
+            }
+        }
+
         Ok(())
     }
 }
@@ -154,6 +171,7 @@ mod tests {
             .output()
             .expect("zfs list should run");
         assert!(!output.status.success(), "dataset should be gone after release");
+        assert!(!path.exists(), "mount point directory should be removed after release");
 
         // Cleanup guard (no-op if already gone)
         std::process::Command::new("zfs")
