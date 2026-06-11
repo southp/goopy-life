@@ -332,18 +332,23 @@ mod tests {
     use crate::sys_utils::{MockCall, MockSysRunner, RealSysRunner};
     use tempfile::tempdir;
 
-    fn test_goopy(working_dir: &Path) -> Goopy {
+    fn test_goopy(working_dir: &Path, port: u32) -> Goopy {
         Goopy::new(
             "tasty-lucky-clover".to_string(),
             7,
             chrono::Utc::now(),
             working_dir,
-            9876,
+            port,
             Status::Spawning,
             ProvisionerKind::Hello,
             "0.1.0".to_string(),
         )
         .unwrap()
+    }
+
+    fn find_free_port() -> u32 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port() as u32
     }
 
     fn dev_provisioner() -> HelloProvisioner {
@@ -389,8 +394,9 @@ mod tests {
         let base = tempdir().unwrap();
         let working_dir = base.path().join("test-goopy");
 
+        let port = find_free_port();
         let provisioner = dev_provisioner();
-        let goopy = test_goopy(&working_dir);
+        let goopy = test_goopy(&working_dir, port);
         provisioner.provision(&goopy).expect("dev provision should succeed");
 
         let script = working_dir.join("server.py");
@@ -398,7 +404,7 @@ mod tests {
 
         let content = fs::read_to_string(&script).unwrap();
         assert!(content.contains("Hello, I am tasty-lucky-clover"));
-        assert!(content.contains("9876"));
+        assert!(content.contains(&port.to_string()));
 
         let pid_path = working_dir.join("server.pid");
         assert!(pid_path.exists(), "server.pid should be written");
@@ -416,8 +422,9 @@ mod tests {
         let base = tempdir().unwrap();
         let working_dir = base.path().join("test-goopy-deprov");
 
+        let port = find_free_port();
         let provisioner = dev_provisioner();
-        let goopy = test_goopy(&working_dir);
+        let goopy = test_goopy(&working_dir, port);
         provisioner.provision(&goopy).expect("dev provision should succeed");
         provisioner
             .deprovision(&goopy)
@@ -445,7 +452,7 @@ mod tests {
             sys,
         );
 
-        let goopy = test_goopy(&working_dir);
+        let goopy = test_goopy(&working_dir, 9876);
         provisioner.provision(&goopy).expect("prod provision should succeed");
 
         // server.py is written via std::fs::write directly — check the file on disk.
@@ -501,7 +508,7 @@ mod tests {
             sys,
         );
 
-        let goopy = test_goopy(&working_dir);
+        let goopy = test_goopy(&working_dir, 9876);
         provisioner.deprovision(&goopy).expect("prod deprovision should succeed");
 
         let calls = mock_sys.recorded_calls();
