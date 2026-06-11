@@ -180,6 +180,11 @@ mod tests {
             assert_eq!(parsed, kind, "round-trip failed for {s}");
         }
     }
+
+    #[test]
+    fn allocator_kind_from_str_unknown_returns_invalid() {
+        assert!(matches!(AllocatorKind::from_str("NonExistent"), Err(Error::Invalid)));
+    }
 }
 
 #[derive(Debug)]

@@ -470,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn get_returns_spawning_status_immediately() {
+    fn get_finds_goopy_after_spawn() {
         let mut gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
         let (slug, _, _) = gm.spawn().unwrap();
         let g = gm.get(&slug).unwrap().expect("should find goopy");
@@ -500,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn despawn_transitions_to_done_status() {
+    fn despawn_removes_goopy_after_deprovision() {
         // Use a real registry so status transitions are persisted.
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         let mut gm = make_test_manager(registry);
