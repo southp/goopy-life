@@ -31,4 +31,4 @@ jobs:
     - name: Build
       run: cargo build --verbose
     - name: Run tests (including ZFS-dependent)
-      run: sudo -E cargo test --verbose -- --include-ignored
+      run: sudo env "PATH=$PATH" cargo test --verbose -- --include-ignored
