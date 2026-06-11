@@ -30,5 +30,7 @@ jobs:
         sudo zpool create testpool /tmp/zfs-test-disk.img
     - name: Build
       run: cargo build --verbose
-    - name: Run tests (including ZFS-dependent)
-      run: sudo env "PATH=$PATH" "HOME=$HOME" cargo test --verbose -- --include-ignored
+    - name: Run tests (non-ZFS)
+      run: cargo test --verbose
+    - name: Run ZFS tests (root required)
+      run: sudo env "PATH=$PATH" "HOME=$HOME" cargo test -p gl-core --verbose -- --ignored
