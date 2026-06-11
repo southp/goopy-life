@@ -9,7 +9,7 @@ use chrono::{Duration, Utc};
 use clap::Parser;
 use gl_core::goopy_provisioner::hello_provisioner::HelloProvisioner;
 use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
-use gl_core::{GoopyManager, PlainDirAllocator, StorageAllocator, ZfsAllocator};
+use gl_core::{GoopyManager, PlainDirAllocator, RealSysRunner, StorageAllocator, ZfsAllocator};
 use tower_http::cors::CorsLayer;
 
 // ---------------------------------------------------------------------------
@@ -218,16 +218,16 @@ async fn main() {
     });
 
     // Build storage allocator
-    let storage: Box<dyn StorageAllocator> = if cfg.dev_mode {
-        Box::new(PlainDirAllocator)
+    let storage: Arc<dyn StorageAllocator> = if cfg.dev_mode {
+        Arc::new(PlainDirAllocator)
     } else {
-        Box::new(ZfsAllocator::new(
+        Arc::new(ZfsAllocator::new(
             cfg.allocator.pool.clone(),
             cfg.allocator.quota_mb,
         ))
     };
 
-    let provisioner = HelloProvisioner::new(cfg.domain.clone(), cfg.dev_mode, storage);
+    let provisioner = HelloProvisioner::new(cfg.domain.clone(), cfg.dev_mode, storage, Arc::new(RealSysRunner));
 
     let registry = SqliteRegistry::new(&cfg.registry.path).expect("failed to open SQLite registry");
 
