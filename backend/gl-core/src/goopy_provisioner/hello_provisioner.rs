@@ -347,6 +347,8 @@ mod tests {
     }
 
     fn find_free_port() -> u32 {
+        // Binds to port 0 to let the OS pick a free port, then releases it.
+        // A narrow TOCTOU window exists, but this is the idiomatic approach for tests.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.local_addr().unwrap().port() as u32
     }
