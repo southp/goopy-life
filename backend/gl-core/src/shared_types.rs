@@ -28,7 +28,6 @@ impl std::str::FromStr for AllocatorKind {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ProvisionerKind {
     Hello,
-    GhostLocal,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -74,7 +73,6 @@ impl std::fmt::Display for ProvisionerKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ProvisionerKind::Hello => write!(f, "Hello"),
-            ProvisionerKind::GhostLocal => write!(f, "GhostLocal"),
         }
     }
 }
@@ -85,7 +83,6 @@ impl std::str::FromStr for ProvisionerKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "Hello" => Ok(ProvisionerKind::Hello),
-            "GhostLocal" | "Ghost" => Ok(ProvisionerKind::GhostLocal),
             _ => Err(Error::Invalid),
         }
     }
