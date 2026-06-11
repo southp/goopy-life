@@ -173,7 +173,7 @@ impl Config {
         if let AllocatorKind::Zfs = cfg.allocator.kind {
             if cfg.allocator.pool.is_empty() {
                 return Err(Error::Config(
-                    "allocator.pool must be set when kind = \"Zfs\"".into(),
+            if cfg.allocator.pool.trim().is_empty() {
                 ));
             }
             if cfg.allocator.quota_mb == 0 {
