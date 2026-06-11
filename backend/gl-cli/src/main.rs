@@ -142,7 +142,7 @@ fn main() {
             if cfg.provisioner_kind != ProvisionerKind::Hello {
                 tracing::error!(
                     provisioner_kind = %cfg.provisioner_kind,
-                    "unsupported provisioner_kind; 'GhostLocal' requires the ghost CLI and is not yet wired up in this binary"
+                    "unsupported provisioner_kind; only 'Hello' is supported in this binary"
                 );
                 std::process::exit(1);
             }
