@@ -458,4 +458,84 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert!(matches!(errors[0], Error::Invalid));
     }
+
+    // ── spawn / get / list / despawn state machine ────────────────────────
+
+    #[test]
+    fn spawn_returns_slug_and_port() {
+        let mut gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
+        let (slug, port, _) = gm.spawn().expect("spawn should succeed");
+        assert!(!slug.is_empty(), "slug should be non-empty");
+        assert!(port >= 9000 && port < 9100, "port should be in configured range");
+    }
+
+    #[test]
+    fn get_finds_goopy_after_spawn() {
+        let mut gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
+        let (slug, _, _) = gm.spawn().unwrap();
+        let g = gm.get(&slug).unwrap().expect("should find goopy");
+        // NoopProvisioner completes synchronously, so status may be Done already.
+        assert!(
+            g.status == Status::Spawning || g.status == Status::Done,
+            "status should be Spawning or Done, got {:?}",
+            g.status
+        );
+    }
+
+    #[test]
+    fn get_missing_returns_none() {
+        let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
+        assert!(gm.get("no-such-slug").unwrap().is_none());
+    }
+
+    #[test]
+    fn list_returns_spawned_instances() {
+        let mut gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
+        let (slug1, _, _) = gm.spawn().unwrap();
+        let (slug2, _, _) = gm.spawn().unwrap();
+        let goopies = gm.list().unwrap();
+        let slugs: Vec<&str> = goopies.iter().map(|g| g.slug.as_str()).collect();
+        assert!(slugs.contains(&slug1.as_str()), "should contain slug1");
+        assert!(slugs.contains(&slug2.as_str()), "should contain slug2");
+    }
+
+    #[test]
+    fn despawn_removes_goopy_after_deprovision() {
+        // Use a real registry so status transitions are persisted.
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let mut gm = make_test_manager(registry);
+
+        let (slug, _, thread_id) = gm.spawn().unwrap();
+
+        // Wait for the spawn background thread to finish (NoopProvisioner is instant)
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let g = gm.get(&slug).unwrap().unwrap();
+            if g.status == Status::Done { break; }
+            assert!(std::time::Instant::now() < deadline, "spawn timed out");
+            if let Some(h) = gm.jobs.get(&thread_id) {
+                if h.is_finished() { break; }
+            } else { break; }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Despawn it
+        gm.despawn(slug.clone()).expect("despawn should succeed");
+
+        // Give the despawn thread time to finish
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while gm.get(&slug).unwrap().is_some() {
+            assert!(std::time::Instant::now() < deadline, "despawn timed out");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(gm.get(&slug).unwrap().is_none(), "should be gone after despawn");
+    }
+
+    #[test]
+    fn despawn_missing_returns_not_found() {
+        let mut gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
+        let err = gm.despawn("no-such".to_string()).unwrap_err();
+        assert!(matches!(err, Error::NotFound));
+    }
 }

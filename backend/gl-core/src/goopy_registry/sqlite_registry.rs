@@ -461,4 +461,33 @@ mod tests {
         let err = r.release_port(7777).unwrap_err();
         assert!(matches!(err, Error::NotFound));
     }
+
+    #[test]
+    fn concurrent_port_acquisition_produces_no_duplicates() {
+        use std::sync::Arc;
+        use std::thread;
+
+        // WAL mode requires a file-based DB.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("concurrent.db");
+        let r = Arc::new(SqliteRegistry::new(&db_path).unwrap());
+
+        let handles: Vec<_> = (9400u32..9450)
+            .map(|_| {
+                let r = Arc::clone(&r);
+                thread::spawn(move || r.acquire_port(9400, 9450))
+            })
+            .collect();
+
+        let results: Vec<u32> = handles
+            .into_iter()
+            .map(|h| h.join().expect("thread should not panic").expect("acquire should succeed"))
+            .collect();
+
+        let mut sorted = results.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), results.len(), "all acquired ports should be unique");
+        assert_eq!(sorted.len(), 50, "all 50 ports should be acquired");
+    }
 }

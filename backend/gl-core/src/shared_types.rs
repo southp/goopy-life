@@ -132,6 +132,61 @@ impl From<rusqlite::Error> for RegistrySource {
     fn from(e: rusqlite::Error) -> Self { RegistrySource::Sqlite(e) }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn status_display_round_trip() {
+        for status in [
+            Status::Empty,
+            Status::Failed,
+            Status::Archived,
+            Status::Spawning,
+            Status::Despawning,
+            Status::Done,
+        ] {
+            let s = status.to_string();
+            let parsed = Status::from_str(&s).expect("should round-trip");
+            assert_eq!(parsed, status, "round-trip failed for {s}");
+        }
+    }
+
+    #[test]
+    fn status_from_str_unknown_returns_invalid() {
+        assert!(matches!(Status::from_str("Unknown"), Err(Error::Invalid)));
+    }
+
+    #[test]
+    fn provisioner_kind_display_round_trip() {
+        for kind in [ProvisionerKind::Hello] {
+            let s = kind.to_string();
+            let parsed = ProvisionerKind::from_str(&s).expect("should round-trip");
+            assert_eq!(parsed, kind, "round-trip failed for {s}");
+        }
+    }
+
+    #[test]
+    fn provisioner_kind_from_str_unknown_returns_invalid() {
+        assert!(matches!(ProvisionerKind::from_str("NonExistent"), Err(Error::Invalid)));
+    }
+
+    #[test]
+    fn allocator_kind_display_round_trip() {
+        for kind in [AllocatorKind::PlainDir, AllocatorKind::Zfs] {
+            let s = kind.to_string();
+            let parsed = AllocatorKind::from_str(&s).expect("should round-trip");
+            assert_eq!(parsed, kind, "round-trip failed for {s}");
+        }
+    }
+
+    #[test]
+    fn allocator_kind_from_str_unknown_returns_invalid() {
+        assert!(matches!(AllocatorKind::from_str("NonExistent"), Err(Error::Invalid)));
+    }
+}
+
 #[derive(Debug)]
 pub enum Error {
     NotFound,

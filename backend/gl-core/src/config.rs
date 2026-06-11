@@ -44,6 +44,73 @@ fn default_sweep_interval_secs() -> u64 {
     86400
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write as _;
+
+    #[test]
+    fn valid_config_deserializes_correctly() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            f,
+            r#"
+base_dir = "/tmp/goopy"
+domain = "goopy.life"
+ssl_email = "admin@goopy.life"
+life_in_days = 7
+provisioner_kind = "Hello"
+port_range_start = 40000
+port_range_end = 49999
+dev_mode = false
+cors_origin = "https://goopy.life"
+bind_address = "0.0.0.0:3000"
+
+[registry]
+path = "/tmp/goopy.db"
+
+[allocator]
+kind = "PlainDir"
+"#
+        )
+        .unwrap();
+        let cfg = Config::from_file(f.path()).expect("should parse");
+        assert_eq!(cfg.domain, "goopy.life");
+        assert_eq!(cfg.life_in_days, 7);
+        assert_eq!(cfg.port_range_start, 40000);
+        assert_eq!(cfg.sweep_interval_secs, 86400);
+    }
+
+    #[test]
+    fn missing_required_field_returns_config_error() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        // Omit `domain`
+        write!(
+            f,
+            r#"
+base_dir = "/tmp/goopy"
+ssl_email = "admin@goopy.life"
+life_in_days = 7
+provisioner_kind = "Hello"
+port_range_start = 40000
+port_range_end = 49999
+dev_mode = false
+cors_origin = "https://goopy.life"
+bind_address = "0.0.0.0:3000"
+
+[registry]
+path = "/tmp/goopy.db"
+
+[allocator]
+kind = "PlainDir"
+"#
+        )
+        .unwrap();
+        let err = Config::from_file(f.path()).unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
+    }
+}
+
 impl Config {
     pub fn from_file(path: &Path) -> Result<Self, Error> {
         let contents = std::fs::read_to_string(path)
