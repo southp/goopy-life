@@ -72,7 +72,8 @@ impl SqliteRegistry {
             );
 
             CREATE TABLE IF NOT EXISTS allocated_ports (
-                port INTEGER PRIMARY KEY
+                port INTEGER PRIMARY KEY,
+                slug TEXT    NOT NULL UNIQUE
             );
             ",
         )
@@ -270,7 +271,7 @@ impl GoopyRegistry for SqliteRegistry {
     }
 
     #[tracing::instrument(skip(self))]
-    fn acquire_port(&self, range_start: u32, range_end: u32) -> Result<u32, Error> {
+    fn acquire_port(&self, slug: &str, range_start: u32, range_end: u32) -> Result<u32, Error> {
         let mut conn = self.pool.get()
             .map_err(|e| Error::Registry { context: "pool get", source: e.into() })?;
 
@@ -282,8 +283,8 @@ impl GoopyRegistry for SqliteRegistry {
         // for larger ranges a single-query approach (SELECT MIN unused port) is preferable.
         for port in range_start..range_end {
             let result = tx.execute(
-                "INSERT OR IGNORE INTO allocated_ports (port) VALUES (?1)",
-                params![port as i64],
+                "INSERT OR IGNORE INTO allocated_ports (port, slug) VALUES (?1, ?2)",
+                params![port as i64, slug],
             );
 
             match result {
@@ -430,8 +431,8 @@ mod tests {
     #[test]
     fn acquire_port_basic() {
         let r = registry();
-        let p1 = r.acquire_port(9000, 9010).unwrap();
-        let p2 = r.acquire_port(9000, 9010).unwrap();
+        let p1 = r.acquire_port("slug-a", 9000, 9010).unwrap();
+        let p2 = r.acquire_port("slug-b", 9000, 9010).unwrap();
         assert_ne!(p1, p2);
         assert!(p1 >= 9000 && p1 < 9010);
         assert!(p2 >= 9000 && p2 < 9010);
@@ -440,19 +441,19 @@ mod tests {
     #[test]
     fn acquire_port_exhaustion() {
         let r = registry();
-        r.acquire_port(9100, 9102).unwrap();
-        r.acquire_port(9100, 9102).unwrap();
-        let err = r.acquire_port(9100, 9102).unwrap_err();
+        r.acquire_port("slug-a", 9100, 9102).unwrap();
+        r.acquire_port("slug-b", 9100, 9102).unwrap();
+        let err = r.acquire_port("slug-c", 9100, 9102).unwrap_err();
         assert!(matches!(err, Error::PortExhausted));
     }
 
     #[test]
     fn release_port() {
         let r = registry();
-        let p = r.acquire_port(9200, 9201).unwrap(); // only 1 port in range
-        assert!(r.acquire_port(9200, 9201).is_err()); // range is exhausted
+        let p = r.acquire_port("slug-a", 9200, 9201).unwrap(); // only 1 port in range
+        assert!(r.acquire_port("slug-b", 9200, 9201).is_err()); // range is exhausted
         r.release_port(p).unwrap();
-        assert!(r.acquire_port(9200, 9201).is_ok()); // port is available again
+        assert!(r.acquire_port("slug-c", 9200, 9201).is_ok()); // port is available again
     }
 
     #[test]
@@ -473,9 +474,9 @@ mod tests {
         let r = Arc::new(SqliteRegistry::new(&db_path).unwrap());
 
         let handles: Vec<_> = (9400u32..9450)
-            .map(|_| {
+            .map(|i| {
                 let r = Arc::clone(&r);
-                thread::spawn(move || r.acquire_port(9400, 9450))
+                thread::spawn(move || r.acquire_port(&format!("concurrent-{i}"), 9400, 9450))
             })
             .collect();
 
@@ -489,5 +490,20 @@ mod tests {
         sorted.dedup();
         assert_eq!(sorted.len(), results.len(), "all acquired ports should be unique");
         assert_eq!(sorted.len(), 50, "all 50 ports should be acquired");
+    }
+
+    #[test]
+    fn acquire_port_stores_slug() {
+        let r = registry();
+        let port = r.acquire_port("sunny-bright-fox", 9300, 9310).unwrap();
+        let conn = r.pool.get().unwrap();
+        let stored_slug: String = conn
+            .query_row(
+                "SELECT slug FROM allocated_ports WHERE port = ?1",
+                params![port as i64],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_slug, "sunny-bright-fox");
     }
 }

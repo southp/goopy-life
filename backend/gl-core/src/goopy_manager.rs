@@ -59,11 +59,13 @@ where
     pub fn spawn(&mut self) -> Result<(String, u32, ThreadId), Error> {
         const MAX_RETRIES: usize = 10;
 
-        let port = self.registry.acquire_port(self.port_range_start, self.port_range_end)?;
-
+        // Port is acquired inside the retry loop so the DB record links the
+        // port to the slug from the moment of allocation.
         let mut new_goopy = None;
         for _ in 0..MAX_RETRIES {
             let slug = crate::slug_generator::generate_slug();
+            let port = self.registry.acquire_port(&slug, self.port_range_start, self.port_range_end)?;
+
             let candidate = Goopy::new(
                 slug.clone(),
                 self.goopy_life_in_days,
@@ -82,6 +84,9 @@ where
                 }
                 Err(Error::AlreadyExists) => {
                     tracing::warn!(slug = %slug, "slug collision, retrying");
+                    if let Err(rel_err) = self.registry.release_port(port) {
+                        tracing::error!("spawn: release port {} on slug collision error: {:?}", port, rel_err);
+                    }
                     continue;
                 }
                 Err(e) => {
@@ -94,11 +99,9 @@ where
         }
 
         let Some(new_goopy) = new_goopy else {
-            if let Err(e) = self.registry.release_port(port) {
-                tracing::error!("spawn: release port {} error: {:?}", port, e);
-            }
             return Err(Error::SlugExhausted);
         };
+        let port = new_goopy.port;
 
         let slug = new_goopy.slug.clone();
 
@@ -276,6 +279,7 @@ mod tests {
 
     struct CollideOnceRegistry {
         save_calls: Mutex<u32>,
+        release_calls: Arc<Mutex<u32>>,
     }
 
     impl GoopyRegistry for CollideOnceRegistry {
@@ -292,8 +296,11 @@ mod tests {
         fn delete(&self, _slug: &str) -> Result<(), Error> { Ok(()) }
         fn list(&self) -> Result<Vec<Goopy>, Error> { Ok(vec![]) }
         fn update_status(&self, _slug: &str, _new_status: Status) -> Result<(), Error> { Ok(()) }
-        fn acquire_port(&self, range_start: u32, _range_end: u32) -> Result<u32, Error> { Ok(range_start) }
-        fn release_port(&self, _port: u32) -> Result<(), Error> { Ok(()) }
+        fn acquire_port(&self, _slug: &str, range_start: u32, _range_end: u32) -> Result<u32, Error> { Ok(range_start) }
+        fn release_port(&self, _port: u32) -> Result<(), Error> {
+            *self.release_calls.lock().unwrap() += 1;
+            Ok(())
+        }
     }
 
     struct NoopProvisioner;
@@ -333,6 +340,7 @@ mod tests {
 
     #[test]
     fn spawn_retries_on_collision() {
+        let release_calls = Arc::new(Mutex::new(0u32));
         let mut gm = GoopyManager::new(
             std::path::PathBuf::from("/tmp/test-goopy"),
             "test.example".into(),
@@ -340,13 +348,18 @@ mod tests {
             7,
             8080,
             9080,
-            CollideOnceRegistry { save_calls: Mutex::new(0) },
+            CollideOnceRegistry {
+                save_calls: Mutex::new(0),
+                release_calls: Arc::clone(&release_calls),
+            },
             NoopProvisioner,
         );
 
         // First save returns AlreadyExists; spawn must retry and succeed on the second attempt.
         let result = gm.spawn();
         assert!(result.is_ok(), "spawn should succeed after retrying a slug collision");
+        // The port acquired for the colliding slug must have been released before retrying.
+        assert_eq!(*release_calls.lock().unwrap(), 1, "release_port should be called once on slug collision");
     }
 
     #[test]
@@ -356,12 +369,12 @@ mod tests {
         // Insert an expired goopy: created 10 days ago, lives 7 days
         let expired = make_goopy("expired-slug", 10, 9000, Status::Done);
         registry.save(&expired).unwrap();
-        registry.acquire_port(9000, 9001).unwrap();
+        registry.acquire_port("expired-slug", 9000, 9001).unwrap();
 
         // Insert a non-expired goopy: created now, lives 7 days
         let alive = make_goopy("alive-slug", 0, 9001, Status::Done);
         registry.save(&alive).unwrap();
-        registry.acquire_port(9001, 9002).unwrap();
+        registry.acquire_port("alive-slug", 9001, 9002).unwrap();
 
         let mut gm = make_test_manager(registry);
 
@@ -389,12 +402,12 @@ mod tests {
         // Insert an expired goopy with Spawning status — should be skipped
         let spawning = make_goopy("spawning-slug", 10, 9000, Status::Spawning);
         registry.save(&spawning).unwrap();
-        registry.acquire_port(9000, 9001).unwrap();
+        registry.acquire_port("spawning-slug", 9000, 9001).unwrap();
 
         // Insert an expired goopy with Despawning status — should be skipped
         let despawning = make_goopy("despawning-slug", 10, 9001, Status::Despawning);
         registry.save(&despawning).unwrap();
-        registry.acquire_port(9001, 9002).unwrap();
+        registry.acquire_port("despawning-slug", 9001, 9002).unwrap();
 
         let mut gm = make_test_manager(registry);
 
@@ -414,7 +427,7 @@ mod tests {
         // Insert a non-expired goopy
         let alive = make_goopy("fresh-slug", 0, 9000, Status::Done);
         registry.save(&alive).unwrap();
-        registry.acquire_port(9000, 9001).unwrap();
+        registry.acquire_port("fresh-slug", 9000, 9001).unwrap();
 
         let mut gm = make_test_manager(registry);
 
@@ -433,14 +446,14 @@ mod tests {
             fn delete(&self, slug: &str) -> Result<(), Error> { self.0.delete(slug) }
             fn list(&self) -> Result<Vec<Goopy>, Error> { self.0.list() }
             fn update_status(&self, _: &str, _: Status) -> Result<(), Error> { Err(Error::Invalid) }
-            fn acquire_port(&self, s: u32, e: u32) -> Result<u32, Error> { self.0.acquire_port(s, e) }
+            fn acquire_port(&self, slug: &str, s: u32, e: u32) -> Result<u32, Error> { self.0.acquire_port(slug, s, e) }
             fn release_port(&self, p: u32) -> Result<(), Error> { self.0.release_port(p) }
         }
 
         let inner = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         let expired = make_goopy("err-slug", 10, 9000, Status::Done);
         inner.save(&expired).unwrap();
-        inner.acquire_port(9000, 9001).unwrap();
+        inner.acquire_port("err-slug", 9000, 9001).unwrap();
 
         let mut gm = GoopyManager::new(
             PathBuf::from("/tmp"),
