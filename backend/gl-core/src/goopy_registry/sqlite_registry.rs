@@ -73,7 +73,7 @@ impl SqliteRegistry {
 
             CREATE TABLE IF NOT EXISTS allocated_ports (
                 port INTEGER PRIMARY KEY,
-                slug TEXT    NOT NULL
+                slug TEXT    NOT NULL UNIQUE
             );
             ",
         )
@@ -474,9 +474,9 @@ mod tests {
         let r = Arc::new(SqliteRegistry::new(&db_path).unwrap());
 
         let handles: Vec<_> = (9400u32..9450)
-            .map(|_| {
+            .map(|i| {
                 let r = Arc::clone(&r);
-                thread::spawn(move || r.acquire_port("concurrent-test", 9400, 9450))
+                thread::spawn(move || r.acquire_port(&format!("concurrent-{i}"), 9400, 9450))
             })
             .collect();
 

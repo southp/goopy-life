@@ -279,6 +279,7 @@ mod tests {
 
     struct CollideOnceRegistry {
         save_calls: Mutex<u32>,
+        release_calls: Arc<Mutex<u32>>,
     }
 
     impl GoopyRegistry for CollideOnceRegistry {
@@ -296,7 +297,10 @@ mod tests {
         fn list(&self) -> Result<Vec<Goopy>, Error> { Ok(vec![]) }
         fn update_status(&self, _slug: &str, _new_status: Status) -> Result<(), Error> { Ok(()) }
         fn acquire_port(&self, _slug: &str, range_start: u32, _range_end: u32) -> Result<u32, Error> { Ok(range_start) }
-        fn release_port(&self, _port: u32) -> Result<(), Error> { Ok(()) }
+        fn release_port(&self, _port: u32) -> Result<(), Error> {
+            *self.release_calls.lock().unwrap() += 1;
+            Ok(())
+        }
     }
 
     struct NoopProvisioner;
@@ -336,6 +340,7 @@ mod tests {
 
     #[test]
     fn spawn_retries_on_collision() {
+        let release_calls = Arc::new(Mutex::new(0u32));
         let mut gm = GoopyManager::new(
             std::path::PathBuf::from("/tmp/test-goopy"),
             "test.example".into(),
@@ -343,13 +348,18 @@ mod tests {
             7,
             8080,
             9080,
-            CollideOnceRegistry { save_calls: Mutex::new(0) },
+            CollideOnceRegistry {
+                save_calls: Mutex::new(0),
+                release_calls: Arc::clone(&release_calls),
+            },
             NoopProvisioner,
         );
 
         // First save returns AlreadyExists; spawn must retry and succeed on the second attempt.
         let result = gm.spawn();
         assert!(result.is_ok(), "spawn should succeed after retrying a slug collision");
+        // The port acquired for the colliding slug must have been released before retrying.
+        assert_eq!(*release_calls.lock().unwrap(), 1, "release_port should be called once on slug collision");
     }
 
     #[test]
