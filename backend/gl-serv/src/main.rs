@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::thread::ThreadId;
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderValue, Method, StatusCode};
@@ -11,7 +10,7 @@ use clap::Parser;
 use gl_core::goopy_provisioner::hello_provisioner::HelloProvisioner;
 use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
 use gl_core::{GoopyManager, RealSysRunner};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -32,7 +31,7 @@ struct Cli {
 // ---------------------------------------------------------------------------
 
 trait ManagerService: Send + Sync {
-    fn spawn(&self) -> Result<(String, u32, ThreadId), gl_core::Error>;
+    fn spawn(&self) -> Result<String, gl_core::Error>;
     fn get(&self, slug: &str) -> Result<Option<gl_core::Goopy>, gl_core::Error>;
 }
 
@@ -41,8 +40,8 @@ where
     R: gl_core::goopy_registry::GoopyRegistry + Send + Sync + 'static,
     P: gl_core::goopy_provisioner::GoopyProvisioner + Send + Sync + 'static,
 {
-    fn spawn(&self) -> Result<(String, u32, ThreadId), gl_core::Error> {
-        GoopyManager::spawn(self)
+    fn spawn(&self) -> Result<String, gl_core::Error> {
+        GoopyManager::spawn(self).map(|(slug, _, _)| slug)
     }
 
     fn get(&self, slug: &str) -> Result<Option<gl_core::Goopy>, gl_core::Error> {
@@ -132,7 +131,7 @@ impl From<gl_core::Error> for AppError {
 // ---------------------------------------------------------------------------
 
 async fn spawn_goopy(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
-    let (slug, _port, _job_id) = tokio::task::spawn_blocking({
+    let slug = tokio::task::spawn_blocking({
         let state = Arc::clone(&state);
         move || state.manager.spawn()
     })
@@ -275,7 +274,7 @@ async fn main() {
     });
 
     let cors = CorsLayer::new()
-        .allow_origin(cors_origin)
+        .allow_origin(AllowOrigin::list([cors_origin]))
         .allow_methods([Method::GET, Method::POST])
         .allow_headers(tower_http::cors::Any);
 
@@ -369,7 +368,9 @@ mod tests {
             registry,
             NoopProvisioner,
         ));
+        let cors_origin = cfg.cors_origin.parse::<HeaderValue>().unwrap();
         let cors = CorsLayer::new()
+            .allow_origin(AllowOrigin::list([cors_origin]))
             .allow_methods([Method::GET, Method::POST])
             .allow_headers(tower_http::cors::Any);
         let state = Arc::new(AppState { manager, cfg });
@@ -640,5 +641,56 @@ mod tests {
         assert_eq!(body["domain"], "goopy.life");
         assert_eq!(body["life_in_days"], 7);
         assert_eq!(body["storage_quota_mb"], 0); // PlainDir has no quota
+    }
+
+    // ── CORS ──────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn cors_allowed_origin_sets_acao_header() {
+        // test_cfg sets cors_origin = "https://example.com"
+        let app = make_router("goopy.life", SqliteRegistry::new(Path::new(":memory:")).unwrap());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/config")
+                    .header("Origin", "https://example.com")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("https://example.com"),
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_disallowed_origin_omits_acao_header() {
+        let app = make_router("goopy.life", SqliteRegistry::new(Path::new(":memory:")).unwrap());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/config")
+                    .header("Origin", "https://evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_none(),
+            "disallowed origin must not receive ACAO header",
+        );
     }
 }

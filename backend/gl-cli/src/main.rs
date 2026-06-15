@@ -151,8 +151,10 @@ fn main() {
                 sys,
             );
 
-            let registry = SqliteRegistry::new(&cfg.registry.path)
-                .expect("failed to open SQLite registry");
+            let registry = SqliteRegistry::new(&cfg.registry.path).unwrap_or_else(|e| {
+                tracing::error!(error = %e, "failed to open SQLite registry");
+                std::process::exit(1);
+            });
 
             let gm = GoopyManager::new(
                 cfg.base_dir,
