@@ -347,6 +347,26 @@ mod tests {
     }
 
     #[test]
+    fn spawn_rejects_non_positive_life_in_days() {
+        for bad in [0i32, -1, i32::MIN] {
+            let gm = GoopyManager::new(
+                GoopyManagerConfig {
+                    base_dir: PathBuf::from("/tmp"),
+                    domain: "test.example".into(),
+                    ssl_email: "test@example.com".into(),
+                    life_in_days: bad,
+                    port_range_start: 9000,
+                    port_range_end: 9100,
+                },
+                SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+                NoopProvisioner,
+            );
+            let err = gm.spawn().unwrap_err();
+            assert!(matches!(err, Error::Invalid), "expected Invalid for life_in_days={bad}");
+        }
+    }
+
+    #[test]
     fn spawn_retries_on_collision() {
         let release_calls = Arc::new(Mutex::new(0u32));
         let gm = GoopyManager::new(

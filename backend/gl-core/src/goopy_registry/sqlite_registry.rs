@@ -94,8 +94,8 @@ fn parse_row(
     status_str: String,
     working_dir_str: String,
     port: i64,
-    pk_str: String,
-    sv: String,
+    provisioner_kind_str: String,
+    service_version: String,
 ) -> Result<Goopy, Error> {
     let created_at = created_at_str.parse::<DateTime<Utc>>().map_err(|_| Error::Invalid)?;
     Ok(Goopy {
@@ -105,8 +105,8 @@ fn parse_row(
         status: Status::from_str(&status_str)?,
         working_dir: PathBuf::from(working_dir_str),
         port: port as u32,
-        provisioner_kind: ProvisionerKind::from_str(&pk_str)?,
-        service_version: sv,
+        provisioner_kind: ProvisionerKind::from_str(&provisioner_kind_str)?,
+        service_version,
     })
 }
 
@@ -181,8 +181,8 @@ impl GoopyRegistry for SqliteRegistry {
         match result {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(Error::Registry { context: "load", source: e.into() }),
-            Ok((slug, life_in_days, created_at_str, status_str, working_dir_str, port, pk_str, sv)) => {
-                let gp = parse_row(slug, life_in_days, created_at_str, status_str, working_dir_str, port, pk_str, sv)?;
+            Ok((slug, life_in_days, created_at_str, status_str, working_dir_str, port, provisioner_kind_str, service_version)) => {
+                let gp = parse_row(slug, life_in_days, created_at_str, status_str, working_dir_str, port, provisioner_kind_str, service_version)?;
                 tracing::debug!(slug = %gp.slug, "loaded goopy");
                 Ok(Some(gp))
             }
@@ -256,9 +256,9 @@ impl GoopyRegistry for SqliteRegistry {
             })
             .map_err(|e| Error::Registry { context: "list query", source: e.into() })?
             .map(|r| {
-                let (slug, life_in_days, created_at_str, status_str, working_dir_str, port, pk_str, sv) =
+                let (slug, life_in_days, created_at_str, status_str, working_dir_str, port, provisioner_kind_str, service_version) =
                     r.map_err(|e| Error::Registry { context: "list row", source: e.into() })?;
-                parse_row(slug, life_in_days, created_at_str, status_str, working_dir_str, port, pk_str, sv)
+                parse_row(slug, life_in_days, created_at_str, status_str, working_dir_str, port, provisioner_kind_str, service_version)
             })
             .collect::<Result<Vec<_>, _>>()?;
 
