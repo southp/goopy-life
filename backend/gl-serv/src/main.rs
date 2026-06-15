@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::thread::ThreadId;
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderValue, Method, StatusCode};
@@ -27,11 +28,34 @@ struct Cli {
 }
 
 // ---------------------------------------------------------------------------
+// Manager abstraction (enables test injection)
+// ---------------------------------------------------------------------------
+
+trait ManagerService: Send + Sync {
+    fn spawn(&self) -> Result<(String, u32, ThreadId), gl_core::Error>;
+    fn get(&self, slug: &str) -> Result<Option<gl_core::Goopy>, gl_core::Error>;
+}
+
+impl<R, P> ManagerService for GoopyManager<R, P>
+where
+    R: gl_core::goopy_registry::GoopyRegistry + Send + Sync + 'static,
+    P: gl_core::goopy_provisioner::GoopyProvisioner + Send + Sync + 'static,
+{
+    fn spawn(&self) -> Result<(String, u32, ThreadId), gl_core::Error> {
+        GoopyManager::spawn(self)
+    }
+
+    fn get(&self, slug: &str) -> Result<Option<gl_core::Goopy>, gl_core::Error> {
+        GoopyManager::get(self, slug)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shared state
 // ---------------------------------------------------------------------------
 
 struct AppState {
-    manager: Arc<GoopyManager<SqliteRegistry, HelloProvisioner>>,
+    manager: Arc<dyn ManagerService>,
     cfg: gl_core::Config,
 }
 
@@ -190,6 +214,20 @@ async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Router builder (shared by main and tests)
+// ---------------------------------------------------------------------------
+
+fn build_router(state: Arc<AppState>, cors: CorsLayer) -> Router {
+    Router::new()
+        .route("/goopies", post(spawn_goopy))
+        .route("/goopies/{slug}", get(get_goopy))
+        .route("/goopies/{slug}/alive", get(alive_check))
+        .route("/config", get(get_config))
+        .layer(cors)
+        .with_state(state)
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -206,7 +244,6 @@ async fn main() {
         std::process::exit(1);
     });
 
-    // Build storage allocator from config
     let storage = cfg.allocator.build();
 
     let provisioner = HelloProvisioner::new(
@@ -221,7 +258,7 @@ async fn main() {
         std::process::exit(1);
     });
 
-    let manager = Arc::new(GoopyManager::new(
+    let manager: Arc<dyn ManagerService> = Arc::new(GoopyManager::new(
         cfg.base_dir.clone(),
         cfg.domain.clone(),
         cfg.ssl_email.clone(),
@@ -246,13 +283,7 @@ async fn main() {
 
     let state = Arc::new(AppState { manager, cfg });
 
-    let app = Router::new()
-        .route("/goopies", post(spawn_goopy))
-        .route("/goopies/{slug}", get(get_goopy))
-        .route("/goopies/{slug}/alive", get(alive_check))
-        .route("/config", get(get_config))
-        .layer(cors)
-        .with_state(state);
+    let app = build_router(state, cors);
 
     let listener = tokio::net::TcpListener::bind(&bind_address)
         .await
@@ -266,4 +297,348 @@ async fn main() {
         tracing::error!("server error: {e}");
         std::process::exit(1);
     });
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use chrono::Duration;
+    use gl_core::goopy_provisioner::GoopyProvisioner;
+    use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
+    use gl_core::goopy_registry::GoopyRegistry;
+    use gl_core::{Goopy, GoopyManager, ProvisionerKind, Status};
+    use http_body_util::BodyExt;
+    use serde_json::Value;
+    use std::path::{Path, PathBuf};
+    use tower::ServiceExt;
+
+    // ── Test provisioner ──────────────────────────────────────────────────
+
+    struct NoopProvisioner;
+
+    impl GoopyProvisioner for NoopProvisioner {
+        fn provision(&self, _: &Goopy) -> Result<(), gl_core::Error> { Ok(()) }
+        fn deprovision(&self, _: &Goopy) -> Result<(), gl_core::Error> { Ok(()) }
+        fn kind(&self) -> ProvisionerKind { ProvisionerKind::Hello }
+    }
+
+    // ── Test helpers ──────────────────────────────────────────────────────
+
+    fn test_cfg(domain: &str) -> gl_core::Config {
+        gl_core::Config {
+            base_dir: PathBuf::from("/tmp/goopy-test"),
+            domain: domain.to_string(),
+            ssl_email: "test@example.com".to_string(),
+            life_in_days: 7,
+            provisioner_kind: ProvisionerKind::Hello,
+            port_range_start: 9000,
+            port_range_end: 9100,
+            dev_mode: true,
+            cors_origin: "https://example.com".to_string(),
+            bind_address: "127.0.0.1:0".to_string(),
+            sweep_interval_secs: 86400,
+            registry: gl_core::config::RegistryConfig {
+                path: PathBuf::from(":memory:"),
+            },
+            allocator: gl_core::config::AllocatorConfig {
+                kind: gl_core::AllocatorKind::PlainDir,
+                pool: String::new(),
+                quota_mb: 0,
+            },
+        }
+    }
+
+    /// Build a test router using the given registry (pass pre-seeded registries
+    /// for tests that need existing goopies).
+    fn make_router(domain: &str, registry: SqliteRegistry) -> Router {
+        let cfg = test_cfg(domain);
+        let manager: Arc<dyn ManagerService> = Arc::new(GoopyManager::new(
+            cfg.base_dir.clone(),
+            cfg.domain.clone(),
+            cfg.ssl_email.clone(),
+            cfg.life_in_days,
+            cfg.port_range_start,
+            cfg.port_range_end,
+            registry,
+            NoopProvisioner,
+        ));
+        let cors = CorsLayer::new()
+            .allow_methods([Method::GET, Method::POST])
+            .allow_headers(tower_http::cors::Any);
+        let state = Arc::new(AppState { manager, cfg });
+        build_router(state, cors)
+    }
+
+    async fn body_json(body: Body) -> Value {
+        let bytes = body.collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn seed_goopy(
+        registry: &SqliteRegistry,
+        slug: &str,
+        life_in_days: i32,
+        days_ago: i64,
+        port: u32,
+        status: Status,
+    ) -> Goopy {
+        let goopy = Goopy::new(
+            slug.to_string(),
+            life_in_days,
+            Utc::now() - Duration::days(days_ago),
+            &PathBuf::from(format!("/tmp/goopy-test/{slug}")),
+            port,
+            status,
+            ProvisionerKind::Hello,
+            "0.1.0".to_string(),
+        )
+        .unwrap();
+        registry.save(&goopy).unwrap();
+        registry.acquire_port(slug, port, port + 1).unwrap();
+        goopy
+    }
+
+    // ── spawn_goopy ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn spawn_returns_201_with_slug_and_status() {
+        let app = make_router("goopy.life", SqliteRegistry::new(Path::new(":memory:")).unwrap());
+
+        let resp = app
+            .oneshot(Request::builder().method("POST").uri("/goopies").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = body_json(resp.into_body()).await;
+        assert!(body["slug"].is_string(), "slug should be present");
+        assert_eq!(body["status"], "Spawning");
+    }
+
+    #[tokio::test]
+    async fn spawn_returns_503_when_ports_exhausted() {
+        // Port range start == end means no ports available.
+        let mut cfg = test_cfg("goopy.life");
+        cfg.port_range_start = 9000;
+        cfg.port_range_end = 9000; // empty range → PortExhausted on first acquire
+
+        let manager: Arc<dyn ManagerService> = Arc::new(GoopyManager::new(
+            PathBuf::from("/tmp/goopy-test"),
+            cfg.domain.clone(),
+            cfg.ssl_email.clone(),
+            cfg.life_in_days,
+            cfg.port_range_start,
+            cfg.port_range_end,
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+            NoopProvisioner,
+        ));
+        let cors = CorsLayer::new()
+            .allow_methods([Method::GET, Method::POST])
+            .allow_headers(tower_http::cors::Any);
+        let state = Arc::new(AppState { manager, cfg });
+        let app = build_router(state, cors);
+
+        let resp = app
+            .oneshot(Request::builder().method("POST").uri("/goopies").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_json(resp.into_body()).await;
+        assert_eq!(body["code"], "service_unavailable");
+    }
+
+    // ── get_goopy ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_goopy_returns_200_with_subdomain_url() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_goopy(&registry, "happy-little-slug", 7, 0, 9001, Status::Done);
+        let app = make_router("goopy.life", registry);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/goopies/happy-little-slug")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp.into_body()).await;
+        assert_eq!(body["slug"], "happy-little-slug");
+        assert_eq!(body["url"], "https://happy-little-slug.goopy.life");
+    }
+
+    #[tokio::test]
+    async fn get_goopy_localhost_domain_uses_http_port_url() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_goopy(&registry, "local-test-slug", 7, 0, 9042, Status::Done);
+        let app = make_router("localhost", registry);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/goopies/local-test-slug")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp.into_body()).await;
+        assert_eq!(body["url"], "http://localhost:9042");
+    }
+
+    #[tokio::test]
+    async fn get_goopy_expires_at_uses_instance_life_in_days() {
+        // Config says 7 days, but the goopy was saved with life_in_days = 3.
+        // expires_at must reflect the per-instance value, not the config.
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let goopy = seed_goopy(&registry, "short-lived-slug", 3, 0, 9002, Status::Done);
+        let app = make_router("goopy.life", registry);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/goopies/short-lived-slug")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp.into_body()).await;
+
+        let expected_expires_at =
+            (goopy.created_at + Duration::days(3)).to_rfc3339();
+        assert_eq!(body["expires_at"], expected_expires_at);
+    }
+
+    #[tokio::test]
+    async fn get_goopy_unknown_slug_returns_404_with_code() {
+        let app = make_router("goopy.life", SqliteRegistry::new(Path::new(":memory:")).unwrap());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/goopies/no-such-slug")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = body_json(resp.into_body()).await;
+        assert_eq!(body["code"], "not_found");
+    }
+
+    // ── alive_check ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn alive_check_returns_200_for_alive_goopy() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        // Created now, lives 7 days → not expired, status Done
+        seed_goopy(&registry, "alive-slug", 7, 0, 9003, Status::Done);
+        let app = make_router("goopy.life", registry);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/goopies/alive-slug/alive")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn alive_check_returns_410_for_expired_goopy() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        // Created 10 days ago, lives 7 → expired
+        seed_goopy(&registry, "expired-slug", 7, 10, 9004, Status::Done);
+        let app = make_router("goopy.life", registry);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/goopies/expired-slug/alive")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::GONE);
+    }
+
+    #[tokio::test]
+    async fn alive_check_returns_410_for_non_done_status() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        // Still spawning → not alive even if within lifetime
+        seed_goopy(&registry, "spawning-slug", 7, 0, 9005, Status::Spawning);
+        let app = make_router("goopy.life", registry);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/goopies/spawning-slug/alive")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::GONE);
+    }
+
+    #[tokio::test]
+    async fn alive_check_returns_410_for_unknown_slug() {
+        let app = make_router("goopy.life", SqliteRegistry::new(Path::new(":memory:")).unwrap());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/goopies/no-such/alive")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::GONE);
+    }
+
+    // ── get_config ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_config_returns_correct_fields() {
+        let app = make_router("goopy.life", SqliteRegistry::new(Path::new(":memory:")).unwrap());
+
+        let resp = app
+            .oneshot(Request::builder().uri("/config").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp.into_body()).await;
+        assert_eq!(body["domain"], "goopy.life");
+        assert_eq!(body["life_in_days"], 7);
+        assert_eq!(body["storage_quota_mb"], 0); // PlainDir has no quota
+    }
 }
