@@ -6,7 +6,7 @@ use crate::shared_types::*;
 use chrono::{Duration, Utc};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{JoinHandle, ThreadId};
 
 pub struct GoopyManager<
@@ -24,7 +24,7 @@ pub struct GoopyManager<
     provisioner: Arc<Provisioner>,
 
     // TODO: This will also need to be cleaned up regularly
-    jobs: HashMap<ThreadId, JoinHandle<()>>,
+    jobs: Mutex<HashMap<ThreadId, JoinHandle<()>>>,
 }
 
 impl<Registry, Provisioner> GoopyManager<Registry, Provisioner>
@@ -51,12 +51,12 @@ where
             port_range_end,
             registry: Arc::new(registry),
             provisioner: Arc::new(provisioner),
-            jobs: HashMap::new(),
+            jobs: Mutex::new(HashMap::new()),
         }
     }
 
     #[tracing::instrument(skip(self))]
-    pub fn spawn(&mut self) -> Result<(String, u32, ThreadId), Error> {
+    pub fn spawn(&self) -> Result<(String, u32, ThreadId), Error> {
         const MAX_RETRIES: usize = 10;
 
         // Port is acquired inside the retry loop so the DB record links the
@@ -134,13 +134,13 @@ where
         });
 
         let id = handle.thread().id();
-        self.jobs.insert(id, handle);
+        self.jobs.lock().unwrap().insert(id, handle);
 
         Ok((slug, port, id))
     }
 
     #[tracing::instrument(skip(self))]
-    pub fn despawn(&mut self, slug: String) -> Result<ThreadId, Error> {
+    pub fn despawn(&self, slug: String) -> Result<ThreadId, Error> {
         let Some(goopy) = self.get(&slug)? else {
             return Err(Error::NotFound);
         };
@@ -186,7 +186,7 @@ where
         });
 
         let id = handle.thread().id();
-        self.jobs.insert(id, handle);
+        self.jobs.lock().unwrap().insert(id, handle);
 
         Ok(id)
     }
@@ -212,7 +212,7 @@ where
     /// Meant to be called periodically (e.g. via `tokio::time::interval` in
     /// `gl-serv`).
     #[tracing::instrument(skip(self))]
-    pub fn sweep(&mut self) -> Result<(u32, Vec<Error>), Error> {
+    pub fn sweep(&self) -> Result<(u32, Vec<Error>), Error> {
         let now = Utc::now();
         let goopies = self.list()?;
         let mut swept = 0u32;
@@ -247,6 +247,8 @@ where
 
     pub fn is_job_finished(&self, job_id: &ThreadId) -> bool {
         self.jobs
+            .lock()
+            .unwrap()
             .get(job_id)
             .expect("job_id not tracked; callers must only pass IDs returned by spawn()")
             .is_finished()
@@ -259,7 +261,7 @@ where
     Provisioner: GoopyProvisioner + Send + Sync + 'static,
 {
     fn drop(&mut self) {
-        for (_, handle) in self.jobs.drain() {
+        for (_, handle) in self.jobs.lock().unwrap().drain() {
             if let Err(e) = handle.join() {
                 tracing::error!("worker thread panicked: {:?}", e);
             }
@@ -275,7 +277,6 @@ mod tests {
     use crate::goopy_registry::GoopyRegistry;
     use crate::goopy_registry::sqlite_registry::SqliteRegistry;
     use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
 
     struct CollideOnceRegistry {
         save_calls: Mutex<u32>,
@@ -341,7 +342,7 @@ mod tests {
     #[test]
     fn spawn_retries_on_collision() {
         let release_calls = Arc::new(Mutex::new(0u32));
-        let mut gm = GoopyManager::new(
+        let gm = GoopyManager::new(
             std::path::PathBuf::from("/tmp/test-goopy"),
             "test.example".into(),
             "test@example.com".into(),
@@ -376,7 +377,7 @@ mod tests {
         registry.save(&alive).unwrap();
         registry.acquire_port("alive-slug", 9001, 9002).unwrap();
 
-        let mut gm = make_test_manager(registry);
+        let gm = make_test_manager(registry);
 
         let (swept, errors) = gm.sweep().unwrap();
         assert_eq!(swept, 1);
@@ -409,7 +410,7 @@ mod tests {
         registry.save(&despawning).unwrap();
         registry.acquire_port("despawning-slug", 9001, 9002).unwrap();
 
-        let mut gm = make_test_manager(registry);
+        let gm = make_test_manager(registry);
 
         let (swept, errors) = gm.sweep().unwrap();
         assert_eq!(swept, 0);
@@ -429,7 +430,7 @@ mod tests {
         registry.save(&alive).unwrap();
         registry.acquire_port("fresh-slug", 9000, 9001).unwrap();
 
-        let mut gm = make_test_manager(registry);
+        let gm = make_test_manager(registry);
 
         let (swept, errors) = gm.sweep().unwrap();
         assert_eq!(swept, 0);
@@ -455,7 +456,7 @@ mod tests {
         inner.save(&expired).unwrap();
         inner.acquire_port("err-slug", 9000, 9001).unwrap();
 
-        let mut gm = GoopyManager::new(
+        let gm = GoopyManager::new(
             PathBuf::from("/tmp"),
             "test.example".into(),
             "test@example.com".into(),
@@ -476,7 +477,7 @@ mod tests {
 
     #[test]
     fn spawn_returns_slug_and_port() {
-        let mut gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
+        let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
         let (slug, port, _) = gm.spawn().expect("spawn should succeed");
         assert!(!slug.is_empty(), "slug should be non-empty");
         assert!(port >= 9000 && port < 9100, "port should be in configured range");
@@ -484,7 +485,7 @@ mod tests {
 
     #[test]
     fn get_finds_goopy_after_spawn() {
-        let mut gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
+        let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
         let (slug, _, _) = gm.spawn().unwrap();
         let g = gm.get(&slug).unwrap().expect("should find goopy");
         // NoopProvisioner completes synchronously, so status may be Done already.
@@ -503,7 +504,7 @@ mod tests {
 
     #[test]
     fn list_returns_spawned_instances() {
-        let mut gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
+        let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
         let (slug1, _, _) = gm.spawn().unwrap();
         let (slug2, _, _) = gm.spawn().unwrap();
         let goopies = gm.list().unwrap();
@@ -516,7 +517,7 @@ mod tests {
     fn despawn_removes_goopy_after_deprovision() {
         // Use a real registry so status transitions are persisted.
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        let mut gm = make_test_manager(registry);
+        let gm = make_test_manager(registry);
 
         let (slug, _, thread_id) = gm.spawn().unwrap();
 
@@ -526,9 +527,11 @@ mod tests {
             let g = gm.get(&slug).unwrap().unwrap();
             if g.status == Status::Done { break; }
             assert!(std::time::Instant::now() < deadline, "spawn timed out");
-            if let Some(h) = gm.jobs.get(&thread_id) {
-                if h.is_finished() { break; }
-            } else { break; }
+            let should_break = {
+                let jobs = gm.jobs.lock().unwrap();
+                jobs.get(&thread_id).map_or(true, |h| h.is_finished())
+            };
+            if should_break { break; }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
@@ -547,7 +550,7 @@ mod tests {
 
     #[test]
     fn despawn_missing_returns_not_found() {
-        let mut gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
+        let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
         let err = gm.despawn("no-such".to_string()).unwrap_err();
         assert!(matches!(err, Error::NotFound));
     }

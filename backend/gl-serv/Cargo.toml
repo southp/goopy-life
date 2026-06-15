@@ -8,4 +8,13 @@ gl-core = { path = "../gl-core" }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-clap = { version = "4", features = ["derive"] }
+serde.workspace = true
+chrono.workspace = true
+clap.workspace = true
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
+serde_json = "1"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

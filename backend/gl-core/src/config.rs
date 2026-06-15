@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::shared_types::{AllocatorKind, Error, ProvisionerKind};
+use crate::storage_allocator::{PlainDirAllocator, StorageAllocator, ZfsAllocator};
 
 // Design note: a fully abstract design would store these as `dyn RegistryConfig` /
 // `dyn AllocatorConfig` traits. We use concrete structs instead — the number of
@@ -20,6 +22,15 @@ pub struct AllocatorConfig {
     /// Per-instance disk quota in MB. Required when `kind = "Zfs"`; ignored otherwise.
     #[serde(default)]
     pub quota_mb: u64,
+}
+
+impl AllocatorConfig {
+    pub fn build(&self) -> Arc<dyn StorageAllocator> {
+        match self.kind {
+            AllocatorKind::PlainDir => Arc::new(PlainDirAllocator),
+            AllocatorKind::Zfs => Arc::new(ZfsAllocator::new(self.pool.clone(), self.quota_mb)),
+        }
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
