@@ -9,6 +9,16 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread::{JoinHandle, ThreadId};
 
+#[derive(Debug)]
+pub struct GoopyManagerConfig {
+    pub base_dir: PathBuf,
+    pub domain: String,
+    pub ssl_email: String,
+    pub life_in_days: i32,
+    pub port_range_start: u32,
+    pub port_range_end: u32,
+}
+
 pub struct GoopyManager<
     Registry: GoopyRegistry + Send + Sync + 'static,
     Provisioner: GoopyProvisioner + Send + Sync + 'static,
@@ -32,23 +42,14 @@ where
     Registry: GoopyRegistry + Send + Sync + 'static,
     Provisioner: GoopyProvisioner + Send + Sync + 'static,
 {
-    pub fn new(
-        base_dir: PathBuf,
-        domain: String,
-        ssl_email: String,
-        goopy_life_in_days: i32,
-        port_range_start: u32,
-        port_range_end: u32,
-        registry: Registry,
-        provisioner: Provisioner,
-    ) -> Self {
+    pub fn new(config: GoopyManagerConfig, registry: Registry, provisioner: Provisioner) -> Self {
         Self {
-            base_dir,
-            domain,
-            ssl_email,
-            goopy_life_in_days,
-            port_range_start,
-            port_range_end,
+            base_dir: config.base_dir,
+            domain: config.domain,
+            ssl_email: config.ssl_email,
+            goopy_life_in_days: config.life_in_days,
+            port_range_start: config.port_range_start,
+            port_range_end: config.port_range_end,
             registry: Arc::new(registry),
             provisioner: Arc::new(provisioner),
             jobs: Mutex::new(HashMap::new()),
@@ -57,6 +58,10 @@ where
 
     #[tracing::instrument(skip(self))]
     pub fn spawn(&self) -> Result<(String, u32, ThreadId), Error> {
+        if self.goopy_life_in_days <= 0 {
+            return Err(Error::Invalid);
+        }
+
         const MAX_RETRIES: usize = 10;
 
         // Port is acquired inside the retry loop so the DB record links the
@@ -64,18 +69,19 @@ where
         let mut new_goopy = None;
         for _ in 0..MAX_RETRIES {
             let slug = crate::slug_generator::generate_slug();
+            debug_assert!(!slug.is_empty(), "slug generator must not produce empty slugs");
             let port = self.registry.acquire_port(&slug, self.port_range_start, self.port_range_end)?;
 
-            let candidate = Goopy::new(
-                slug.clone(),
-                self.goopy_life_in_days,
-                Utc::now(),
-                &self.base_dir.join(&slug),
+            let candidate = Goopy {
+                slug: slug.clone(),
+                life_in_days: self.goopy_life_in_days,
+                created_at: Utc::now(),
+                working_dir: self.base_dir.join(&slug),
                 port,
-                Status::Spawning,
-                self.provisioner.kind(),
-                env!("CARGO_PKG_VERSION").to_string(),
-            )?;
+                status: Status::Spawning,
+                provisioner_kind: self.provisioner.kind(),
+                service_version: env!("CARGO_PKG_VERSION").to_string(),
+            };
 
             match self.registry.save(&candidate) {
                 Ok(()) => {
@@ -314,41 +320,64 @@ mod tests {
 
     fn make_test_manager(registry: SqliteRegistry) -> GoopyManager<SqliteRegistry, NoopProvisioner> {
         GoopyManager::new(
-            PathBuf::from("/tmp"),
-            "test.example".into(),
-            "test@example.com".into(),
-            7,
-            9000,
-            9100,
+            GoopyManagerConfig {
+                base_dir: PathBuf::from("/tmp"),
+                domain: "test.example".into(),
+                ssl_email: "test@example.com".into(),
+                life_in_days: 7,
+                port_range_start: 9000,
+                port_range_end: 9100,
+            },
             registry,
             NoopProvisioner,
         )
     }
 
     fn make_goopy(slug: &str, days_ago: i64, port: u32, status: Status) -> Goopy {
-        Goopy::new(
-            slug.to_string(),
-            7,
-            Utc::now() - Duration::days(days_ago),
-            &PathBuf::from(format!("/tmp/{slug}")),
+        Goopy {
+            slug: slug.to_string(),
+            life_in_days: 7,
+            created_at: Utc::now() - Duration::days(days_ago),
+            working_dir: PathBuf::from(format!("/tmp/{slug}")),
             port,
             status,
-            ProvisionerKind::Hello,
-            "0.1.0".to_string(),
-        )
-        .unwrap()
+            provisioner_kind: ProvisionerKind::Hello,
+            service_version: "0.1.0".to_string(),
+        }
+    }
+
+    #[test]
+    fn spawn_rejects_non_positive_life_in_days() {
+        for bad in [0i32, -1, i32::MIN] {
+            let gm = GoopyManager::new(
+                GoopyManagerConfig {
+                    base_dir: PathBuf::from("/tmp"),
+                    domain: "test.example".into(),
+                    ssl_email: "test@example.com".into(),
+                    life_in_days: bad,
+                    port_range_start: 9000,
+                    port_range_end: 9100,
+                },
+                SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+                NoopProvisioner,
+            );
+            let err = gm.spawn().unwrap_err();
+            assert!(matches!(err, Error::Invalid), "expected Invalid for life_in_days={bad}");
+        }
     }
 
     #[test]
     fn spawn_retries_on_collision() {
         let release_calls = Arc::new(Mutex::new(0u32));
         let gm = GoopyManager::new(
-            std::path::PathBuf::from("/tmp/test-goopy"),
-            "test.example".into(),
-            "test@example.com".into(),
-            7,
-            8080,
-            9080,
+            GoopyManagerConfig {
+                base_dir: PathBuf::from("/tmp/test-goopy"),
+                domain: "test.example".into(),
+                ssl_email: "test@example.com".into(),
+                life_in_days: 7,
+                port_range_start: 8080,
+                port_range_end: 9080,
+            },
             CollideOnceRegistry {
                 save_calls: Mutex::new(0),
                 release_calls: Arc::clone(&release_calls),
@@ -457,12 +486,14 @@ mod tests {
         inner.acquire_port("err-slug", 9000, 9001).unwrap();
 
         let gm = GoopyManager::new(
-            PathBuf::from("/tmp"),
-            "test.example".into(),
-            "test@example.com".into(),
-            7,
-            9000,
-            9100,
+            GoopyManagerConfig {
+                base_dir: PathBuf::from("/tmp"),
+                domain: "test.example".into(),
+                ssl_email: "test@example.com".into(),
+                life_in_days: 7,
+                port_range_start: 9000,
+                port_range_end: 9100,
+            },
             FailingUpdateRegistry(inner),
             NoopProvisioner,
         );

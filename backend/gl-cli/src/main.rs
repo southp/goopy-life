@@ -157,12 +157,14 @@ fn main() {
             });
 
             let gm = GoopyManager::new(
-                cfg.base_dir,
-                cfg.domain,
-                cfg.ssl_email,
-                cfg.life_in_days,
-                cfg.port_range_start,
-                cfg.port_range_end,
+                GoopyManagerConfig {
+                    base_dir: cfg.base_dir,
+                    domain: cfg.domain,
+                    ssl_email: cfg.ssl_email,
+                    life_in_days: cfg.life_in_days,
+                    port_range_start: cfg.port_range_start,
+                    port_range_end: cfg.port_range_end,
+                },
                 registry,
                 provisioner,
             );

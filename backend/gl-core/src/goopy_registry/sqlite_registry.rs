@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
@@ -84,9 +84,10 @@ impl SqliteRegistry {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: map a rusqlite row to a Goopy via `from_stored`
+// Row → Goopy conversion helper
 // ---------------------------------------------------------------------------
-fn row_to_goopy(
+#[allow(clippy::too_many_arguments)]
+fn parse_row(
     slug: String,
     life_in_days: i64,
     created_at_str: String,
@@ -96,23 +97,17 @@ fn row_to_goopy(
     provisioner_kind_str: String,
     service_version: String,
 ) -> Result<Goopy, Error> {
-    let created_at: DateTime<Utc> = created_at_str
-        .parse::<DateTime<Utc>>()
-        .map_err(|_| Error::Invalid)?;
-
-    let status = Status::from_str(&status_str)?;
-    let provisioner_kind = ProvisionerKind::from_str(&provisioner_kind_str)?;
-
-    Ok(Goopy::from_stored(
+    let created_at = created_at_str.parse::<DateTime<Utc>>().map_err(|_| Error::Invalid)?;
+    Ok(Goopy {
         slug,
-        life_in_days as i32,
+        life_in_days: life_in_days as i32,
         created_at,
-        Path::new(&working_dir_str),
-        port as u32,
-        status,
-        provisioner_kind,
+        status: Status::from_str(&status_str)?,
+        working_dir: PathBuf::from(working_dir_str),
+        port: port as u32,
+        provisioner_kind: ProvisionerKind::from_str(&provisioner_kind_str)?,
         service_version,
-    ))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -186,8 +181,8 @@ impl GoopyRegistry for SqliteRegistry {
         match result {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(Error::Registry { context: "load", source: e.into() }),
-            Ok((slug, life_in_days, created_at, status, working_dir, port, pk, sv)) => {
-                let gp = row_to_goopy(slug, life_in_days, created_at, status, working_dir, port, pk, sv)?;
+            Ok((slug, life_in_days, created_at_str, status_str, working_dir_str, port, provisioner_kind_str, service_version)) => {
+                let gp = parse_row(slug, life_in_days, created_at_str, status_str, working_dir_str, port, provisioner_kind_str, service_version)?;
                 tracing::debug!(slug = %gp.slug, "loaded goopy");
                 Ok(Some(gp))
             }
@@ -261,9 +256,9 @@ impl GoopyRegistry for SqliteRegistry {
             })
             .map_err(|e| Error::Registry { context: "list query", source: e.into() })?
             .map(|r| {
-                let (slug, life_in_days, created_at, status, working_dir, port, pk, sv) =
+                let (slug, life_in_days, created_at_str, status_str, working_dir_str, port, provisioner_kind_str, service_version) =
                     r.map_err(|e| Error::Registry { context: "list row", source: e.into() })?;
-                row_to_goopy(slug, life_in_days, created_at, status, working_dir, port, pk, sv)
+                parse_row(slug, life_in_days, created_at_str, status_str, working_dir_str, port, provisioner_kind_str, service_version)
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -335,17 +330,16 @@ mod tests {
     use std::path::PathBuf;
 
     fn make_goopy(slug: &str) -> Goopy {
-        Goopy::new(
-            slug.to_string(),
-            7,
-            chrono::Utc::now(),
-            &PathBuf::from(format!("/tmp/{slug}")),
-            8080,
-            Status::Spawning,
-            ProvisionerKind::Hello,
-            "0.1.0".to_string(),
-        )
-        .unwrap()
+        Goopy {
+            slug: slug.to_string(),
+            life_in_days: 7,
+            created_at: chrono::Utc::now(),
+            working_dir: PathBuf::from(format!("/tmp/{slug}")),
+            port: 8080,
+            status: Status::Spawning,
+            provisioner_kind: ProvisionerKind::Hello,
+            service_version: "0.1.0".to_string(),
+        }
     }
 
     fn registry() -> SqliteRegistry {
