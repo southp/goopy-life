@@ -394,17 +394,16 @@ mod tests {
         port: u32,
         status: Status,
     ) -> Goopy {
-        let goopy = Goopy::new(
-            slug.to_string(),
+        let goopy = Goopy {
+            slug: slug.to_string(),
             life_in_days,
-            Utc::now() - Duration::days(days_ago),
-            &PathBuf::from(format!("/tmp/goopy-test/{slug}")),
+            created_at: Utc::now() - Duration::days(days_ago),
+            working_dir: PathBuf::from(format!("/tmp/goopy-test/{slug}")),
             port,
             status,
-            ProvisionerKind::Hello,
-            "0.1.0".to_string(),
-        )
-        .unwrap();
+            provisioner_kind: ProvisionerKind::Hello,
+            service_version: "0.1.0".to_string(),
+        };
         registry.save(&goopy).unwrap();
         registry.acquire_port(slug, port, port + 1).unwrap();
         goopy

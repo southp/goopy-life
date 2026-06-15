@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread::{JoinHandle, ThreadId};
 
+#[derive(Debug)]
 pub struct GoopyManagerConfig {
     pub base_dir: PathBuf,
     pub domain: String,
@@ -57,6 +58,10 @@ where
 
     #[tracing::instrument(skip(self))]
     pub fn spawn(&self) -> Result<(String, u32, ThreadId), Error> {
+        if self.goopy_life_in_days <= 0 {
+            return Err(Error::Invalid);
+        }
+
         const MAX_RETRIES: usize = 10;
 
         // Port is acquired inside the retry loop so the DB record links the
@@ -64,18 +69,19 @@ where
         let mut new_goopy = None;
         for _ in 0..MAX_RETRIES {
             let slug = crate::slug_generator::generate_slug();
+            debug_assert!(!slug.is_empty(), "slug generator must not produce empty slugs");
             let port = self.registry.acquire_port(&slug, self.port_range_start, self.port_range_end)?;
 
-            let candidate = Goopy::new(
-                slug.clone(),
-                self.goopy_life_in_days,
-                Utc::now(),
-                &self.base_dir.join(&slug),
+            let candidate = Goopy {
+                slug: slug.clone(),
+                life_in_days: self.goopy_life_in_days,
+                created_at: Utc::now(),
+                working_dir: self.base_dir.join(&slug),
                 port,
-                Status::Spawning,
-                self.provisioner.kind(),
-                env!("CARGO_PKG_VERSION").to_string(),
-            )?;
+                status: Status::Spawning,
+                provisioner_kind: self.provisioner.kind(),
+                service_version: env!("CARGO_PKG_VERSION").to_string(),
+            };
 
             match self.registry.save(&candidate) {
                 Ok(()) => {
@@ -328,17 +334,16 @@ mod tests {
     }
 
     fn make_goopy(slug: &str, days_ago: i64, port: u32, status: Status) -> Goopy {
-        Goopy::new(
-            slug.to_string(),
-            7,
-            Utc::now() - Duration::days(days_ago),
-            &PathBuf::from(format!("/tmp/{slug}")),
+        Goopy {
+            slug: slug.to_string(),
+            life_in_days: 7,
+            created_at: Utc::now() - Duration::days(days_ago),
+            working_dir: PathBuf::from(format!("/tmp/{slug}")),
             port,
             status,
-            ProvisionerKind::Hello,
-            "0.1.0".to_string(),
-        )
-        .unwrap()
+            provisioner_kind: ProvisionerKind::Hello,
+            service_version: "0.1.0".to_string(),
+        }
     }
 
     #[test]

@@ -333,17 +333,16 @@ mod tests {
     use tempfile::tempdir;
 
     fn test_goopy(working_dir: &Path, port: u32) -> Goopy {
-        Goopy::new(
-            "tasty-lucky-clover".to_string(),
-            7,
-            chrono::Utc::now(),
-            working_dir,
+        Goopy {
+            slug: "tasty-lucky-clover".to_string(),
+            life_in_days: 7,
+            created_at: chrono::Utc::now(),
+            working_dir: working_dir.to_path_buf(),
             port,
-            Status::Spawning,
-            ProvisionerKind::Hello,
-            "0.1.0".to_string(),
-        )
-        .unwrap()
+            status: Status::Spawning,
+            provisioner_kind: ProvisionerKind::Hello,
+            service_version: "0.1.0".to_string(),
+        }
     }
 
     fn find_free_port() -> u32 {
