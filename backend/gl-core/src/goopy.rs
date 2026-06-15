@@ -16,6 +16,7 @@ pub struct Goopy {
 }
 
 impl Goopy {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         slug: String,
         life_in_days: i32,
@@ -46,27 +47,6 @@ impl Goopy {
         })
     }
 
-    pub(crate) fn from_stored(
-        slug: String,
-        life_in_days: i32,
-        created_at: DateTime<Utc>,
-        working_dir: &Path,
-        port: u32,
-        status: Status,
-        provisioner_kind: ProvisionerKind,
-        service_version: String,
-    ) -> Self {
-        Self {
-            slug,
-            life_in_days,
-            created_at,
-            working_dir: working_dir.into(),
-            port,
-            status,
-            provisioner_kind,
-            service_version,
-        }
-    }
 }
 
 #[cfg(test)]

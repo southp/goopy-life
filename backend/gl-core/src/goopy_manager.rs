@@ -9,6 +9,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread::{JoinHandle, ThreadId};
 
+pub struct GoopyManagerConfig {
+    pub base_dir: PathBuf,
+    pub domain: String,
+    pub ssl_email: String,
+    pub life_in_days: i32,
+    pub port_range_start: u32,
+    pub port_range_end: u32,
+}
+
 pub struct GoopyManager<
     Registry: GoopyRegistry + Send + Sync + 'static,
     Provisioner: GoopyProvisioner + Send + Sync + 'static,
@@ -32,23 +41,14 @@ where
     Registry: GoopyRegistry + Send + Sync + 'static,
     Provisioner: GoopyProvisioner + Send + Sync + 'static,
 {
-    pub fn new(
-        base_dir: PathBuf,
-        domain: String,
-        ssl_email: String,
-        goopy_life_in_days: i32,
-        port_range_start: u32,
-        port_range_end: u32,
-        registry: Registry,
-        provisioner: Provisioner,
-    ) -> Self {
+    pub fn new(config: GoopyManagerConfig, registry: Registry, provisioner: Provisioner) -> Self {
         Self {
-            base_dir,
-            domain,
-            ssl_email,
-            goopy_life_in_days,
-            port_range_start,
-            port_range_end,
+            base_dir: config.base_dir,
+            domain: config.domain,
+            ssl_email: config.ssl_email,
+            goopy_life_in_days: config.life_in_days,
+            port_range_start: config.port_range_start,
+            port_range_end: config.port_range_end,
             registry: Arc::new(registry),
             provisioner: Arc::new(provisioner),
             jobs: Mutex::new(HashMap::new()),
@@ -314,12 +314,14 @@ mod tests {
 
     fn make_test_manager(registry: SqliteRegistry) -> GoopyManager<SqliteRegistry, NoopProvisioner> {
         GoopyManager::new(
-            PathBuf::from("/tmp"),
-            "test.example".into(),
-            "test@example.com".into(),
-            7,
-            9000,
-            9100,
+            GoopyManagerConfig {
+                base_dir: PathBuf::from("/tmp"),
+                domain: "test.example".into(),
+                ssl_email: "test@example.com".into(),
+                life_in_days: 7,
+                port_range_start: 9000,
+                port_range_end: 9100,
+            },
             registry,
             NoopProvisioner,
         )
@@ -343,12 +345,14 @@ mod tests {
     fn spawn_retries_on_collision() {
         let release_calls = Arc::new(Mutex::new(0u32));
         let gm = GoopyManager::new(
-            std::path::PathBuf::from("/tmp/test-goopy"),
-            "test.example".into(),
-            "test@example.com".into(),
-            7,
-            8080,
-            9080,
+            GoopyManagerConfig {
+                base_dir: PathBuf::from("/tmp/test-goopy"),
+                domain: "test.example".into(),
+                ssl_email: "test@example.com".into(),
+                life_in_days: 7,
+                port_range_start: 8080,
+                port_range_end: 9080,
+            },
             CollideOnceRegistry {
                 save_calls: Mutex::new(0),
                 release_calls: Arc::clone(&release_calls),
@@ -457,12 +461,14 @@ mod tests {
         inner.acquire_port("err-slug", 9000, 9001).unwrap();
 
         let gm = GoopyManager::new(
-            PathBuf::from("/tmp"),
-            "test.example".into(),
-            "test@example.com".into(),
-            7,
-            9000,
-            9100,
+            GoopyManagerConfig {
+                base_dir: PathBuf::from("/tmp"),
+                domain: "test.example".into(),
+                ssl_email: "test@example.com".into(),
+                life_in_days: 7,
+                port_range_start: 9000,
+                port_range_end: 9100,
+            },
             FailingUpdateRegistry(inner),
             NoopProvisioner,
         );

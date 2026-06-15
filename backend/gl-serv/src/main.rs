@@ -9,7 +9,7 @@ use chrono::{Duration, Utc};
 use clap::Parser;
 use gl_core::goopy_provisioner::hello_provisioner::HelloProvisioner;
 use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
-use gl_core::{GoopyManager, RealSysRunner};
+use gl_core::{GoopyManager, GoopyManagerConfig, RealSysRunner};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 // ---------------------------------------------------------------------------
@@ -258,12 +258,14 @@ async fn main() {
     });
 
     let manager: Arc<dyn ManagerService> = Arc::new(GoopyManager::new(
-        cfg.base_dir.clone(),
-        cfg.domain.clone(),
-        cfg.ssl_email.clone(),
-        cfg.life_in_days,
-        cfg.port_range_start,
-        cfg.port_range_end,
+        GoopyManagerConfig {
+            base_dir: cfg.base_dir.clone(),
+            domain: cfg.domain.clone(),
+            ssl_email: cfg.ssl_email.clone(),
+            life_in_days: cfg.life_in_days,
+            port_range_start: cfg.port_range_start,
+            port_range_end: cfg.port_range_end,
+        },
         registry,
         provisioner,
     ));
@@ -312,7 +314,7 @@ mod tests {
     use gl_core::goopy_provisioner::GoopyProvisioner;
     use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
     use gl_core::goopy_registry::GoopyRegistry;
-    use gl_core::{Goopy, GoopyManager, ProvisionerKind, Status};
+    use gl_core::{Goopy, GoopyManager, GoopyManagerConfig, ProvisionerKind, Status};
     use http_body_util::BodyExt;
     use serde_json::Value;
     use std::path::{Path, PathBuf};
@@ -359,12 +361,14 @@ mod tests {
     fn make_router(domain: &str, registry: SqliteRegistry) -> Router {
         let cfg = test_cfg(domain);
         let manager: Arc<dyn ManagerService> = Arc::new(GoopyManager::new(
-            cfg.base_dir.clone(),
-            cfg.domain.clone(),
-            cfg.ssl_email.clone(),
-            cfg.life_in_days,
-            cfg.port_range_start,
-            cfg.port_range_end,
+            GoopyManagerConfig {
+                base_dir: cfg.base_dir.clone(),
+                domain: cfg.domain.clone(),
+                ssl_email: cfg.ssl_email.clone(),
+                life_in_days: cfg.life_in_days,
+                port_range_start: cfg.port_range_start,
+                port_range_end: cfg.port_range_end,
+            },
             registry,
             NoopProvisioner,
         ));
@@ -431,12 +435,14 @@ mod tests {
         cfg.port_range_end = 9000; // empty range → PortExhausted on first acquire
 
         let manager: Arc<dyn ManagerService> = Arc::new(GoopyManager::new(
-            PathBuf::from("/tmp/goopy-test"),
-            cfg.domain.clone(),
-            cfg.ssl_email.clone(),
-            cfg.life_in_days,
-            cfg.port_range_start,
-            cfg.port_range_end,
+            GoopyManagerConfig {
+                base_dir: PathBuf::from("/tmp/goopy-test"),
+                domain: cfg.domain.clone(),
+                ssl_email: cfg.ssl_email.clone(),
+                life_in_days: cfg.life_in_days,
+                port_range_start: cfg.port_range_start,
+                port_range_end: cfg.port_range_end,
+            },
             SqliteRegistry::new(Path::new(":memory:")).unwrap(),
             NoopProvisioner,
         ));

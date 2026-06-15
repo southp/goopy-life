@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
@@ -84,38 +84,6 @@ impl SqliteRegistry {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: map a rusqlite row to a Goopy via `from_stored`
-// ---------------------------------------------------------------------------
-fn row_to_goopy(
-    slug: String,
-    life_in_days: i64,
-    created_at_str: String,
-    status_str: String,
-    working_dir_str: String,
-    port: i64,
-    provisioner_kind_str: String,
-    service_version: String,
-) -> Result<Goopy, Error> {
-    let created_at: DateTime<Utc> = created_at_str
-        .parse::<DateTime<Utc>>()
-        .map_err(|_| Error::Invalid)?;
-
-    let status = Status::from_str(&status_str)?;
-    let provisioner_kind = ProvisionerKind::from_str(&provisioner_kind_str)?;
-
-    Ok(Goopy::from_stored(
-        slug,
-        life_in_days as i32,
-        created_at,
-        Path::new(&working_dir_str),
-        port as u32,
-        status,
-        provisioner_kind,
-        service_version,
-    ))
-}
-
-// ---------------------------------------------------------------------------
 // GoopyRegistry impl
 // ---------------------------------------------------------------------------
 impl GoopyRegistry for SqliteRegistry {
@@ -186,8 +154,18 @@ impl GoopyRegistry for SqliteRegistry {
         match result {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(Error::Registry { context: "load", source: e.into() }),
-            Ok((slug, life_in_days, created_at, status, working_dir, port, pk, sv)) => {
-                let gp = row_to_goopy(slug, life_in_days, created_at, status, working_dir, port, pk, sv)?;
+            Ok((slug, life_in_days, created_at_str, status_str, working_dir_str, port, pk_str, sv)) => {
+                let created_at = created_at_str.parse::<DateTime<Utc>>().map_err(|_| Error::Invalid)?;
+                let gp = Goopy {
+                    slug,
+                    life_in_days: life_in_days as i32,
+                    created_at,
+                    status: Status::from_str(&status_str)?,
+                    working_dir: PathBuf::from(working_dir_str),
+                    port: port as u32,
+                    provisioner_kind: ProvisionerKind::from_str(&pk_str)?,
+                    service_version: sv,
+                };
                 tracing::debug!(slug = %gp.slug, "loaded goopy");
                 Ok(Some(gp))
             }
@@ -261,9 +239,19 @@ impl GoopyRegistry for SqliteRegistry {
             })
             .map_err(|e| Error::Registry { context: "list query", source: e.into() })?
             .map(|r| {
-                let (slug, life_in_days, created_at, status, working_dir, port, pk, sv) =
+                let (slug, life_in_days, created_at_str, status_str, working_dir_str, port, pk_str, sv) =
                     r.map_err(|e| Error::Registry { context: "list row", source: e.into() })?;
-                row_to_goopy(slug, life_in_days, created_at, status, working_dir, port, pk, sv)
+                let created_at = created_at_str.parse::<DateTime<Utc>>().map_err(|_| Error::Invalid)?;
+                Ok(Goopy {
+                    slug,
+                    life_in_days: life_in_days as i32,
+                    created_at,
+                    status: Status::from_str(&status_str)?,
+                    working_dir: PathBuf::from(working_dir_str),
+                    port: port as u32,
+                    provisioner_kind: ProvisionerKind::from_str(&pk_str)?,
+                    service_version: sv,
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
 
