@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderValue, Method, StatusCode};
@@ -9,7 +9,7 @@ use chrono::{Duration, Utc};
 use clap::Parser;
 use gl_core::goopy_provisioner::hello_provisioner::HelloProvisioner;
 use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
-use gl_core::{GoopyManager, PlainDirAllocator, RealSysRunner, StorageAllocator, ZfsAllocator};
+use gl_core::{GoopyManager, RealSysRunner};
 use tower_http::cors::CorsLayer;
 
 // ---------------------------------------------------------------------------
@@ -30,13 +30,9 @@ struct Cli {
 // Shared state
 // ---------------------------------------------------------------------------
 
-type AppManager = GoopyManager<SqliteRegistry, HelloProvisioner>;
-
 struct AppState {
-    manager: Mutex<AppManager>,
-    domain: String,
-    life_in_days: i32,
-    storage_quota_mb: u64,
+    manager: Arc<GoopyManager<SqliteRegistry, HelloProvisioner>>,
+    cfg: gl_core::Config,
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +64,7 @@ struct ConfigResponse {
 #[derive(serde::Serialize)]
 struct ErrorResponse {
     error: String,
+    code: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -83,13 +80,13 @@ enum AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let (status, message) = match self {
-            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            AppError::Invalid(msg) => (StatusCode::BAD_REQUEST, msg),
-            AppError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg),
-            AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
+        let (status, message, code) = match self {
+            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg, "not_found"),
+            AppError::Invalid(msg) => (StatusCode::BAD_REQUEST, msg, "invalid"),
+            AppError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg, "service_unavailable"),
+            AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg, "internal_error"),
         };
-        (status, Json(ErrorResponse { error: message })).into_response()
+        (status, Json(ErrorResponse { error: message, code: code.into() })).into_response()
     }
 }
 
@@ -113,10 +110,7 @@ impl From<gl_core::Error> for AppError {
 async fn spawn_goopy(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
     let (slug, _port, _job_id) = tokio::task::spawn_blocking({
         let state = Arc::clone(&state);
-        move || {
-            let mut manager = state.manager.lock().unwrap();
-            manager.spawn()
-        }
+        move || state.manager.spawn()
     })
     .await
     .map_err(|e| AppError::Internal(format!("task join error: {e}")))??;
@@ -134,24 +128,24 @@ async fn get_goopy(
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let domain = state.domain.clone();
-    let life_in_days = state.life_in_days;
+    let domain = state.cfg.domain.clone();
 
     let goopy = tokio::task::spawn_blocking({
         let state = Arc::clone(&state);
-        move || {
-            let manager = state.manager.lock().unwrap();
-            manager.get(&slug)
-        }
+        move || state.manager.get(&slug)
     })
     .await
     .map_err(|e| AppError::Internal(format!("task join error: {e}")))??;
 
     let goopy = goopy.ok_or_else(|| AppError::NotFound("not found".into()))?;
 
-    let expires_at = goopy.created_at + Duration::days(life_in_days as i64);
+    let expires_at = goopy.created_at + Duration::days(goopy.life_in_days as i64);
 
-    let url = format!("https://{}.{}", goopy.slug, domain);
+    let url = if domain == "localhost" {
+        format!("http://localhost:{}", goopy.port)
+    } else {
+        format!("https://{}.{}", goopy.slug, domain)
+    };
 
     Ok(Json(GoopyResponse {
         slug: goopy.slug,
@@ -166,14 +160,9 @@ async fn alive_check(
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
 ) -> Result<Response, AppError> {
-    let life_in_days = state.life_in_days;
-
     let goopy = tokio::task::spawn_blocking({
         let state = Arc::clone(&state);
-        move || {
-            let manager = state.manager.lock().unwrap();
-            manager.get(&slug)
-        }
+        move || state.manager.get(&slug)
     })
     .await
     .map_err(|e| AppError::Internal(format!("task join error: {e}")))??;
@@ -182,7 +171,7 @@ async fn alive_check(
         return Ok(StatusCode::GONE.into_response());
     };
 
-    let expires_at = goopy.created_at + Duration::days(life_in_days as i64);
+    let expires_at = goopy.created_at + Duration::days(goopy.life_in_days as i64);
     let alive = goopy.status == gl_core::Status::Done && Utc::now() < expires_at;
 
     if alive {
@@ -194,9 +183,9 @@ async fn alive_check(
 
 async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(ConfigResponse {
-        life_in_days: state.life_in_days,
-        storage_quota_mb: state.storage_quota_mb,
-        domain: state.domain.clone(),
+        life_in_days: state.cfg.life_in_days,
+        storage_quota_mb: state.cfg.allocator.quota_mb,
+        domain: state.cfg.domain.clone(),
     })
 }
 
@@ -217,21 +206,22 @@ async fn main() {
         std::process::exit(1);
     });
 
-    // Build storage allocator
-    let storage: Arc<dyn StorageAllocator> = if cfg.dev_mode {
-        Arc::new(PlainDirAllocator)
-    } else {
-        Arc::new(ZfsAllocator::new(
-            cfg.allocator.pool.clone(),
-            cfg.allocator.quota_mb,
-        ))
-    };
+    // Build storage allocator from config
+    let storage = cfg.allocator.build();
 
-    let provisioner = HelloProvisioner::new(cfg.domain.clone(), cfg.dev_mode, storage, Arc::new(RealSysRunner));
+    let provisioner = HelloProvisioner::new(
+        cfg.domain.clone(),
+        cfg.dev_mode,
+        storage,
+        Arc::new(RealSysRunner),
+    );
 
-    let registry = SqliteRegistry::new(&cfg.registry.path).expect("failed to open SQLite registry");
+    let registry = SqliteRegistry::new(&cfg.registry.path).unwrap_or_else(|e| {
+        tracing::error!("failed to open SQLite registry: {e}");
+        std::process::exit(1);
+    });
 
-    let manager = GoopyManager::new(
+    let manager = Arc::new(GoopyManager::new(
         cfg.base_dir.clone(),
         cfg.domain.clone(),
         cfg.ssl_email.clone(),
@@ -240,24 +230,21 @@ async fn main() {
         cfg.port_range_end,
         registry,
         provisioner,
-    );
+    ));
 
-    let state = Arc::new(AppState {
-        manager: Mutex::new(manager),
-        domain: cfg.domain.clone(),
-        life_in_days: cfg.life_in_days,
-        storage_quota_mb: cfg.allocator.quota_mb,
+    let cors_origin = cfg.cors_origin.parse::<HeaderValue>().unwrap_or_else(|e| {
+        tracing::error!("invalid cors_origin in config: {e}");
+        std::process::exit(1);
     });
 
-    // CORS
     let cors = CorsLayer::new()
-        .allow_origin(
-            cfg.cors_origin
-                .parse::<HeaderValue>()
-                .expect("invalid cors_origin value"),
-        )
+        .allow_origin(cors_origin)
         .allow_methods([Method::GET, Method::POST])
         .allow_headers(tower_http::cors::Any);
+
+    let bind_address = cfg.bind_address.clone();
+
+    let state = Arc::new(AppState { manager, cfg });
 
     let app = Router::new()
         .route("/goopies", post(spawn_goopy))
@@ -267,13 +254,16 @@ async fn main() {
         .layer(cors)
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind(&cfg.bind_address)
+    let listener = tokio::net::TcpListener::bind(&bind_address)
         .await
         .unwrap_or_else(|e| {
-            tracing::error!("failed to bind to {}: {e}", cfg.bind_address);
+            tracing::error!("failed to bind to {bind_address}: {e}");
             std::process::exit(1);
         });
 
-    tracing::info!("listening on {}", cfg.bind_address);
-    axum::serve(listener, app).await.unwrap();
+    tracing::info!("listening on {bind_address}");
+    axum::serve(listener, app).await.unwrap_or_else(|e| {
+        tracing::error!("server error: {e}");
+        std::process::exit(1);
+    });
 }

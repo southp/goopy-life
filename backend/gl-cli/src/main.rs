@@ -111,10 +111,7 @@ fn main() {
         mode = if dev_mode { "dev" } else { "production" },
     );
 
-    let storage: Arc<dyn StorageAllocator> = match cfg.allocator.kind {
-        AllocatorKind::PlainDir => Arc::new(PlainDirAllocator),
-        AllocatorKind::Zfs => Arc::new(ZfsAllocator::new(cfg.allocator.pool, cfg.allocator.quota_mb)),
-    };
+    let storage = cfg.allocator.build();
 
     let sys: Arc<dyn SysRunner> = Arc::new(RealSysRunner);
 
@@ -157,7 +154,7 @@ fn main() {
             let registry = SqliteRegistry::new(&cfg.registry.path)
                 .expect("failed to open SQLite registry");
 
-            let mut gm = GoopyManager::new(
+            let gm = GoopyManager::new(
                 cfg.base_dir,
                 cfg.domain,
                 cfg.ssl_email,
