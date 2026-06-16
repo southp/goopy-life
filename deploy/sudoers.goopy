@@ -1,0 +1,17 @@
+# Drop this file at /etc/sudoers.d/goopy (mode 0440, owned root:root).
+# Allows the 'goopy' service account to manage per-instance systemd services
+# and nginx configs without a password prompt.
+goopy ALL=(ALL) NOPASSWD: \
+    /bin/systemctl start goopy-*, \
+    /bin/systemctl stop goopy-*, \
+    /bin/systemctl enable goopy-*, \
+    /bin/systemctl disable goopy-*, \
+    /bin/systemctl daemon-reload, \
+    /usr/sbin/nginx -t, \
+    /bin/systemctl reload nginx, \
+    /usr/bin/tee /etc/systemd/system/goopy-*, \
+    /usr/bin/tee /etc/nginx/sites-available/goopy-*, \
+    /bin/ln -s /etc/nginx/sites-available/goopy-* /etc/nginx/sites-enabled/goopy-*, \
+    /bin/rm /etc/nginx/sites-enabled/goopy-*, \
+    /bin/rm /etc/nginx/sites-available/goopy-*, \
+    /bin/rm /etc/systemd/system/goopy-*

@@ -1,0 +1,12 @@
+[Unit]
+Description=Goopy.Life API server
+After=network.target
+
+[Service]
+User=goopy
+ExecStart=/opt/goopy-life/bin/gl-serv --config /opt/goopy-life/config.toml
+Restart=on-failure
+WorkingDirectory=/opt/goopy-life
+
+[Install]
+WantedBy=multi-user.target
