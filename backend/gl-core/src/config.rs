@@ -1,8 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::goopy_manager::GoopyManagerConfig;
+use crate::goopy_provisioner::hello_provisioner::HelloProvisioner;
 use crate::shared_types::{AllocatorKind, Error, ProvisionerKind};
 use crate::storage_allocator::{PlainDirAllocator, StorageAllocator, ZfsAllocator};
+use crate::sys_utils::SysRunner;
 
 // Design note: a fully abstract design would store these as `dyn RegistryConfig` /
 // `dyn AllocatorConfig` traits. We use concrete structs instead — the number of
@@ -165,9 +168,52 @@ quota_mb = 0
         let err = write_config(&toml).unwrap_err();
         assert!(matches!(err, Error::Config(ref s) if s.contains("quota_mb")));
     }
+
+    #[test]
+    fn build_manager_config_maps_fields_correctly() {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            VALID_BASE
+        );
+        let cfg = write_config(&toml).expect("should parse");
+        let manager_cfg = cfg.build_manager_config();
+        assert_eq!(manager_cfg.base_dir, cfg.base_dir);
+        assert_eq!(manager_cfg.domain, cfg.domain);
+        assert_eq!(manager_cfg.ssl_email, cfg.ssl_email);
+        assert_eq!(manager_cfg.life_in_days, cfg.life_in_days);
+        assert_eq!(manager_cfg.port_range_start, cfg.port_range_start);
+        assert_eq!(manager_cfg.port_range_end, cfg.port_range_end);
+        // port_range_start and port_range_end are both u32 — assert distinct
+        // values so a field swap in build_manager_config would fail this test.
+        assert_ne!(manager_cfg.port_range_start, manager_cfg.port_range_end);
+    }
 }
 
 impl Config {
+    /// Build a [`HelloProvisioner`] from the current configuration.
+    ///
+    /// `dev_mode` is passed explicitly so callers can override the value from
+    /// the config file (e.g. `gl-cli` forces dev mode unless `--prod` is given).
+    pub fn build_provisioner(&self, dev_mode: bool, sys: Arc<dyn SysRunner>) -> HelloProvisioner {
+        let storage = self.allocator.build();
+        HelloProvisioner::new(self.domain.clone(), dev_mode, storage, sys)
+    }
+
+    /// Build a [`GoopyManagerConfig`] from the current configuration.
+    pub fn build_manager_config(&self) -> GoopyManagerConfig {
+        GoopyManagerConfig {
+            base_dir: self.base_dir.clone(),
+            domain: self.domain.clone(),
+            ssl_email: self.ssl_email.clone(),
+            life_in_days: self.life_in_days,
+            port_range_start: self.port_range_start,
+            port_range_end: self.port_range_end,
+        }
+    }
+
     pub fn from_file(path: &Path) -> Result<Self, Error> {
         let contents = std::fs::read_to_string(path)
             .map_err(|e| Error::Config(format!("could not read {}: {}", path.display(), e)))?;
