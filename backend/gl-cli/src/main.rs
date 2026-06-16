@@ -143,7 +143,7 @@ fn main() {
                 std::process::exit(1);
             }
 
-            let provisioner = cfg.build_provisioner(dev_mode, Arc::clone(&sys));
+            let provisioner = cfg.build_provisioner(dev_mode, sys);
 
             let registry = SqliteRegistry::new(&cfg.registry.path).unwrap_or_else(|e| {
                 tracing::error!(error = %e, "failed to open SQLite registry");

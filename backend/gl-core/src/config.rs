@@ -168,6 +168,28 @@ quota_mb = 0
         let err = write_config(&toml).unwrap_err();
         assert!(matches!(err, Error::Config(ref s) if s.contains("quota_mb")));
     }
+
+    #[test]
+    fn build_manager_config_maps_fields_correctly() {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            VALID_BASE
+        );
+        let cfg = write_config(&toml).expect("should parse");
+        let manager_cfg = cfg.build_manager_config();
+        assert_eq!(manager_cfg.base_dir, cfg.base_dir);
+        assert_eq!(manager_cfg.domain, cfg.domain);
+        assert_eq!(manager_cfg.ssl_email, cfg.ssl_email);
+        assert_eq!(manager_cfg.life_in_days, cfg.life_in_days);
+        assert_eq!(manager_cfg.port_range_start, cfg.port_range_start);
+        assert_eq!(manager_cfg.port_range_end, cfg.port_range_end);
+        // port_range_start and port_range_end are both u32 — assert distinct
+        // values so a field swap in build_manager_config would fail this test.
+        assert_ne!(manager_cfg.port_range_start, manager_cfg.port_range_end);
+    }
 }
 
 impl Config {
