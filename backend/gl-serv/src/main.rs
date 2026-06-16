@@ -7,9 +7,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{Duration, Utc};
 use clap::Parser;
-use gl_core::goopy_provisioner::hello_provisioner::HelloProvisioner;
 use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
-use gl_core::{GoopyManager, GoopyManagerConfig, RealSysRunner};
+use gl_core::{GoopyManager, RealSysRunner};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 // ---------------------------------------------------------------------------
@@ -106,10 +105,19 @@ impl IntoResponse for AppError {
         let (status, message, code) = match self {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg, "not_found"),
             AppError::Invalid(msg) => (StatusCode::BAD_REQUEST, msg, "invalid"),
-            AppError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg, "service_unavailable"),
+            AppError::ServiceUnavailable(msg) => {
+                (StatusCode::SERVICE_UNAVAILABLE, msg, "service_unavailable")
+            }
             AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg, "internal_error"),
         };
-        (status, Json(ErrorResponse { error: message, code: code.into() })).into_response()
+        (
+            status,
+            Json(ErrorResponse {
+                error: message,
+                code: code.into(),
+            }),
+        )
+            .into_response()
     }
 }
 
@@ -243,14 +251,7 @@ async fn main() {
         std::process::exit(1);
     });
 
-    let storage = cfg.allocator.build();
-
-    let provisioner = HelloProvisioner::new(
-        cfg.domain.clone(),
-        cfg.dev_mode,
-        storage,
-        Arc::new(RealSysRunner),
-    );
+    let provisioner = cfg.build_provisioner(cfg.dev_mode, Arc::new(RealSysRunner));
 
     let registry = SqliteRegistry::new(&cfg.registry.path).unwrap_or_else(|e| {
         tracing::error!("failed to open SQLite registry: {e}");
@@ -258,14 +259,7 @@ async fn main() {
     });
 
     let manager: Arc<dyn ManagerService> = Arc::new(GoopyManager::new(
-        GoopyManagerConfig {
-            base_dir: cfg.base_dir.clone(),
-            domain: cfg.domain.clone(),
-            ssl_email: cfg.ssl_email.clone(),
-            life_in_days: cfg.life_in_days,
-            port_range_start: cfg.port_range_start,
-            port_range_end: cfg.port_range_end,
-        },
+        cfg.build_manager_config(),
         registry,
         provisioner,
     ));
@@ -312,8 +306,8 @@ mod tests {
     use axum::http::Request;
     use chrono::Duration;
     use gl_core::goopy_provisioner::GoopyProvisioner;
-    use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
     use gl_core::goopy_registry::GoopyRegistry;
+    use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
     use gl_core::{Goopy, GoopyManager, GoopyManagerConfig, ProvisionerKind, Status};
     use http_body_util::BodyExt;
     use serde_json::Value;
@@ -325,9 +319,15 @@ mod tests {
     struct NoopProvisioner;
 
     impl GoopyProvisioner for NoopProvisioner {
-        fn provision(&self, _: &Goopy) -> Result<(), gl_core::Error> { Ok(()) }
-        fn deprovision(&self, _: &Goopy) -> Result<(), gl_core::Error> { Ok(()) }
-        fn kind(&self) -> ProvisionerKind { ProvisionerKind::Hello }
+        fn provision(&self, _: &Goopy) -> Result<(), gl_core::Error> {
+            Ok(())
+        }
+        fn deprovision(&self, _: &Goopy) -> Result<(), gl_core::Error> {
+            Ok(())
+        }
+        fn kind(&self) -> ProvisionerKind {
+            ProvisionerKind::Hello
+        }
     }
 
     // ── Test helpers ──────────────────────────────────────────────────────
@@ -413,10 +413,19 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_returns_201_with_slug_and_status() {
-        let app = make_router("goopy.life", SqliteRegistry::new(Path::new(":memory:")).unwrap());
+        let app = make_router(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+        );
 
         let resp = app
-            .oneshot(Request::builder().method("POST").uri("/goopies").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/goopies")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -452,7 +461,13 @@ mod tests {
         let app = build_router(state, cors);
 
         let resp = app
-            .oneshot(Request::builder().method("POST").uri("/goopies").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/goopies")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -527,14 +542,16 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp.into_body()).await;
 
-        let expected_expires_at =
-            (goopy.created_at + Duration::days(3)).to_rfc3339();
+        let expected_expires_at = (goopy.created_at + Duration::days(3)).to_rfc3339();
         assert_eq!(body["expires_at"], expected_expires_at);
     }
 
     #[tokio::test]
     async fn get_goopy_unknown_slug_returns_404_with_code() {
-        let app = make_router("goopy.life", SqliteRegistry::new(Path::new(":memory:")).unwrap());
+        let app = make_router(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+        );
 
         let resp = app
             .oneshot(
@@ -615,7 +632,10 @@ mod tests {
 
     #[tokio::test]
     async fn alive_check_returns_410_for_unknown_slug() {
-        let app = make_router("goopy.life", SqliteRegistry::new(Path::new(":memory:")).unwrap());
+        let app = make_router(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+        );
 
         let resp = app
             .oneshot(
@@ -634,10 +654,18 @@ mod tests {
 
     #[tokio::test]
     async fn get_config_returns_correct_fields() {
-        let app = make_router("goopy.life", SqliteRegistry::new(Path::new(":memory:")).unwrap());
+        let app = make_router(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+        );
 
         let resp = app
-            .oneshot(Request::builder().uri("/config").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/config")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -653,7 +681,10 @@ mod tests {
     #[tokio::test]
     async fn cors_allowed_origin_sets_acao_header() {
         // test_cfg sets cors_origin = "https://example.com"
-        let app = make_router("goopy.life", SqliteRegistry::new(Path::new(":memory:")).unwrap());
+        let app = make_router(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+        );
 
         let resp = app
             .oneshot(
@@ -678,7 +709,10 @@ mod tests {
 
     #[tokio::test]
     async fn cors_disallowed_origin_omits_acao_header() {
-        let app = make_router("goopy.life", SqliteRegistry::new(Path::new(":memory:")).unwrap());
+        let app = make_router(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+        );
 
         let resp = app
             .oneshot(

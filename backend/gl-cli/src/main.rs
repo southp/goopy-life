@@ -1,5 +1,4 @@
 use clap::{Parser, Subcommand};
-use gl_core::goopy_provisioner::hello_provisioner::HelloProvisioner;
 use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
 use gl_core::sys_utils::RealSysRunner;
 use gl_core::*;
@@ -111,12 +110,11 @@ fn main() {
         mode = if dev_mode { "dev" } else { "production" },
     );
 
-    let storage = cfg.allocator.build();
-
     let sys: Arc<dyn SysRunner> = Arc::new(RealSysRunner);
 
     match cli.command {
         Cmd::Alloc { path } => {
+            let storage = cfg.allocator.build();
             match storage.allocate(&path) {
                 Ok(()) => println!("allocated: {}", path.display()),
                 Err(e) => {
@@ -126,6 +124,7 @@ fn main() {
             }
         }
         Cmd::Dealloc { path } => {
+            let storage = cfg.allocator.build();
             match storage.release(&path) {
                 Ok(()) => println!("released: {}", path.display()),
                 Err(e) => {
@@ -144,30 +143,14 @@ fn main() {
                 std::process::exit(1);
             }
 
-            let provisioner = HelloProvisioner::new(
-                cfg.domain.clone(),
-                dev_mode,
-                Arc::clone(&storage),
-                sys,
-            );
+            let provisioner = cfg.build_provisioner(dev_mode, Arc::clone(&sys));
 
             let registry = SqliteRegistry::new(&cfg.registry.path).unwrap_or_else(|e| {
                 tracing::error!(error = %e, "failed to open SQLite registry");
                 std::process::exit(1);
             });
 
-            let gm = GoopyManager::new(
-                GoopyManagerConfig {
-                    base_dir: cfg.base_dir,
-                    domain: cfg.domain,
-                    ssl_email: cfg.ssl_email,
-                    life_in_days: cfg.life_in_days,
-                    port_range_start: cfg.port_range_start,
-                    port_range_end: cfg.port_range_end,
-                },
-                registry,
-                provisioner,
-            );
+            let gm = GoopyManager::new(cfg.build_manager_config(), registry, provisioner);
             let mp = MultiProgress::new();
             let mut spinners = vec![];
             let mut jobs = vec![];
@@ -208,29 +191,33 @@ fn main() {
                         spinners.push(spinner);
                     }
                 }
-                Cmd::List {} => {
-                    match gm.list() {
-                        Ok(goopies) => {
-                            for gp in goopies {
-                                println!("{:?}", gp);
-                            }
-                        }
-                        Err(e) => {
-                            println!("List failed: {:?}", e);
-                            std::process::exit(1);
+                Cmd::List {} => match gm.list() {
+                    Ok(goopies) => {
+                        for gp in goopies {
+                            println!("{:?}", gp);
                         }
                     }
-                }
+                    Err(e) => {
+                        println!("List failed: {:?}", e);
+                        std::process::exit(1);
+                    }
+                },
                 Cmd::Alloc { .. } | Cmd::Dealloc { .. } => {
                     unreachable!("Alloc/Dealloc must not reach the provisioner branch")
                 }
             }
 
-            while jobs.iter().map(|job_id| gm.is_job_finished(job_id)).any(|s| !s) {
+            while jobs
+                .iter()
+                .map(|job_id| gm.is_job_finished(job_id))
+                .any(|s| !s)
+            {
                 std::thread::sleep(Duration::from_secs(1));
             }
 
-            spinners.iter().for_each(|s| s.finish_with_message(format!("{} done!", s.message())));
+            spinners
+                .iter()
+                .for_each(|s| s.finish_with_message(format!("{} done!", s.message())));
         }
     }
 }

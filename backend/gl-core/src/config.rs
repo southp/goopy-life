@@ -1,8 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::goopy_manager::GoopyManagerConfig;
+use crate::goopy_provisioner::hello_provisioner::HelloProvisioner;
 use crate::shared_types::{AllocatorKind, Error, ProvisionerKind};
 use crate::storage_allocator::{PlainDirAllocator, StorageAllocator, ZfsAllocator};
+use crate::sys_utils::SysRunner;
 
 // Design note: a fully abstract design would store these as `dyn RegistryConfig` /
 // `dyn AllocatorConfig` traits. We use concrete structs instead — the number of
@@ -168,6 +171,27 @@ quota_mb = 0
 }
 
 impl Config {
+    /// Build a [`HelloProvisioner`] from the current configuration.
+    ///
+    /// `dev_mode` is passed explicitly so callers can override the value from
+    /// the config file (e.g. `gl-cli` forces dev mode unless `--prod` is given).
+    pub fn build_provisioner(&self, dev_mode: bool, sys: Arc<dyn SysRunner>) -> HelloProvisioner {
+        let storage = self.allocator.build();
+        HelloProvisioner::new(self.domain.clone(), dev_mode, storage, sys)
+    }
+
+    /// Build a [`GoopyManagerConfig`] from the current configuration.
+    pub fn build_manager_config(&self) -> GoopyManagerConfig {
+        GoopyManagerConfig {
+            base_dir: self.base_dir.clone(),
+            domain: self.domain.clone(),
+            ssl_email: self.ssl_email.clone(),
+            life_in_days: self.life_in_days,
+            port_range_start: self.port_range_start,
+            port_range_end: self.port_range_end,
+        }
+    }
+
     pub fn from_file(path: &Path) -> Result<Self, Error> {
         let contents = std::fs::read_to_string(path)
             .map_err(|e| Error::Config(format!("could not read {}: {}", path.display(), e)))?;
