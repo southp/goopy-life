@@ -48,6 +48,9 @@ pub struct Config {
     pub dev_mode: bool,
     pub cors_origin: String,
     pub bind_address: String,
+    /// Port on which gl-serv listens; used by nginx `auth_request` subrequests.
+    /// Must match the port in `bind_address`.
+    pub api_port: u16,
     #[serde(default = "default_sweep_interval_secs")]
     pub sweep_interval_secs: u64,
     pub registry: RegistryConfig,
@@ -81,6 +84,7 @@ port_range_end = 9100
 dev_mode = true
 cors_origin = "https://goopy.life"
 bind_address = "127.0.0.1:8080"
+api_port = 8080
 [registry]
 path = "/tmp/goopy.db"
 "#;
@@ -114,6 +118,7 @@ port_range_end = 49999
 dev_mode = false
 cors_origin = "https://goopy.life"
 bind_address = "0.0.0.0:3000"
+api_port = 3000
 
 [registry]
 path = "/tmp/goopy.db"
@@ -199,7 +204,7 @@ impl Config {
     /// the config file (e.g. `gl-cli` forces dev mode unless `--prod` is given).
     pub fn build_provisioner(&self, dev_mode: bool, sys: Arc<dyn SysRunner>) -> HelloProvisioner {
         let storage = self.allocator.build();
-        HelloProvisioner::new(self.domain.clone(), dev_mode, storage, sys)
+        HelloProvisioner::new(self.domain.clone(), dev_mode, self.api_port, storage, sys)
     }
 
     /// Build a [`GoopyManagerConfig`] from the current configuration.
