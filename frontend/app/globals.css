@@ -144,3 +144,69 @@ body {
 .error-link {
 	color: #93c5fd;
 }
+
+/* ── Explainer & ToU sections ─────────────────────────── */
+
+.page-main {
+	padding: 2rem 1.25rem 4rem;
+}
+
+.section-heading {
+	font-size: 1.125rem;
+	font-weight: 600;
+	letter-spacing: 0.02em;
+	color: var(--foreground);
+	margin: 0 0 0.75rem;
+}
+
+.explainer-section,
+.tou-section {
+	width: 100%;
+	max-width: 40rem;
+	margin-top: 3rem;
+	color: #aaa;
+	font-size: 0.9rem;
+	line-height: 1.7;
+}
+
+.explainer-section p,
+.tou-section p {
+	margin: 0 0 0.75rem;
+}
+
+.explainer-section strong,
+.tou-section strong {
+	color: var(--foreground);
+}
+
+.explainer-list,
+.tou-list {
+	margin: 0.5rem 0 0.75rem 1.25rem;
+	padding: 0;
+}
+
+.explainer-list li,
+.tou-list li {
+	margin-bottom: 0.35rem;
+}
+
+.inline-link {
+	color: #888;
+	text-decoration: underline;
+	text-underline-offset: 2px;
+}
+
+.inline-link:hover {
+	color: var(--foreground);
+}
+
+.tou-footer {
+	font-style: italic;
+	color: #666;
+}
+
+.go-button-countdown {
+	font-size: 0.85rem;
+	color: #888;
+	margin: 0;
+}
