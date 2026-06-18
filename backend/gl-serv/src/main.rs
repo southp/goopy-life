@@ -294,8 +294,13 @@ async fn main() {
     {
         let manager = Arc::clone(&state.manager);
         let interval_duration = std::time::Duration::from_secs(sweep_interval_secs);
+        assert!(
+            !interval_duration.is_zero(),
+            "sweep_interval_secs must be > 0 in config.toml"
+        );
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(interval_duration);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             // The first tick fires immediately; skip it so the sweep runs after
             // one full interval has elapsed rather than at startup.
             interval.tick().await;
@@ -791,5 +796,7 @@ mod tests {
 
         // The alive instance must still be reachable.
         assert!(manager.get("sweep-alive").unwrap().is_some());
+        // The expired instance must have been removed.
+        assert!(manager.get("sweep-expired").unwrap().is_none());
     }
 }
