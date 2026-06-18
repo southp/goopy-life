@@ -32,6 +32,7 @@ struct Cli {
 trait ManagerService: Send + Sync {
     fn spawn(&self) -> Result<String, gl_core::Error>;
     fn get(&self, slug: &str) -> Result<Option<gl_core::Goopy>, gl_core::Error>;
+    fn sweep(&self) -> Result<(u32, Vec<gl_core::Error>), gl_core::Error>;
 }
 
 impl<R, P> ManagerService for GoopyManager<R, P>
@@ -45,6 +46,10 @@ where
 
     fn get(&self, slug: &str) -> Result<Option<gl_core::Goopy>, gl_core::Error> {
         GoopyManager::get(self, slug)
+    }
+
+    fn sweep(&self) -> Result<(u32, Vec<gl_core::Error>), gl_core::Error> {
+        GoopyManager::sweep(self)
     }
 }
 
@@ -275,8 +280,45 @@ async fn main() {
         .allow_headers(tower_http::cors::Any);
 
     let bind_address = cfg.bind_address.clone();
+    let sweep_interval_secs = cfg.sweep_interval_secs;
 
     let state = Arc::new(AppState { manager, cfg });
+
+    // Spawn the periodic sweep background task.
+    {
+        let manager = Arc::clone(&state.manager);
+        let interval_duration = std::time::Duration::from_secs(sweep_interval_secs);
+        assert!(
+            !interval_duration.is_zero(),
+            "sweep_interval_secs must be > 0 in config.toml"
+        );
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(interval_duration);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // The first tick fires immediately; skip it so the sweep runs after
+            // one full interval has elapsed rather than at startup.
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let manager = Arc::clone(&manager);
+                match tokio::task::spawn_blocking(move || manager.sweep()).await {
+                    Ok(Ok((swept, errors))) => {
+                        if !errors.is_empty() {
+                            tracing::warn!(
+                                swept,
+                                error_count = errors.len(),
+                                "sweep completed with errors"
+                            );
+                        } else {
+                            tracing::info!(swept, "sweep completed");
+                        }
+                    }
+                    Ok(Err(e)) => tracing::error!(error = %e, "sweep failed"),
+                    Err(e) => tracing::error!(error = %e, "sweep task panicked"),
+                }
+            }
+        });
+    }
 
     let app = build_router(state, cors);
 
@@ -731,5 +773,64 @@ mod tests {
             resp.headers().get("access-control-allow-origin").is_none(),
             "disallowed origin must not receive ACAO header",
         );
+    }
+
+    // ── ManagerService::sweep ─────────────────────────────────────────────
+
+    /// Verifies that `ManagerService::sweep()` is callable via the trait object
+    /// and returns zero swept instances when the registry is empty.
+    #[test]
+    fn manager_service_sweep_empty_registry_returns_zero() {
+        let cfg = test_cfg("goopy.life");
+        let manager: Arc<dyn ManagerService> = Arc::new(GoopyManager::new(
+            GoopyManagerConfig {
+                base_dir: cfg.base_dir.clone(),
+                domain: cfg.domain.clone(),
+                ssl_email: cfg.ssl_email.clone(),
+                life_in_days: cfg.life_in_days,
+                port_range_start: cfg.port_range_start,
+                port_range_end: cfg.port_range_end,
+            },
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+            NoopProvisioner,
+        ));
+
+        let (swept, errors) = manager.sweep().expect("sweep should not fail");
+        assert_eq!(swept, 0);
+        assert!(errors.is_empty());
+    }
+
+    /// Verifies that `ManagerService::sweep()` despawns an expired instance and
+    /// leaves a non-expired instance untouched when called via the trait object.
+    #[test]
+    fn manager_service_sweep_despawns_expired_instance() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        // Expired: created 10 days ago, lives 7 days.
+        seed_goopy(&registry, "sweep-expired", 7, 10, 9010, Status::Done);
+        // Alive: created now, lives 7 days.
+        seed_goopy(&registry, "sweep-alive", 7, 0, 9011, Status::Done);
+
+        let cfg = test_cfg("goopy.life");
+        let manager: Arc<dyn ManagerService> = Arc::new(GoopyManager::new(
+            GoopyManagerConfig {
+                base_dir: cfg.base_dir.clone(),
+                domain: cfg.domain.clone(),
+                ssl_email: cfg.ssl_email.clone(),
+                life_in_days: cfg.life_in_days,
+                port_range_start: cfg.port_range_start,
+                port_range_end: cfg.port_range_end,
+            },
+            registry,
+            NoopProvisioner,
+        ));
+
+        let (swept, errors) = manager.sweep().expect("sweep should not fail");
+        assert_eq!(swept, 1);
+        assert!(errors.is_empty());
+
+        // The alive instance must still be reachable.
+        assert!(manager.get("sweep-alive").unwrap().is_some());
+        // The expired instance must have been removed.
+        assert!(manager.get("sweep-expired").unwrap().is_none());
     }
 }
