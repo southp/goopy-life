@@ -245,7 +245,13 @@ fn build_router(state: Arc<AppState>, cors: CorsLayer) -> Router {
 
 #[tokio::main]
 async fn main() {
+    let span_events = match std::env::var("RUST_LOG_SPANS").as_deref() {
+        Ok("0") | Ok("false") | Ok("") | Err(_) => tracing_subscriber::fmt::format::FmtSpan::NONE,
+        Ok(_) => tracing_subscriber::fmt::format::FmtSpan::FULL,
+    };
+
     tracing_subscriber::fmt()
+        .with_span_events(span_events)
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 

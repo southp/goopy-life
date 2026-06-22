@@ -97,15 +97,44 @@ fn parse_row(
     provisioner_kind_str: String,
     service_version: String,
 ) -> Result<Goopy, Error> {
-    let created_at = created_at_str.parse::<DateTime<Utc>>().map_err(|_| Error::Invalid)?;
+    let created_at = created_at_str.parse::<DateTime<Utc>>().map_err(|e| {
+        tracing::error!(
+            slug = %slug,
+            field = "created_at",
+            value = %created_at_str,
+            error = %e,
+            "row parse failed"
+        );
+        Error::RowParse { slug: slug.clone(), field: "created_at", value: created_at_str.clone() }
+    })?;
+
+    let status = Status::from_str(&status_str).map_err(|_| {
+        tracing::error!(slug = %slug, field = "status", value = %status_str, "row parse failed");
+        Error::RowParse { slug: slug.clone(), field: "status", value: status_str.clone() }
+    })?;
+
+    let provisioner_kind = ProvisionerKind::from_str(&provisioner_kind_str).map_err(|_| {
+        tracing::error!(
+            slug = %slug,
+            field = "provisioner_kind",
+            value = %provisioner_kind_str,
+            "row parse failed"
+        );
+        Error::RowParse {
+            slug: slug.clone(),
+            field: "provisioner_kind",
+            value: provisioner_kind_str.clone(),
+        }
+    })?;
+
     Ok(Goopy {
         slug,
         life_in_days: life_in_days as i32,
         created_at,
-        status: Status::from_str(&status_str)?,
+        status,
         working_dir: PathBuf::from(working_dir_str),
         port: port as u32,
-        provisioner_kind: ProvisionerKind::from_str(&provisioner_kind_str)?,
+        provisioner_kind,
         service_version,
     })
 }
@@ -499,5 +528,62 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stored_slug, "sunny-bright-fox");
+    }
+
+    #[test]
+    fn parse_row_bad_created_at_returns_row_parse_error() {
+        let r = registry();
+        {
+            let conn = r.pool.get().unwrap();
+            conn.execute(
+                "INSERT INTO goopies (slug, life_in_days, created_at, status, working_dir, port, provisioner_kind, service_version) \
+                 VALUES ('bad-ts', 7, 'not-a-date', 'Spawning', '/tmp', 8080, 'Hello', '0.1.0')",
+                [],
+            )
+            .unwrap();
+        }
+        let err = r.load("bad-ts").unwrap_err();
+        assert!(
+            matches!(err, Error::RowParse { ref field, .. } if *field == "created_at"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_row_bad_status_returns_row_parse_error() {
+        let r = registry();
+        {
+            let conn = r.pool.get().unwrap();
+            conn.execute(
+                "INSERT INTO goopies (slug, life_in_days, created_at, status, working_dir, port, provisioner_kind, service_version) \
+                 VALUES ('bad-status', 7, '2024-01-01T00:00:00Z', 'Bogus', '/tmp', 8080, 'Hello', '0.1.0')",
+                [],
+            )
+            .unwrap();
+        }
+        let err = r.load("bad-status").unwrap_err();
+        assert!(
+            matches!(err, Error::RowParse { ref field, .. } if *field == "status"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_row_bad_provisioner_kind_returns_row_parse_error() {
+        let r = registry();
+        {
+            let conn = r.pool.get().unwrap();
+            conn.execute(
+                "INSERT INTO goopies (slug, life_in_days, created_at, status, working_dir, port, provisioner_kind, service_version) \
+                 VALUES ('bad-pk', 7, '2024-01-01T00:00:00Z', 'Spawning', '/tmp', 8080, 'Unknown', '0.1.0')",
+                [],
+            )
+            .unwrap();
+        }
+        let err = r.load("bad-pk").unwrap_err();
+        assert!(
+            matches!(err, Error::RowParse { ref field, .. } if *field == "provisioner_kind"),
+            "{err:?}"
+        );
     }
 }
