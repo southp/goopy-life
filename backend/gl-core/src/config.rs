@@ -58,13 +58,6 @@ fn default_sweep_interval_secs() -> u64 {
     86400
 }
 
-fn parse_api_port(bind_address: &str) -> Result<u16, Error> {
-    bind_address
-        .rsplit_once(':')
-        .and_then(|(_, p)| p.parse().ok())
-        .ok_or_else(|| Error::Config("bind_address must be in host:port form".into()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,9 +199,7 @@ impl Config {
     /// the config file (e.g. `gl-cli` forces dev mode unless `--prod` is given).
     pub fn build_provisioner(&self, dev_mode: bool, sys: Arc<dyn SysRunner>) -> HelloProvisioner {
         let storage = self.allocator.build();
-        let api_port = parse_api_port(&self.bind_address)
-            .expect("bind_address validated in from_file");
-        HelloProvisioner::new(self.domain.clone(), dev_mode, api_port, storage, sys)
+        HelloProvisioner::new(self.domain.clone(), dev_mode, self.bind_address.clone(), storage, sys)
     }
 
     /// Build a [`GoopyManagerConfig`] from the current configuration.
@@ -236,7 +227,6 @@ impl Config {
                 "port_range_start must be less than port_range_end".into(),
             ));
         }
-        parse_api_port(&cfg.bind_address)?;
         if let AllocatorKind::Zfs = cfg.allocator.kind {
             if cfg.allocator.pool.trim().is_empty() {
                 return Err(Error::Config(

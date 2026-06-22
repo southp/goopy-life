@@ -13,7 +13,6 @@ port_range_end   = 51000
 dev_mode        = true        # ignored by CLI; use --prod flag to switch
 cors_origin     = "http://localhost:3000"
 bind_address    = "127.0.0.1:8080"
-api_port        = 8080          # must match the port in bind_address
 
 [registry]
 path = "./registry.db"

@@ -26,8 +26,8 @@ use crate::Goopy;
 pub struct HelloProvisioner {
     domain: String,
     dev_mode: bool,
-    /// Port on which gl-serv listens; used by nginx `auth_request` subrequests.
-    api_port: u16,
+    /// Address on which gl-serv listens; used by nginx `auth_request` subrequests.
+    api_address: String,
     storage: Arc<dyn StorageAllocator>,
     sys: Arc<dyn SysRunner>,
 }
@@ -36,14 +36,14 @@ impl HelloProvisioner {
     pub fn new(
         domain: String,
         dev_mode: bool,
-        api_port: u16,
+        api_address: String,
         storage: Arc<dyn StorageAllocator>,
         sys: Arc<dyn SysRunner>,
     ) -> Self {
         Self {
             domain,
             dev_mode,
-            api_port,
+            api_address,
             storage,
             sys,
         }
@@ -91,7 +91,7 @@ WantedBy=multi-user.target
         )
     }
 
-    fn render_nginx_config(slug: &str, domain: &str, port: u32, api_port: u16) -> String {
+    fn render_nginx_config(slug: &str, domain: &str, port: u32, api_address: &str) -> String {
         format!(
             r#"server {{
     listen 80;
@@ -108,7 +108,7 @@ server {{
 
     location = /goopy-alive-check {{
         internal;
-        proxy_pass http://127.0.0.1:{api_port}/goopies/{slug}/alive;
+        proxy_pass http://{api_address}/goopies/{slug}/alive;
         proxy_pass_request_body off;
         proxy_set_header Content-Length "";
     }}
@@ -129,7 +129,7 @@ server {{
             slug = slug,
             domain = domain,
             port = port,
-            api_port = api_port,
+            api_address = api_address,
         )
     }
 
@@ -153,7 +153,7 @@ server {{
     }
 
     fn write_nginx_config(&self, slug: &str, domain: &str, port: u32) -> Result<(), Error> {
-        let content = Self::render_nginx_config(slug, domain, port, self.api_port);
+        let content = Self::render_nginx_config(slug, domain, port, &self.api_address);
         let path = format!("/etc/nginx/sites-available/{slug}");
         self.sys.sudo_write(&path, &content)
     }
@@ -374,7 +374,7 @@ mod tests {
         HelloProvisioner::new(
             "localhost".to_string(),
             true,
-            3000,
+            "127.0.0.1:3000".to_string(),
             Arc::new(PlainDirAllocator),
             Arc::new(RealSysRunner),
         )
@@ -399,8 +399,9 @@ mod tests {
 
     #[test]
     fn render_nginx_config_contains_slug_domain_port() {
-        let cfg =
-            HelloProvisioner::render_nginx_config("tasty-lucky-clover", "goopy.life", 9876, 3000);
+        let cfg = HelloProvisioner::render_nginx_config(
+            "tasty-lucky-clover", "goopy.life", 9876, "127.0.0.1:3000",
+        );
         assert!(cfg.contains("tasty-lucky-clover.goopy.life"));
         assert!(cfg.contains("proxy_pass http://127.0.0.1:9876"));
         assert!(cfg.contains("/etc/letsencrypt/live/goopy.life/"));
@@ -408,8 +409,9 @@ mod tests {
 
     #[test]
     fn render_nginx_config_contains_auth_request_directives() {
-        let cfg =
-            HelloProvisioner::render_nginx_config("tasty-lucky-clover", "goopy.life", 9876, 3000);
+        let cfg = HelloProvisioner::render_nginx_config(
+            "tasty-lucky-clover", "goopy.life", 9876, "127.0.0.1:3000",
+        );
         assert!(cfg.contains("auth_request /goopy-alive-check;"),
             "nginx config must include auth_request directive");
         assert!(cfg.contains("proxy_pass http://127.0.0.1:3000/goopies/tasty-lucky-clover/alive;"),
@@ -482,7 +484,7 @@ mod tests {
         let provisioner = HelloProvisioner::new(
             "goopy.life".to_string(),
             false,
-            3000,
+            "127.0.0.1:3000".to_string(),
             Arc::new(PlainDirAllocator),
             sys,
         );
@@ -539,7 +541,7 @@ mod tests {
         let provisioner = HelloProvisioner::new(
             "goopy.life".to_string(),
             false,
-            3000,
+            "127.0.0.1:3000".to_string(),
             Arc::new(PlainDirAllocator),
             sys,
         );
