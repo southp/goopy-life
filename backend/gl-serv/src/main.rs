@@ -10,6 +10,7 @@ use clap::Parser;
 use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
 use gl_core::{GoopyManager, RealSysRunner};
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::trace::TraceLayer;
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -236,6 +237,7 @@ fn build_router(state: Arc<AppState>, cors: CorsLayer) -> Router {
         .route("/goopies/{slug}/alive", get(alive_check))
         .route("/config", get(get_config))
         .layer(cors)
+        .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 
