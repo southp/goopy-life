@@ -54,7 +54,14 @@ enum Cmd {
 }
 
 fn main() {
+    let span_events = if std::env::var("RUST_LOG_SPANS").is_ok() {
+        tracing_subscriber::fmt::format::FmtSpan::FULL
+    } else {
+        tracing_subscriber::fmt::format::FmtSpan::NONE
+    };
+
     tracing_subscriber::fmt()
+        .with_span_events(span_events)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
