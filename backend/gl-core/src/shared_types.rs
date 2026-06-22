@@ -182,6 +182,15 @@ mod tests {
     fn allocator_kind_from_str_unknown_returns_invalid() {
         assert!(matches!(AllocatorKind::from_str("NonExistent"), Err(Error::Invalid)));
     }
+
+    #[test]
+    fn row_parse_error_display() {
+        let e = Error::RowParse { slug: "a-b-c".into(), field: "status", value: "Bogus".into() };
+        let s = e.to_string();
+        assert!(s.contains("a-b-c"), "{s}");
+        assert!(s.contains("status"), "{s}");
+        assert!(s.contains("Bogus"), "{s}");
+    }
 }
 
 #[derive(Debug)]

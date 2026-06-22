@@ -54,10 +54,9 @@ enum Cmd {
 }
 
 fn main() {
-    let span_events = if std::env::var("RUST_LOG_SPANS").is_ok() {
-        tracing_subscriber::fmt::format::FmtSpan::FULL
-    } else {
-        tracing_subscriber::fmt::format::FmtSpan::NONE
+    let span_events = match std::env::var("RUST_LOG_SPANS").as_deref() {
+        Ok("0") | Ok("false") | Ok("") | Err(_) => tracing_subscriber::fmt::format::FmtSpan::NONE,
+        Ok(_) => tracing_subscriber::fmt::format::FmtSpan::FULL,
     };
 
     tracing_subscriber::fmt()
