@@ -388,7 +388,6 @@ mod tests {
             dev_mode: true,
             cors_origin: "https://example.com".to_string(),
             bind_address: "127.0.0.1:0".to_string(),
-            api_port: 3000,
             sweep_interval_secs: 86400,
             registry: gl_core::config::RegistryConfig {
                 path: PathBuf::from(":memory:"),

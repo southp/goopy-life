@@ -106,9 +106,6 @@ server {{
     ssl_certificate     /etc/letsencrypt/live/{domain}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/{domain}/privkey.pem;
 
-    auth_request /goopy-alive-check;
-    error_page 401 410 = @expired;
-
     location = /goopy-alive-check {{
         internal;
         proxy_pass http://127.0.0.1:{api_port}/goopies/{slug}/alive;
@@ -121,6 +118,8 @@ server {{
     }}
 
     location / {{
+        auth_request /goopy-alive-check;
+        error_page 410 = @expired;
         proxy_pass http://127.0.0.1:{port};
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -415,8 +414,8 @@ mod tests {
             "nginx config must include auth_request directive");
         assert!(cfg.contains("proxy_pass http://127.0.0.1:3000/goopies/tasty-lucky-clover/alive;"),
             "alive-check location must proxy to the correct gl-serv endpoint");
-        assert!(cfg.contains("error_page 401 410 = @expired;"),
-            "nginx config must map 401/410 to @expired named location");
+        assert!(cfg.contains("error_page 410 = @expired;"),
+            "nginx config must map 410 to @expired named location");
         assert!(cfg.contains("return 302 https://goopy.life/expired;"),
             "expired location must redirect to /expired page");
     }
