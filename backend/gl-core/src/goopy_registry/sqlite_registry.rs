@@ -97,15 +97,44 @@ fn parse_row(
     provisioner_kind_str: String,
     service_version: String,
 ) -> Result<Goopy, Error> {
-    let created_at = created_at_str.parse::<DateTime<Utc>>().map_err(|_| Error::Invalid)?;
+    let created_at = created_at_str.parse::<DateTime<Utc>>().map_err(|e| {
+        tracing::error!(
+            slug = %slug,
+            field = "created_at",
+            value = %created_at_str,
+            error = %e,
+            "row parse failed"
+        );
+        Error::RowParse { slug: slug.clone(), field: "created_at", value: created_at_str.clone() }
+    })?;
+
+    let status = Status::from_str(&status_str).map_err(|_| {
+        tracing::error!(slug = %slug, field = "status", value = %status_str, "row parse failed");
+        Error::RowParse { slug: slug.clone(), field: "status", value: status_str.clone() }
+    })?;
+
+    let provisioner_kind = ProvisionerKind::from_str(&provisioner_kind_str).map_err(|_| {
+        tracing::error!(
+            slug = %slug,
+            field = "provisioner_kind",
+            value = %provisioner_kind_str,
+            "row parse failed"
+        );
+        Error::RowParse {
+            slug: slug.clone(),
+            field: "provisioner_kind",
+            value: provisioner_kind_str.clone(),
+        }
+    })?;
+
     Ok(Goopy {
         slug,
         life_in_days: life_in_days as i32,
         created_at,
-        status: Status::from_str(&status_str)?,
+        status,
         working_dir: PathBuf::from(working_dir_str),
         port: port as u32,
-        provisioner_kind: ProvisionerKind::from_str(&provisioner_kind_str)?,
+        provisioner_kind,
         service_version,
     })
 }

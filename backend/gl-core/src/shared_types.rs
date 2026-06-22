@@ -201,6 +201,9 @@ pub enum Error {
     Subprocess(String),
     /// Slug generation failed after exhausting all retry attempts.
     SlugExhausted,
+    /// A row read from the database could not be parsed back into a `Goopy`.
+    /// Carries the slug being loaded, the field that failed, and its raw value.
+    RowParse { slug: String, field: &'static str, value: String },
 }
 
 impl std::error::Error for Error {
@@ -227,6 +230,9 @@ impl std::fmt::Display for Error {
             Error::PortExhausted => write!(f, "port range exhausted"),
             Error::Subprocess(msg) => write!(f, "subprocess error: {}", msg),
             Error::SlugExhausted => write!(f, "slug generation exhausted"),
+            Error::RowParse { slug, field, value } => {
+                write!(f, "corrupt row (slug={slug}, field={field}, value={value:?})")
+            }
         }
     }
 }
