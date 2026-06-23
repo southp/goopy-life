@@ -43,7 +43,11 @@ const POLL_INTERVAL_MS = 2000;
 // ---------------------------------------------------------------------------
 
 function apiBase(): string {
-	return process.env.NEXT_PUBLIC_API_URL ?? "";
+	const base = process.env.NEXT_PUBLIC_API_URL ?? "";
+	if (process.env.NODE_ENV !== "production" && !base) {
+		console.warn("NEXT_PUBLIC_API_URL is not set — API calls will use relative paths");
+	}
+	return base;
 }
 
 async function extractError(res: Response): Promise<string> {
@@ -63,8 +67,8 @@ async function spawnGoopy(): Promise<{ slug: string }> {
 	return res.json();
 }
 
-async function getGoopy(slug: string): Promise<GoopyResponse> {
-	const res = await fetch(`${apiBase()}/goopies/${slug}`);
+async function getGoopy(slug: string, signal?: AbortSignal): Promise<GoopyResponse> {
+	const res = await fetch(`${apiBase()}/goopies/${slug}`, { signal });
 	if (res.status === 404) {
 		throw new Error("not_found");
 	}
@@ -164,8 +168,9 @@ export default function Home() {
 	useEffect(() => {
 		if (state.kind !== "resuming") return;
 		const { slug } = state;
+		const controller = new AbortController();
 
-		getGoopy(slug).then((data) => {
+		getGoopy(slug, controller.signal).then((data) => {
 			if (data.status === "Done") {
 				const expired = Date.now() > new Date(data.expires_at).getTime();
 				if (expired) {
@@ -183,6 +188,7 @@ export default function Home() {
 				setState({ kind: "spawning" });
 			}
 		}).catch((err: Error) => {
+			if (controller.signal.aborted) return;
 			if (err.message === "not_found") {
 				// Stale slug in localStorage
 				localStorage.removeItem(LOCALSTORAGE_KEY);
@@ -191,6 +197,8 @@ export default function Home() {
 				setState({ kind: "error", message: err.message });
 			}
 		});
+
+		return () => controller.abort();
 	}, [state, startPolling]);
 
 	// ── "Ghost now!" click handler ──
@@ -228,13 +236,13 @@ export default function Home() {
 
 			case "done":
 				return (
-			<div className="go-button-done-message">
-			<p>Your Ghost is ready at:</p>
-				<a className="go-button-url" href={state.url}>
-				{state.url}
-				</a>
-			</div>
-			);
+					<div className="go-button-done-message">
+						<p>Your Ghost is ready at:</p>
+						<a className="go-button-url" href={state.url}>
+							{state.url}
+						</a>
+					</div>
+				);
 
 			case "expired":
 				return (
