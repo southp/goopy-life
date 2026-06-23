@@ -6,10 +6,12 @@ import { useCallback, useEffect, useState } from "react";
 // Types
 // ---------------------------------------------------------------------------
 
+type GoopyStatus = "Spawning" | "Done" | "Failed" | "Despawning" | "Archived" | "Empty";
+
 /** Mirrors the API's GoopyResponse shape. */
 interface GoopyResponse {
 	slug: string;
-	status: string;
+	status: GoopyStatus;
 	url: string;
 	created_at: string;
 	expires_at: string;
@@ -134,7 +136,8 @@ export default function Home() {
 					setState({ kind: "done", slug: data.slug, url: data.url });
 					setPollSlug(null);
 					return;
-				} else if (data.status === "Failed") {
+				} else if (data.status !== "Spawning") {
+					// Failed, Despawning, Archived, Empty — all terminal
 					localStorage.removeItem(LOCALSTORAGE_KEY);
 					setState({ kind: "failed", slug: pollSlug });
 					setPollSlug(null);
@@ -142,6 +145,7 @@ export default function Home() {
 				}
 			} catch (err: unknown) {
 				if (controller.signal.aborted) return;
+				localStorage.removeItem(LOCALSTORAGE_KEY);
 				const message = err instanceof Error ? err.message : "Unexpected error";
 				setState({ kind: "error", message });
 				setPollSlug(null);
@@ -173,6 +177,7 @@ export default function Home() {
 		const controller = new AbortController();
 
 		getGoopy(slug, controller.signal).then((data) => {
+			if (controller.signal.aborted) return;
 			if (data.status === "Done") {
 				const expired = Date.now() > new Date(data.expires_at).getTime();
 				if (expired) {
@@ -181,7 +186,8 @@ export default function Home() {
 				} else {
 					setState({ kind: "done", slug: data.slug, url: data.url });
 				}
-			} else if (data.status === "Failed") {
+			} else if (data.status !== "Spawning") {
+				// Failed, Despawning, Archived, Empty — all terminal
 				localStorage.removeItem(LOCALSTORAGE_KEY);
 				setState({ kind: "failed", slug });
 			} else {
@@ -196,6 +202,7 @@ export default function Home() {
 				localStorage.removeItem(LOCALSTORAGE_KEY);
 				setState({ kind: "idle" });
 			} else {
+				localStorage.removeItem(LOCALSTORAGE_KEY);
 				setState({ kind: "error", message: err.message });
 			}
 		});
