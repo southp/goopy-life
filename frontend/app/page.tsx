@@ -75,18 +75,6 @@ async function getGoopy(slug: string): Promise<GoopyResponse> {
 }
 
 // ---------------------------------------------------------------------------
-// Lazy state initialiser — runs once, synchronously, before first render
-// ---------------------------------------------------------------------------
-
-function initState(): AppState {
-	// localStorage is not available during SSR; guard defensively.
-	if (typeof window === "undefined") return { kind: "idle" };
-	const saved = localStorage.getItem(LOCALSTORAGE_KEY);
-	if (saved) return { kind: "resuming", slug: saved };
-	return { kind: "idle" };
-}
-
-// ---------------------------------------------------------------------------
 // Error display
 // ---------------------------------------------------------------------------
 
@@ -117,10 +105,15 @@ function ErrorMessage({ message, onReset }: { message: string; onReset: () => vo
 // ---------------------------------------------------------------------------
 
 export default function Home() {
-	// Lazy initialiser: if localStorage has a slug, start in "resuming" state
-	// so that the resume effect (below) triggers immediately.
-	const [state, setState] = useState<AppState>(initState);
+	// Always start idle so SSR and the first client render agree.
+	const [state, setState] = useState<AppState>({ kind: "idle" });
 	const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+	// ── after hydration: resume a saved slug ──
+	useEffect(() => {
+		const saved = localStorage.getItem(LOCALSTORAGE_KEY);
+		if (saved) setState({ kind: "resuming", slug: saved });
+	}, []);
 
 	// ── cleanup on unmount ──
 	useEffect(() => {
