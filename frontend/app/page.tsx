@@ -34,7 +34,7 @@ type AppState =
 // Constants
 // ---------------------------------------------------------------------------
 
-const GITHUB_ISSUES_URL = "https://github.com/pSouth/goopy-life/issues";
+const GITHUB_ISSUES_URL = "https://github.com/southp/goopy-life/issues";
 const LOCALSTORAGE_KEY = "goopy_slug";
 const POLL_INTERVAL_MS = 2000;
 const REDIRECT_COUNTDOWN_SECS = 3;
