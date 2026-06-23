@@ -111,7 +111,8 @@ function ErrorMessage({ message, onReset }: { message: string; onReset: () => vo
 export default function Home() {
 	// Always start idle so SSR and the first client render agree.
 	const [state, setState] = useState<AppState>({ kind: "idle" });
-	const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+	const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const abortRef = useRef<AbortController | null>(null);
 
 	// ── after hydration: resume a saved slug ──
 	useEffect(() => {
@@ -122,46 +123,56 @@ export default function Home() {
 	// ── cleanup on unmount ──
 	useEffect(() => {
 		return () => {
-			if (pollRef.current !== null) clearInterval(pollRef.current);
+			if (pollRef.current !== null) clearTimeout(pollRef.current);
+			abortRef.current?.abort();
 		};
 	}, []);
 
 	// ── reset helper ──
 	const handleReset = useCallback(() => {
 		if (pollRef.current !== null) {
-			clearInterval(pollRef.current);
+			clearTimeout(pollRef.current);
 			pollRef.current = null;
 		}
+		abortRef.current?.abort();
+		abortRef.current = null;
 		localStorage.removeItem(LOCALSTORAGE_KEY);
 		setState({ kind: "idle" });
 	}, []);
 
 	// ── start polling a slug until it reaches Done or Failed ──
 	const startPolling = useCallback((slug: string) => {
-		if (pollRef.current !== null) clearInterval(pollRef.current);
+		if (pollRef.current !== null) clearTimeout(pollRef.current);
+		abortRef.current?.abort();
+		const controller = new AbortController();
+		abortRef.current = controller;
 
-		pollRef.current = setInterval(async () => {
+		const tick = async () => {
 			try {
-				const data = await getGoopy(slug);
+				const data = await getGoopy(slug, controller.signal);
 
 				if (data.status === "Done") {
-					clearInterval(pollRef.current!);
 					pollRef.current = null;
 					setState({ kind: "done", slug: data.slug, url: data.url });
+					return;
 				} else if (data.status === "Failed") {
-					clearInterval(pollRef.current!);
 					pollRef.current = null;
 					localStorage.removeItem(LOCALSTORAGE_KEY);
 					setState({ kind: "failed", slug });
+					return;
 				}
-				// Still "Spawning" — keep polling
 			} catch (err: unknown) {
-				clearInterval(pollRef.current!);
+				if (controller.signal.aborted) return;
 				pollRef.current = null;
 				const message = err instanceof Error ? err.message : "Unexpected error";
 				setState({ kind: "error", message });
+				return;
 			}
-		}, POLL_INTERVAL_MS);
+			// Still spawning — next tick only after this one settles
+			pollRef.current = setTimeout(tick, POLL_INTERVAL_MS);
+		};
+
+		pollRef.current = setTimeout(tick, POLL_INTERVAL_MS);
 	}, []);
 
 	// ── resume: fetch the saved slug once to establish its current state ──
