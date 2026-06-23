@@ -23,7 +23,7 @@ dev_mode = false
 # Allowed CORS origin (your Vercel frontend URL)
 cors_origin = "https://goopy.life"
 
-# Address and port for gl-serv to bind
+# Address and port for gl-serv to bind; also used by nginx auth_request subrequests.
 bind_address = "0.0.0.0:3000"
 
 # How often to sweep expired instances (seconds; default 86400 = 24h)

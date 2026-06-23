@@ -10,6 +10,7 @@ use clap::Parser;
 use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
 use gl_core::{GoopyManager, RealSysRunner};
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::trace::TraceLayer;
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -236,6 +237,7 @@ fn build_router(state: Arc<AppState>, cors: CorsLayer) -> Router {
         .route("/goopies/{slug}/alive", get(alive_check))
         .route("/config", get(get_config))
         .layer(cors)
+        .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 
@@ -836,7 +838,12 @@ mod tests {
 
         // The alive instance must still be reachable.
         assert!(manager.get("sweep-alive").unwrap().is_some());
-        // The expired instance must have been removed.
-        assert!(manager.get("sweep-expired").unwrap().is_none());
+        // The expired instance must have been removed — despawn runs on a
+        // background thread, so poll until done (mirroring the gl-core test).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while manager.get("sweep-expired").unwrap().is_some() {
+            assert!(std::time::Instant::now() < deadline, "despawn timed out");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 }

@@ -199,7 +199,7 @@ impl Config {
     /// the config file (e.g. `gl-cli` forces dev mode unless `--prod` is given).
     pub fn build_provisioner(&self, dev_mode: bool, sys: Arc<dyn SysRunner>) -> HelloProvisioner {
         let storage = self.allocator.build();
-        HelloProvisioner::new(self.domain.clone(), dev_mode, storage, sys)
+        HelloProvisioner::new(self.domain.clone(), dev_mode, self.bind_address.clone(), storage, sys)
     }
 
     /// Build a [`GoopyManagerConfig`] from the current configuration.

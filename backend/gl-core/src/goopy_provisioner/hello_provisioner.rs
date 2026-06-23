@@ -26,6 +26,8 @@ use crate::Goopy;
 pub struct HelloProvisioner {
     domain: String,
     dev_mode: bool,
+    /// Address on which gl-serv listens; used by nginx `auth_request` subrequests.
+    api_address: String,
     storage: Arc<dyn StorageAllocator>,
     sys: Arc<dyn SysRunner>,
 }
@@ -34,12 +36,14 @@ impl HelloProvisioner {
     pub fn new(
         domain: String,
         dev_mode: bool,
+        api_address: String,
         storage: Arc<dyn StorageAllocator>,
         sys: Arc<dyn SysRunner>,
     ) -> Self {
         Self {
             domain,
             dev_mode,
+            api_address,
             storage,
             sys,
         }
@@ -87,7 +91,7 @@ WantedBy=multi-user.target
         )
     }
 
-    fn render_nginx_config(slug: &str, domain: &str, port: u32) -> String {
+    fn render_nginx_config(slug: &str, domain: &str, port: u32, api_address: &str) -> String {
         format!(
             r#"server {{
     listen 80;
@@ -102,7 +106,20 @@ server {{
     ssl_certificate     /etc/letsencrypt/live/{domain}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/{domain}/privkey.pem;
 
+    location = /goopy-alive-check {{
+        internal;
+        proxy_pass http://{api_address}/goopies/{slug}/alive;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+    }}
+
+    location @expired {{
+        return 302 https://goopy.life/expired;
+    }}
+
     location / {{
+        auth_request /goopy-alive-check;
+        error_page 410 = @expired;
         proxy_pass http://127.0.0.1:{port};
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -112,6 +129,7 @@ server {{
             slug = slug,
             domain = domain,
             port = port,
+            api_address = api_address,
         )
     }
 
@@ -135,7 +153,7 @@ server {{
     }
 
     fn write_nginx_config(&self, slug: &str, domain: &str, port: u32) -> Result<(), Error> {
-        let content = Self::render_nginx_config(slug, domain, port);
+        let content = Self::render_nginx_config(slug, domain, port, &self.api_address);
         let path = format!("/etc/nginx/sites-available/{slug}");
         self.sys.sudo_write(&path, &content)
     }
@@ -356,6 +374,7 @@ mod tests {
         HelloProvisioner::new(
             "localhost".to_string(),
             true,
+            "127.0.0.1:3000".to_string(),
             Arc::new(PlainDirAllocator),
             Arc::new(RealSysRunner),
         )
@@ -380,11 +399,27 @@ mod tests {
 
     #[test]
     fn render_nginx_config_contains_slug_domain_port() {
-        let cfg =
-            HelloProvisioner::render_nginx_config("tasty-lucky-clover", "goopy.life", 9876);
+        let cfg = HelloProvisioner::render_nginx_config(
+            "tasty-lucky-clover", "goopy.life", 9876, "127.0.0.1:3000",
+        );
         assert!(cfg.contains("tasty-lucky-clover.goopy.life"));
         assert!(cfg.contains("proxy_pass http://127.0.0.1:9876"));
         assert!(cfg.contains("/etc/letsencrypt/live/goopy.life/"));
+    }
+
+    #[test]
+    fn render_nginx_config_contains_auth_request_directives() {
+        let cfg = HelloProvisioner::render_nginx_config(
+            "tasty-lucky-clover", "goopy.life", 9876, "127.0.0.1:3000",
+        );
+        assert!(cfg.contains("auth_request /goopy-alive-check;"),
+            "nginx config must include auth_request directive");
+        assert!(cfg.contains("proxy_pass http://127.0.0.1:3000/goopies/tasty-lucky-clover/alive;"),
+            "alive-check location must proxy to the correct gl-serv endpoint");
+        assert!(cfg.contains("error_page 410 = @expired;"),
+            "nginx config must map 410 to @expired named location");
+        assert!(cfg.contains("return 302 https://goopy.life/expired;"),
+            "expired location must redirect to /expired page");
     }
 
     /// Verifies that `provision` in dev mode writes the server script.
@@ -449,6 +484,7 @@ mod tests {
         let provisioner = HelloProvisioner::new(
             "goopy.life".to_string(),
             false,
+            "127.0.0.1:3000".to_string(),
             Arc::new(PlainDirAllocator),
             sys,
         );
@@ -505,6 +541,7 @@ mod tests {
         let provisioner = HelloProvisioner::new(
             "goopy.life".to_string(),
             false,
+            "127.0.0.1:3000".to_string(),
             Arc::new(PlainDirAllocator),
             sys,
         );
