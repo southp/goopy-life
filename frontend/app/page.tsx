@@ -228,6 +228,13 @@ export default function Home() {
 				);
 
 			case "resuming":
+				return (
+					<>
+						<span className="spinner" aria-label="Loading" />
+						<p className="spawning-message">Checking…</p>
+					</>
+				);
+
 			case "spawning":
 				return (
 					<>
