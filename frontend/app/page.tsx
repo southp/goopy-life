@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -111,8 +111,7 @@ function ErrorMessage({ message, onReset }: { message: string; onReset: () => vo
 export default function Home() {
 	// Always start idle so SSR and the first client render agree.
 	const [state, setState] = useState<AppState>({ kind: "idle" });
-	const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-	const abortRef = useRef<AbortController | null>(null);
+	const [pollSlug, setPollSlug] = useState<string | null>(null);
 
 	// ── after hydration: resume a saved slug ──
 	useEffect(() => {
@@ -120,59 +119,51 @@ export default function Home() {
 		if (saved) setState({ kind: "resuming", slug: saved });
 	}, []);
 
-	// ── cleanup on unmount ──
+	// ── polling lifecycle — this effect owns the timer and AbortController ──
 	useEffect(() => {
-		return () => {
-			if (pollRef.current !== null) clearTimeout(pollRef.current);
-			abortRef.current?.abort();
-		};
-	}, []);
+		if (!pollSlug) return;
 
-	// ── reset helper ──
-	const handleReset = useCallback(() => {
-		if (pollRef.current !== null) {
-			clearTimeout(pollRef.current);
-			pollRef.current = null;
-		}
-		abortRef.current?.abort();
-		abortRef.current = null;
-		localStorage.removeItem(LOCALSTORAGE_KEY);
-		setState({ kind: "idle" });
-	}, []);
-
-	// ── start polling a slug until it reaches Done or Failed ──
-	const startPolling = useCallback((slug: string) => {
-		if (pollRef.current !== null) clearTimeout(pollRef.current);
-		abortRef.current?.abort();
 		const controller = new AbortController();
-		abortRef.current = controller;
+		let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
 		const tick = async () => {
 			try {
-				const data = await getGoopy(slug, controller.signal);
+				const data = await getGoopy(pollSlug, controller.signal);
 
 				if (data.status === "Done") {
-					pollRef.current = null;
 					setState({ kind: "done", slug: data.slug, url: data.url });
+					setPollSlug(null);
 					return;
 				} else if (data.status === "Failed") {
-					pollRef.current = null;
 					localStorage.removeItem(LOCALSTORAGE_KEY);
-					setState({ kind: "failed", slug });
+					setState({ kind: "failed", slug: pollSlug });
+					setPollSlug(null);
 					return;
 				}
 			} catch (err: unknown) {
 				if (controller.signal.aborted) return;
-				pollRef.current = null;
 				const message = err instanceof Error ? err.message : "Unexpected error";
 				setState({ kind: "error", message });
+				setPollSlug(null);
 				return;
 			}
 			// Still spawning — next tick only after this one settles
-			pollRef.current = setTimeout(tick, POLL_INTERVAL_MS);
+			timeoutId = setTimeout(tick, POLL_INTERVAL_MS);
 		};
 
-		pollRef.current = setTimeout(tick, POLL_INTERVAL_MS);
+		timeoutId = setTimeout(tick, POLL_INTERVAL_MS);
+
+		return () => {
+			controller.abort();
+			if (timeoutId !== null) clearTimeout(timeoutId);
+		};
+	}, [pollSlug]);
+
+	// ── reset helper ──
+	const handleReset = useCallback(() => {
+		setPollSlug(null);
+		localStorage.removeItem(LOCALSTORAGE_KEY);
+		setState({ kind: "idle" });
 	}, []);
 
 	// ── resume: fetch the saved slug once to establish its current state ──
@@ -194,9 +185,9 @@ export default function Home() {
 				localStorage.removeItem(LOCALSTORAGE_KEY);
 				setState({ kind: "failed", slug });
 			} else {
-				// Still spawning — start polling
-				startPolling(slug);
+				// Still spawning — hand off to the polling effect
 				setState({ kind: "spawning" });
+				setPollSlug(slug);
 			}
 		}).catch((err: Error) => {
 			if (controller.signal.aborted) return;
@@ -210,7 +201,7 @@ export default function Home() {
 		});
 
 		return () => controller.abort();
-	}, [state, startPolling]);
+	}, [state]);
 
 	// ── "Ghost now!" click handler ──
 	async function handleGhostNow() {
@@ -219,7 +210,7 @@ export default function Home() {
 		try {
 			const { slug } = await spawnGoopy();
 			localStorage.setItem(LOCALSTORAGE_KEY, slug);
-			startPolling(slug);
+			setPollSlug(slug);
 		} catch (err: unknown) {
 			const message = err instanceof Error ? err.message : "Unexpected error";
 			setState({ kind: "error", message });
