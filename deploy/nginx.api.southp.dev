@@ -1,21 +1,21 @@
-# Nginx config for api.goopy.life — reverse-proxy to gl-serv (port 3000).
-# Install: copy to /etc/nginx/sites-available/api.goopy.life
-#          then: ln -s /etc/nginx/sites-available/api.goopy.life \
-#                      /etc/nginx/sites-enabled/api.goopy.life
+# Nginx config for api.southp.dev — dev-environment reverse-proxy to gl-serv.
+# Install: copy to /etc/nginx/sites-available/api.southp.dev
+#          then: ln -s /etc/nginx/sites-available/api.southp.dev \
+#                      /etc/nginx/sites-enabled/api.southp.dev
 #          then: nginx -t && systemctl reload nginx
 
 server {
     listen 80;
-    server_name api.goopy.life;
+    server_name api.southp.dev;
     return 301 https://$host$request_uri;
 }
 
 server {
     listen 443 ssl;
-    server_name api.goopy.life;
+    server_name api.southp.dev;
 
-    ssl_certificate     /etc/letsencrypt/live/goopy.life/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/goopy.life/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/southp.dev/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/southp.dev/privkey.pem;
 
     location / {
         proxy_pass http://127.0.0.1:3000;  # port must match api_port in config.toml

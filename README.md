@@ -16,23 +16,12 @@ The `deploy/` directory contains all artifacts needed to run the service on the 
 
 ### Cross-compilation setup (one-time, on macOS)
 
-The droplet runs x86_64 Linux. Before running `deploy/deploy.sh` for the first time, add the Linux target:
+The droplet runs x86_64 Linux. Install the musl target and `cargo-zigbuild` (uses [Zig](https://ziglang.org/) as the cross-linker — no extra toolchain taps required):
 
 ```bash
-rustup target add x86_64-unknown-linux-gnu
-```
-
-You will also need a cross-compilation linker. The easiest option on macOS is the `musl-cross` toolchain via Homebrew:
-
-```bash
-brew install FiloSottile/musl-cross/musl-cross
-```
-
-Then add the following to `backend/.cargo/config.toml` (create it if it does not exist):
-
-```toml
-[target.x86_64-unknown-linux-gnu]
-linker = "x86_64-linux-musl-gcc"
+rustup target add x86_64-unknown-linux-musl
+cargo install cargo-zigbuild
+brew install zig
 ```
 
 ### Deploying
@@ -41,4 +30,4 @@ linker = "x86_64-linux-musl-gcc"
 ./deploy/deploy.sh user@droplet
 ```
 
-This cross-compiles `gl-serv`, uploads the binary and static pages to the droplet, and restarts the `gl-serv` systemd service.
+This cross-compiles `gl-serv` to a fully static musl binary, uploads it to the droplet, and restarts the `gl-serv` systemd service.
