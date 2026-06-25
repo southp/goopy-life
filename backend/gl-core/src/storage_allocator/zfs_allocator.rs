@@ -174,16 +174,9 @@ mod tests {
             .expect("zfs list should run");
         assert!(list_output.status.success(), "dataset should exist after allocate");
 
-        // Verify mountpoint was set correctly
-        let mp_output = std::process::Command::new("zfs")
-            .args(["get", "-H", "-o", "value", "mountpoint", &dataset])
-            .output()
-            .expect("zfs get mountpoint should run");
-        assert_eq!(
-            String::from_utf8_lossy(&mp_output.stdout).trim(),
-            path.to_str().unwrap(),
-            "mountpoint should match path argument"
-        );
+        // Mountpoint is inherited from the pool root (no -o mountpoint= is passed to
+        // zfs create). The pool must be configured with the correct mountpoint via
+        // `zfs set mountpoint=<base_dir> <pool>` during one-time droplet setup.
 
         // Cleanup
         std::process::Command::new("zfs")
