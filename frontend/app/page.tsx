@@ -115,8 +115,14 @@ export default function Home() {
 	const [state, setState] = useState<AppState>({ kind: "idle" });
 	const [pollSlug, setPollSlug] = useState<string | null>(null);
 
-	// ── after hydration: resume a saved slug ──
+	// ── after hydration: handle ?expired redirect or resume a saved slug ──
 	useEffect(() => {
+		const params = new URLSearchParams(window.location.search);
+		if (params.has("expired")) {
+			window.history.replaceState({}, "", "/");
+			setState({ kind: "expired", slug: "" });
+			return;
+		}
 		const saved = localStorage.getItem(LOCALSTORAGE_KEY);
 		if (saved) setState({ kind: "resuming", slug: saved });
 	}, []);
@@ -263,7 +269,7 @@ export default function Home() {
 			case "expired":
 				return (
 					<div className="go-button-done-message">
-						<p className="state-message">Your previous site has expired.</p>
+						<p className="state-message">This goopy has expired.</p>
 						<button className="go-button idle" onClick={handleReset}>
 							Spawn a new one
 						</button>
