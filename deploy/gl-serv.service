@@ -13,6 +13,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
+ReadWritePaths=/opt/goopy-life
 
 [Install]
 WantedBy=multi-user.target

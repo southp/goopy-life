@@ -154,13 +154,13 @@ server {{
 
     fn write_nginx_config(&self, slug: &str, domain: &str, port: u32) -> Result<(), Error> {
         let content = Self::render_nginx_config(slug, domain, port, &self.api_address);
-        let path = format!("/etc/nginx/sites-available/{slug}");
+        let path = format!("/etc/nginx/sites-available/goopy-{slug}");
         self.sys.sudo_write(&path, &content)
     }
 
     fn enable_nginx_site(&self, slug: &str) -> Result<(), Error> {
-        let available = format!("/etc/nginx/sites-available/{slug}");
-        let enabled = format!("/etc/nginx/sites-enabled/{slug}");
+        let available = format!("/etc/nginx/sites-available/goopy-{slug}");
+        let enabled = format!("/etc/nginx/sites-enabled/goopy-{slug}");
         self.sys.run("sudo", &["ln", "-sf", &available, &enabled])
     }
 
@@ -182,8 +182,8 @@ server {{
     }
 
     fn remove_nginx_site(&self, slug: &str) -> Result<(), Error> {
-        let enabled = format!("/etc/nginx/sites-enabled/{slug}");
-        let available = format!("/etc/nginx/sites-available/{slug}");
+        let enabled = format!("/etc/nginx/sites-enabled/goopy-{slug}");
+        let available = format!("/etc/nginx/sites-available/goopy-{slug}");
         self.sys.run("sudo", &["rm", "-f", &enabled])?;
         self.sys.run("sudo", &["rm", "-f", &available])?;
         self.reload_nginx()
