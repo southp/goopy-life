@@ -3,6 +3,9 @@
 # and nginx configs without a password prompt.
 goopy ALL=(root) NOPASSWD: \
     /usr/bin/install -m 755 /tmp/gl-serv /opt/goopy-life/bin/gl-serv, \
+    /usr/sbin/zfs create -o quota=* zpool_ghost/*, \
+    /usr/sbin/zfs destroy zpool_ghost/*, \
+    /bin/chown * /opt/goopy-life/data/*, \
     /bin/systemctl start gl-serv, \
     /bin/systemctl stop gl-serv, \
     /bin/systemctl restart gl-serv, \
@@ -16,7 +19,7 @@ goopy ALL=(root) NOPASSWD: \
     /bin/systemctl reload nginx, \
     /usr/bin/tee /etc/systemd/system/goopy-*, \
     /usr/bin/tee /etc/nginx/sites-available/goopy-*, \
-    /bin/ln -s /etc/nginx/sites-available/goopy-* /etc/nginx/sites-enabled/goopy-*, \
-    /bin/rm /etc/nginx/sites-enabled/goopy-*, \
-    /bin/rm /etc/nginx/sites-available/goopy-*, \
-    /bin/rm /etc/systemd/system/goopy-*
+    /usr/bin/ln -sf /etc/nginx/sites-available/goopy-* /etc/nginx/sites-enabled/goopy-*, \
+    /usr/bin/rm -f /etc/nginx/sites-enabled/goopy-*, \
+    /usr/bin/rm -f /etc/nginx/sites-available/goopy-*, \
+    /usr/bin/rm -f /etc/systemd/system/goopy-*

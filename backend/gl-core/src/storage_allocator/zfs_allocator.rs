@@ -7,8 +7,12 @@ use crate::storage_allocator::StorageAllocator;
 
 /// Production allocator that creates/destroys ZFS datasets with a quota.
 ///
-/// `allocate` runs: `zfs create -o quota={quota_mb}M -o mountpoint=<path> {pool}/{slug}`
+/// `allocate` runs: `zfs create -o quota={quota_mb}M {pool}/{slug}`
 /// `release`  runs: `zfs destroy {pool}/{slug}`
+///
+/// The dataset inherits its mountpoint from the pool root (which must be set to the
+/// same base directory as the `base_dir` in config). This avoids needing CAP_SYS_ADMIN
+/// for custom mountpoints; `zfs allow` delegation covers create/destroy/mount instead.
 ///
 /// The slug is derived from the last path component of `path`.
 pub struct ZfsAllocator {
@@ -32,12 +36,11 @@ impl StorageAllocator for ZfsAllocator {
             .into_owned();
         let dataset = format!("{}/{}", self.pool, slug);
         let quota_arg = format!("quota={}M", self.quota_mb);
-        let mountpoint_arg = format!("mountpoint={}", path.display());
 
         info!(%dataset, path = %path.display(), "creating ZFS dataset");
 
-        let output = std::process::Command::new("zfs")
-            .args(["create", "-o", &quota_arg, "-o", &mountpoint_arg, &dataset])
+        let output = std::process::Command::new("sudo")
+            .args(["-n", "zfs", "create", "-o", &quota_arg, &dataset])
             .env("LC_ALL", "C")
             .output()
             .map_err(Error::Io)?;
@@ -56,6 +59,25 @@ impl StorageAllocator for ZfsAllocator {
         }
 
         info!(%dataset, "ZFS dataset created");
+
+        // The dataset root is owned by root after sudo zfs create; hand it to
+        // the current process owner so the provisioner can write into it.
+        let uid_gid = read_uid_gid()?;
+        let chown_output = std::process::Command::new("sudo")
+            .args(["-n", "chown", &uid_gid, &path.to_string_lossy()])
+            .env("LC_ALL", "C")
+            .output()
+            .map_err(Error::Io)?;
+        if !chown_output.status.success() {
+            let stderr = String::from_utf8_lossy(&chown_output.stderr);
+            error!(%dataset, %stderr, "chown of dataset root failed");
+            return Err(Error::Subprocess(format!(
+                "chown failed for '{}' (exit status: {}): {}",
+                path.display(), chown_output.status, stderr.trim()
+            )));
+        }
+
+        info!(%dataset, path = %path.display(), "dataset root ownership set");
         Ok(())
     }
 
@@ -70,8 +92,8 @@ impl StorageAllocator for ZfsAllocator {
 
         info!(%dataset, "destroying ZFS dataset");
 
-        let output = std::process::Command::new("zfs")
-            .args(["destroy", &dataset])
+        let output = std::process::Command::new("sudo")
+            .args(["-n", "zfs", "destroy", &dataset])
             .env("LC_ALL", "C")
             .output()
             .map_err(Error::Io)?;
@@ -109,6 +131,22 @@ impl StorageAllocator for ZfsAllocator {
 
         Ok(())
     }
+}
+
+/// Returns `"<uid>:<gid>"` for the current process by reading `/proc/self/status`.
+fn read_uid_gid() -> Result<String, Error> {
+    let status = std::fs::read_to_string("/proc/self/status").map_err(Error::Io)?;
+    let uid = status
+        .lines()
+        .find(|l| l.starts_with("Uid:"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .ok_or_else(|| Error::Subprocess("could not read UID from /proc/self/status".into()))?;
+    let gid = status
+        .lines()
+        .find(|l| l.starts_with("Gid:"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .ok_or_else(|| Error::Subprocess("could not read GID from /proc/self/status".into()))?;
+    Ok(format!("{}:{}", uid, gid))
 }
 
 #[cfg(test)]

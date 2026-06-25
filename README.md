@@ -24,6 +24,28 @@ cargo install cargo-zigbuild
 brew install zig
 ```
 
+### Droplet setup (one-time)
+
+```bash
+# 1. Install the systemd unit and sudoers drop-in
+sudo cp deploy/gl-serv.service /etc/systemd/system/gl-serv.service
+sudo cp deploy/sudoers.goopy /etc/sudoers.d/goopy
+sudo chmod 0440 /etc/sudoers.d/goopy
+sudo systemctl daemon-reload
+sudo systemctl enable gl-serv
+
+# 2. Install the nginx reverse-proxy config
+sudo cp deploy/nginx.api.goopy.life /etc/nginx/sites-available/api.goopy.life
+sudo ln -s /etc/nginx/sites-available/api.goopy.life /etc/nginx/sites-enabled/api.goopy.life
+sudo nginx -t && sudo systemctl reload nginx
+
+# 3. Set the ZFS pool mountpoint to match base_dir in config.toml (default: /opt/goopy-life/data).
+#    gl-serv creates/destroys child datasets via sudo (sudoers rules restrict to zpool_ghost/*).
+#    NoNewPrivileges is intentionally omitted from the unit to allow this; see issue #90 for
+#    the long-term fix (privilege-separated ZFS helper).
+sudo zfs set mountpoint=/opt/goopy-life/data zpool_ghost
+```
+
 ### Deploying
 
 ```bash

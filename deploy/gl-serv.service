@@ -9,11 +9,10 @@ Restart=on-failure
 RestartSec=5
 WorkingDirectory=/opt/goopy-life
 Environment=RUST_LOG=debug
-NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/opt/goopy-life
+ReadWritePaths=/opt/goopy-life /run /var/log/nginx /etc/systemd/system /etc/nginx/sites-available /etc/nginx/sites-enabled
 
 [Install]
 WantedBy=multi-user.target
