@@ -2,6 +2,11 @@
 # Allows the 'goopy' service account to manage per-instance systemd services
 # and nginx configs without a password prompt.
 goopy ALL=(root) NOPASSWD: \
+    /usr/bin/install -m 755 /tmp/gl-serv /opt/goopy-life/bin/gl-serv, \
+    /bin/systemctl start gl-serv, \
+    /bin/systemctl stop gl-serv, \
+    /bin/systemctl restart gl-serv, \
+    /bin/systemctl enable gl-serv, \
     /bin/systemctl start goopy-*, \
     /bin/systemctl stop goopy-*, \
     /bin/systemctl enable goopy-*, \
