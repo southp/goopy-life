@@ -147,45 +147,45 @@ server {{
 
     fn enable_service(&self, slug: &str) -> Result<(), Error> {
         let svc = format!("{}.service", Self::service_name(slug));
-        self.sys.run("sudo", &["systemctl", "daemon-reload"])?;
-        self.sys.run("sudo", &["systemctl", "enable", &svc])?;
-        self.sys.run("sudo", &["systemctl", "start", &svc])
+        self.sys.sudo_run(&["systemctl", "daemon-reload"])?;
+        self.sys.sudo_run(&["systemctl", "enable", &svc])?;
+        self.sys.sudo_run(&["systemctl", "start", &svc])
     }
 
     fn write_nginx_config(&self, slug: &str, domain: &str, port: u32) -> Result<(), Error> {
         let content = Self::render_nginx_config(slug, domain, port, &self.api_address);
-        let path = format!("/etc/nginx/sites-available/{slug}");
+        let path = format!("/etc/nginx/sites-available/goopy-{slug}");
         self.sys.sudo_write(&path, &content)
     }
 
     fn enable_nginx_site(&self, slug: &str) -> Result<(), Error> {
-        let available = format!("/etc/nginx/sites-available/{slug}");
-        let enabled = format!("/etc/nginx/sites-enabled/{slug}");
-        self.sys.run("sudo", &["ln", "-sf", &available, &enabled])
+        let available = format!("/etc/nginx/sites-available/goopy-{slug}");
+        let enabled = format!("/etc/nginx/sites-enabled/goopy-{slug}");
+        self.sys.sudo_run(&["ln", "-sf", &available, &enabled])
     }
 
     fn reload_nginx(&self) -> Result<(), Error> {
-        self.sys.run("sudo", &["nginx", "-t"])?;
-        self.sys.run("sudo", &["systemctl", "reload", "nginx"])
+        self.sys.sudo_run(&["nginx", "-t"])?;
+        self.sys.sudo_run(&["systemctl", "reload", "nginx"])
     }
 
     // ── Production deprovisioning steps ─────────────────────────────────
 
     fn stop_service(&self, slug: &str) -> Result<(), Error> {
         let svc = format!("{}.service", Self::service_name(slug));
-        self.sys.run("sudo", &["systemctl", "stop", &svc])?;
-        self.sys.run("sudo", &["systemctl", "disable", &svc])?;
+        self.sys.sudo_run(&["systemctl", "stop", &svc])?;
+        self.sys.sudo_run(&["systemctl", "disable", &svc])?;
 
         let path = format!("/etc/systemd/system/{svc}");
-        self.sys.run("sudo", &["rm", "-f", &path])?;
-        self.sys.run("sudo", &["systemctl", "daemon-reload"])
+        self.sys.sudo_run(&["rm", "-f", &path])?;
+        self.sys.sudo_run(&["systemctl", "daemon-reload"])
     }
 
     fn remove_nginx_site(&self, slug: &str) -> Result<(), Error> {
-        let enabled = format!("/etc/nginx/sites-enabled/{slug}");
-        let available = format!("/etc/nginx/sites-available/{slug}");
-        self.sys.run("sudo", &["rm", "-f", &enabled])?;
-        self.sys.run("sudo", &["rm", "-f", &available])?;
+        let enabled = format!("/etc/nginx/sites-enabled/goopy-{slug}");
+        let available = format!("/etc/nginx/sites-available/goopy-{slug}");
+        self.sys.sudo_run(&["rm", "-f", &enabled])?;
+        self.sys.sudo_run(&["rm", "-f", &available])?;
         self.reload_nginx()
     }
 
@@ -522,7 +522,7 @@ mod tests {
 
         let verb_seq: Vec<&str> = calls
             .iter()
-            .filter_map(|c| if let MockCall::Run { args, .. } = c { Some(args) } else { None })
+            .filter_map(|c| if let MockCall::SudoRun { args } = c { Some(args) } else { None })
             .flat_map(|args| args.iter().map(|s| s.as_str()))
             .filter(|a| ["daemon-reload", "enable", "start", "ln", "reload"].contains(a))
             .collect();
@@ -554,7 +554,7 @@ mod tests {
         // Verify ordered stop → disable → daemon-reload → reload verb sequence.
         let verb_seq: Vec<&str> = calls
             .iter()
-            .filter_map(|c| if let MockCall::Run { args, .. } = c { Some(args) } else { None })
+            .filter_map(|c| if let MockCall::SudoRun { args } = c { Some(args) } else { None })
             .flat_map(|args| args.iter().map(|s| s.as_str()))
             .filter(|a| ["stop", "disable", "daemon-reload", "reload"].contains(a))
             .collect();
@@ -563,7 +563,7 @@ mod tests {
         // Verify rm was issued for the systemd service file and nginx configs.
         let run_args: Vec<&[String]> = calls
             .iter()
-            .filter_map(|c| if let MockCall::Run { args, .. } = c { Some(args.as_slice()) } else { None })
+            .filter_map(|c| if let MockCall::SudoRun { args } = c { Some(args.as_slice()) } else { None })
             .collect();
         assert!(
             run_args.iter().any(|args| args.iter().any(|a| a.contains("/etc/systemd/system/"))),

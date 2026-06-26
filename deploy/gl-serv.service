@@ -1,0 +1,18 @@
+[Unit]
+Description=Goopy.Life API server
+After=network.target
+
+[Service]
+User=goopy
+ExecStart=/opt/goopy-life/bin/gl-serv --config /opt/goopy-life/config.toml
+Restart=on-failure
+RestartSec=5
+WorkingDirectory=/opt/goopy-life
+Environment=RUST_LOG=debug
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/goopy-life /run /var/log/nginx /etc/systemd/system /etc/nginx/sites-available /etc/nginx/sites-enabled
+
+[Install]
+WantedBy=multi-user.target

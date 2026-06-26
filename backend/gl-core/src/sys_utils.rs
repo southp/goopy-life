@@ -14,7 +14,9 @@ use crate::shared_types::Error;
 pub trait SysRunner: Send + Sync {
     /// Run a program and wait for it to exit successfully.
     fn run(&self, program: &str, args: &[&str]) -> Result<(), Error>;
-    /// Write `content` to a privileged `path` via `sudo tee`.
+    /// Run a command via `sudo -n` (non-interactive, no password prompt).
+    fn sudo_run(&self, args: &[&str]) -> Result<(), Error>;
+    /// Write `content` to a privileged `path` via `sudo -n tee`.
     fn sudo_write(&self, path: &str, content: &str) -> Result<(), Error>;
 }
 
@@ -43,10 +45,16 @@ impl SysRunner for RealSysRunner {
         Ok(())
     }
 
+    fn sudo_run(&self, args: &[&str]) -> Result<(), Error> {
+        let mut full: Vec<&str> = vec!["-n"];
+        full.extend_from_slice(args);
+        self.run("sudo", &full)
+    }
+
     fn sudo_write(&self, path: &str, content: &str) -> Result<(), Error> {
         info!(path, "writing privileged file via sudo tee");
         let mut child = Command::new("sudo")
-            .args(["tee", path])
+            .args(["-n", "tee", path])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .spawn()
@@ -86,6 +94,9 @@ pub enum MockCall {
         program: String,
         args: Vec<String>,
     },
+    SudoRun {
+        args: Vec<String>,
+    },
     SudoWrite {
         path: String,
         content: String,
@@ -123,6 +134,13 @@ impl SysRunner for MockSysRunner {
         Ok(())
     }
 
+    fn sudo_run(&self, args: &[&str]) -> Result<(), Error> {
+        self.calls.lock().unwrap().push(MockCall::SudoRun {
+            args: args.iter().map(|s| s.to_string()).collect(),
+        });
+        Ok(())
+    }
+
     fn sudo_write(&self, path: &str, content: &str) -> Result<(), Error> {
         self.calls.lock().unwrap().push(MockCall::SudoWrite {
             path: path.to_string(),
@@ -130,5 +148,4 @@ impl SysRunner for MockSysRunner {
         });
         Ok(())
     }
-
 }
