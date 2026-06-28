@@ -8,7 +8,7 @@ Users can create an ephemeral Ghost instance on Goopy.Life by just one click. Th
 
 ## Everything is WIP 🚧
 
-So nothing good to see here 🙈
+I'm continuously rolling out updates in the dev instance at https://southp.dev. Currently, it has the full flow connected, but only provisions a [placeholder python server](https://github.com/southp/goopy-life/blob/trunk/backend/gl-core/src/goopy_provisioner/hello_provisioner.rs) that does nothing more than greeting you. Play at your own risk 💩
 
 ## Deployment
 
