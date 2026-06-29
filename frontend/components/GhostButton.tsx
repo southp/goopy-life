@@ -69,7 +69,10 @@ export default function GhostButton() {
 			timeoutId = setTimeout(tick, POLL_INTERVAL_MS);
 		};
 
-		timeoutId = setTimeout(tick, POLL_INTERVAL_MS);
+		// Check immediately — the slug already exists and the backend is spawning, so
+		// waiting a full interval before the first GET is a guaranteed wasted delay.
+		// tick() reschedules itself on each subsequent interval.
+		tick();
 
 		return () => {
 			controller.abort();
@@ -85,11 +88,16 @@ export default function GhostButton() {
 		setState({ kind: "idle" });
 	}, []);
 
+	// Depend only on the resuming slug (null when not resuming) so this effect fires
+	// once per entry into "resuming" rather than re-running — and recreating its
+	// AbortController — on every unrelated state transition.
+	const resumingSlug = state.kind === "resuming" ? state.slug : null;
+
 	useEffect(() => {
-		if (state.kind !== "resuming") {
+		if (resumingSlug === null) {
 			return;
 		}
-		const { slug } = state;
+		const slug = resumingSlug;
 		const controller = new AbortController();
 
 		getGoopy(slug, controller.signal).then((data) => {
@@ -125,7 +133,7 @@ export default function GhostButton() {
 		});
 
 		return () => controller.abort();
-	}, [state]);
+	}, [resumingSlug]);
 
 	async function handleGhostNow() {
 		setState({ kind: "spawning" });
