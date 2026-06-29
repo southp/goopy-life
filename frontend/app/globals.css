@@ -28,14 +28,27 @@ body {
 
 .page-main {
 	display: flex;
-	min-height: 100vh;
 	width: 100%;
 	max-width: 48rem;
 	flex-direction: column;
 	align-items: center;
+	background-color: #000;
+}
+
+/*
+ * The hero block fills the first viewport and centers the emoji + CTA, keeping them
+ * exactly where they sat before the info sections existed. Because it owns its own
+ * min-height, content flowing below it (the accordions) never shifts the hero — so
+ * expanding an accordion causes no layout shift of the core interaction area.
+ */
+.hero-block {
+	display: flex;
+	min-height: 100dvh;
+	width: 100%;
+	flex-direction: column;
+	align-items: center;
 	justify-content: center;
 	gap: 1rem;
-	background-color: #000;
 }
 
 .hero-emoji {
@@ -145,10 +158,14 @@ body {
 	color: #93c5fd;
 }
 
-/* ── Explainer & ToU sections ─────────────────────────── */
+/* ── Info sections (How it works / Terms of use accordions) ─────────────── */
 
-.page-main {
-	padding: 2rem 1.25rem 4rem;
+.info-sections {
+	display: flex;
+	width: 100%;
+	max-width: 40rem;
+	flex-direction: column;
+	padding: 0 1.25rem 4rem;
 }
 
 .section-heading {
@@ -156,26 +173,51 @@ body {
 	font-weight: 600;
 	letter-spacing: 0.02em;
 	color: var(--foreground);
-	margin: 0 0 0.75rem;
+	margin: 0;
 }
 
-.explainer-section,
-.tou-section {
+.accordion {
 	width: 100%;
-	max-width: 40rem;
-	margin-top: 3rem;
+	border-top: 1px solid #222;
+}
+
+.accordion-summary {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 1rem 0;
+	cursor: pointer;
+	list-style: none;
+}
+
+/* Hide the browser's default disclosure triangle. */
+.accordion-summary::-webkit-details-marker {
+	display: none;
+}
+
+.accordion-summary::after {
+	content: "+";
+	color: #888;
+	font-size: 1.25rem;
+	line-height: 1;
+}
+
+.accordion[open] .accordion-summary::after {
+	content: "−";
+}
+
+.accordion-body {
+	padding: 0 0 1rem;
 	color: #aaa;
 	font-size: 0.9rem;
 	line-height: 1.7;
 }
 
-.explainer-section p,
-.tou-section p {
+.accordion-body p {
 	margin: 0 0 0.75rem;
 }
 
-.explainer-section strong,
-.tou-section strong {
+.accordion-body strong {
 	color: var(--foreground);
 }
 
