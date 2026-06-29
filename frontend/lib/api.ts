@@ -3,17 +3,14 @@
 // Uses NEXT_PUBLIC_GL_API_URL, which must carry the NEXT_PUBLIC_ prefix so Next.js
 // inlines it into the client bundle. The build-time config fetch lives in a separate,
 // server-only module (./config) so its server-only env var never reaches the browser.
+//
+// Presence of NEXT_PUBLIC_GL_API_URL is enforced at build time in next.config.ts, so
+// by the time this runs in the browser the value is always the baked-in literal.
 
 import type { ApiError, GoopyResponse } from "./types";
 
 export function apiBase(): string {
-	const base = process.env.NEXT_PUBLIC_GL_API_URL ?? "";
-	if (process.env.NODE_ENV !== "production" && !base) {
-		console.warn(
-			"NEXT_PUBLIC_GL_API_URL is not set — API calls will use relative paths",
-		);
-	}
-	return base;
+	return process.env.NEXT_PUBLIC_GL_API_URL ?? "";
 }
 
 export async function extractError(res: Response): Promise<string> {

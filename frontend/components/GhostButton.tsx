@@ -5,6 +5,7 @@ import { getGoopy, spawnGoopy } from '@/lib/api';
 import { LOCALSTORAGE_KEY, POLL_INTERVAL_MS } from '@/lib/constants';
 import type { AppState } from '@/lib/types';
 import ErrorMessage from '@/components/ErrorMessage';
+import IssueLink from '@/components/IssueLink';
 import Spinner from '@/components/Spinner';
 
 // The sole interactive element on the page: the "Ghost now!" CTA and its state
@@ -199,6 +200,7 @@ export default function GhostButton() {
 					<button className="go-button idle" onClick={handleReset}>
 						Try again!
 					</button>
+					<IssueLink prompt="Still stuck?" />
 				</div>
 			);
 

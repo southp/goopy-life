@@ -1,4 +1,4 @@
-import { GITHUB_ISSUES_URL } from "@/lib/constants";
+import IssueLink from "@/components/IssueLink";
 
 interface ErrorMessageProps {
 	message: string;
@@ -9,17 +9,7 @@ export default function ErrorMessage({ message, onReset }: ErrorMessageProps) {
 	return (
 		<div className="error-block">
 			<p className="error-message">{message}</p>
-			<p>
-				Need help?{" "}
-				<a
-					href={GITHUB_ISSUES_URL}
-					className="error-link"
-					target="_blank"
-					rel="noopener noreferrer"
-				>
-					Open an issue on GitHub
-				</a>
-			</p>
+			<IssueLink prompt="Need help?" />
 			<button className="go-button idle" onClick={onReset}>
 				Try again
 			</button>
