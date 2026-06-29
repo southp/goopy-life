@@ -21,7 +21,12 @@ body {
 .page-wrapper {
 	display: flex;
 	min-height: 100vh;
-	align-items: center;
+	/*
+	 * Top-align (not center) the content. Vertical centering would re-center the whole
+	 * column as it grows, pushing the hero/CTA upward when an accordion expands; pinning
+	 * to the top means expansion only adds height below, with zero shift up top.
+	 */
+	align-items: flex-start;
 	justify-content: center;
 	background-color: #000;
 }
