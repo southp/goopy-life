@@ -36,19 +36,19 @@ body {
 }
 
 /*
- * The hero block fills the first viewport and centers the emoji + CTA, keeping them
- * exactly where they sat before the info sections existed. Because it owns its own
- * min-height, content flowing below it (the accordions) never shifts the hero — so
- * expanding an accordion causes no layout shift of the core interaction area.
+ * The hero block holds the emoji + CTA, offset from the top so they sit in the upper
+ * portion of the first screen with a tight, deliberate gap down to the accordions.
+ * Its geometry is fixed and independent of the accordions below it, so expanding an
+ * accordion never shifts the core interaction area (no layout shift).
  */
 .hero-block {
 	display: flex;
-	min-height: 100dvh;
 	width: 100%;
 	flex-direction: column;
 	align-items: center;
-	justify-content: center;
 	gap: 1rem;
+	padding-top: 20vh;
+	padding-bottom: 2rem;
 }
 
 .hero-emoji {
@@ -179,6 +179,11 @@ body {
 .accordion {
 	width: 100%;
 	border-top: 1px solid #222;
+}
+
+/* Closing rule under the final section. */
+.accordion:last-child {
+	border-bottom: 1px solid #222;
 }
 
 .accordion-summary {
