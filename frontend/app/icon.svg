@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <!-- Blue swirl gradient: the 💩 hero run through hue-rotate(180deg) brightness(1.5). -->
+    <linearGradient id="goop" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8cb0d0" />
+      <stop offset="1" stop-color="#3c6890" />
+    </linearGradient>
+    <!-- White halo matching the hero's text-shadow glow. -->
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feDropShadow dx="0" dy="0" stdDeviation="2" flood-color="#ffffff" flood-opacity="0.7" />
+    </filter>
+  </defs>
+
+  <!-- Site-matching dark backdrop. -->
+  <rect width="64" height="64" rx="14" fill="#0a0a0a" />
+
+  <g filter="url(#glow)">
+    <!-- Soft-serve swirl, tiered from a wide base up to the tip. -->
+    <g fill="url(#goop)">
+      <ellipse cx="32" cy="47" rx="21" ry="11" />
+      <ellipse cx="32" cy="36" rx="16" ry="9.5" />
+      <ellipse cx="32" cy="26" rx="11.5" ry="7.5" />
+      <ellipse cx="32" cy="18" rx="5.5" ry="5" />
+    </g>
+
+    <!-- Smiling face. -->
+    <g>
+      <ellipse cx="26" cy="26" rx="3.1" ry="3.7" fill="#ffffff" />
+      <ellipse cx="38" cy="26" rx="3.1" ry="3.7" fill="#ffffff" />
+      <circle cx="26.4" cy="26.8" r="1.6" fill="#16324a" />
+      <circle cx="38.4" cy="26.8" r="1.6" fill="#16324a" />
+      <path d="M25 31 Q32 37 39 31" fill="none" stroke="#16324a" stroke-width="2.2" stroke-linecap="round" />
+    </g>
+  </g>
+</svg>

@@ -5,6 +5,12 @@ import nextTs from "eslint-config-next/typescript";
 const eslintConfig = defineConfig([
 	...nextVitals,
 	...nextTs,
+	// Project style: always wrap control-statement bodies in braces, even one-liners.
+	{
+		rules: {
+			curly: ["error", "all"],
+		},
+	},
 	// Override default ignores of eslint-config-next.
 	globalIgnores([
 		// Default ignores of eslint-config-next:

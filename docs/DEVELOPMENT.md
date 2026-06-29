@@ -121,7 +121,7 @@ Statuses:
 Next.js application deployed on Vercel.
 
 - The landing page lets users create a goopy with one click.
-- `GET /config` is fetched at Vercel build time (App Router Server Component with `force-static`) to obtain runtime settings from gl-serv. The server-side `API_URL` env var (no `NEXT_PUBLIC_` prefix) points to `api.goopy.life`.
+- `GET /config` is fetched at Vercel build time (App Router Server Component with `force-static`) to obtain runtime settings from gl-serv. The server-only `GL_CONFIG_API_URL` env var (no `NEXT_PUBLIC_` prefix) points to `api.goopy.life` and is required — the build fails if it is unset. Browser-side calls use `NEXT_PUBLIC_GL_API_URL`.
 - CORS on gl-serv is configured to accept requests from the Vercel origin.
 
 ## Configuration

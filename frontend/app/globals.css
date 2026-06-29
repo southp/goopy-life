@@ -21,21 +21,39 @@ body {
 .page-wrapper {
 	display: flex;
 	min-height: 100vh;
-	align-items: center;
+	/*
+	 * Top-align (not center) the content. Vertical centering would re-center the whole
+	 * column as it grows, pushing the hero/CTA upward when an accordion expands; pinning
+	 * to the top means expansion only adds height below, with zero shift up top.
+	 */
+	align-items: flex-start;
 	justify-content: center;
 	background-color: #000;
 }
 
 .page-main {
 	display: flex;
-	min-height: 100vh;
 	width: 100%;
 	max-width: 48rem;
 	flex-direction: column;
 	align-items: center;
-	justify-content: center;
-	gap: 1rem;
 	background-color: #000;
+}
+
+/*
+ * The hero block holds the emoji + CTA, offset from the top so they sit in the upper
+ * portion of the first screen with a tight, deliberate gap down to the accordions.
+ * Its geometry is fixed and independent of the accordions below it, so expanding an
+ * accordion never shifts the core interaction area (no layout shift).
+ */
+.hero-block {
+	display: flex;
+	width: 100%;
+	flex-direction: column;
+	align-items: center;
+	gap: 1rem;
+	padding-top: 20vh;
+	padding-bottom: 2rem;
 }
 
 .hero-emoji {
@@ -143,4 +161,98 @@ body {
 
 .error-link {
 	color: #93c5fd;
+}
+
+/* ── Info sections (How it works / Terms of use accordions) ─────────────── */
+
+.info-sections {
+	display: flex;
+	width: 100%;
+	max-width: 40rem;
+	flex-direction: column;
+	padding: 0 1.25rem 4rem;
+}
+
+.section-heading {
+	font-size: 1.125rem;
+	font-weight: 600;
+	letter-spacing: 0.02em;
+	color: var(--foreground);
+	margin: 0;
+}
+
+.accordion {
+	width: 100%;
+	border-top: 1px solid #222;
+}
+
+/* Closing rule under the final section. */
+.accordion:last-child {
+	border-bottom: 1px solid #222;
+}
+
+.accordion-summary {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 1rem 0;
+	cursor: pointer;
+	list-style: none;
+}
+
+/* Hide the browser's default disclosure triangle. */
+.accordion-summary::-webkit-details-marker {
+	display: none;
+}
+
+.accordion-summary::after {
+	content: "+";
+	color: #888;
+	font-size: 1.25rem;
+	line-height: 1;
+}
+
+.accordion[open] .accordion-summary::after {
+	content: "−";
+}
+
+.accordion-body {
+	padding: 0 0 1rem;
+	color: #aaa;
+	font-size: 0.9rem;
+	line-height: 1.7;
+}
+
+.accordion-body p {
+	margin: 0 0 0.75rem;
+}
+
+.accordion-body strong {
+	color: var(--foreground);
+}
+
+.explainer-list,
+.tou-list {
+	margin: 0.5rem 0 0.75rem 1.25rem;
+	padding: 0;
+}
+
+.explainer-list li,
+.tou-list li {
+	margin-bottom: 0.35rem;
+}
+
+.inline-link {
+	color: #888;
+	text-decoration: underline;
+	text-underline-offset: 2px;
+}
+
+.inline-link:hover {
+	color: var(--foreground);
+}
+
+.tou-footer {
+	font-style: italic;
+	color: #666;
 }
