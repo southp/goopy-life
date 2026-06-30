@@ -135,7 +135,7 @@ Key settings:
 | `base_dir` | Working directory for instance data |
 | `domain` | Public domain (e.g. `goopy.life`) |
 | `life_in_days` | Instance TTL |
-| `provisioner_kind` | `"Hello"` or `"Ghost"` |
+| `provisioner.kind` | `"Hello"` or `"Ghost"` |
 | `port_range_start` / `port_range_end` | Port allocation range |
 | `dev_mode` | Skips systemd/nginx/ZFS operations |
 | `sweep_interval_secs` | Sweeper frequency |

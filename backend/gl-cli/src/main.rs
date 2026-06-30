@@ -103,7 +103,7 @@ fn main() {
         base_dir = cfg.base_dir.display(),
         domain = cfg.domain,
         life_in_days = cfg.life_in_days,
-        provisioner = cfg.provisioner_kind,
+        provisioner = cfg.provisioner.kind,
         port_start = cfg.port_range_start,
         port_end = cfg.port_range_end,
         alloc_kind = cfg.allocator.kind,
@@ -140,9 +140,9 @@ fn main() {
         }
         cmd => {
             // Spawn, Despawn, List — all require HelloProvisioner/GoopyManager.
-            if cfg.provisioner_kind != ProvisionerKind::Hello {
+            if cfg.provisioner.kind != ProvisionerKind::Hello {
                 tracing::error!(
-                    provisioner_kind = %cfg.provisioner_kind,
+                    provisioner_kind = %cfg.provisioner.kind,
                     "unsupported provisioner_kind; only 'Hello' is supported in this binary"
                 );
                 std::process::exit(1);

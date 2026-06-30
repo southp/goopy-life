@@ -7,9 +7,6 @@ domain = "goopy.life"
 # How long each goopy lives (days)
 life_in_days = 7
 
-# Which provisioner to use
-provisioner_kind = "Hello"
-
 # Port range for goopy instances (inclusive)
 port_range_start = 40000
 port_range_end = 49999
@@ -37,3 +34,7 @@ kind = "Zfs"
 pool = "goopy"
 # Disk quota per instance in MB (Zfs only)
 quota_mb = 512
+
+[provisioner]
+# Which provisioner to use: "Hello" (no-op dev provisioner) or "Ghost" (real Ghost install, #18)
+kind = "Hello"

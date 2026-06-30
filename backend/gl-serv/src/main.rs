@@ -387,7 +387,6 @@ mod tests {
             base_dir: PathBuf::from("/tmp/goopy-test"),
             domain: domain.to_string(),
             life_in_days: 7,
-            provisioner_kind: ProvisionerKind::Hello,
             port_range_start: 9000,
             port_range_end: 9100,
             dev_mode: true,
@@ -401,6 +400,9 @@ mod tests {
                 kind: gl_core::AllocatorKind::PlainDir,
                 pool: String::new(),
                 quota_mb: 0,
+            },
+            provisioner: gl_core::config::ProvisionerConfig {
+                kind: ProvisionerKind::Hello,
             },
         }
     }

@@ -36,12 +36,22 @@ impl AllocatorConfig {
     }
 }
 
+/// Configuration for the provisioner subsection (`[provisioner]` in TOML).
+///
+/// Mirrors [`AllocatorConfig`]: a flat struct with a `kind` discriminant plus
+/// kind-specific fields that are silently ignored when the kind does not apply.
+/// Ghost-specific fields (e.g. `ghost_source_dir`) will be added here in #18
+/// without breaking the `Hello` case.
+#[derive(Debug, serde::Deserialize)]
+pub struct ProvisionerConfig {
+    pub kind: ProvisionerKind,
+}
+
 #[derive(Debug, serde::Deserialize)]
 pub struct Config {
     pub base_dir: PathBuf,
     pub domain: String,
     pub life_in_days: i32,
-    pub provisioner_kind: ProvisionerKind,
     pub port_range_start: u32,
     pub port_range_end: u32,
     pub dev_mode: bool,
@@ -51,6 +61,7 @@ pub struct Config {
     pub sweep_interval_secs: u64,
     pub registry: RegistryConfig,
     pub allocator: AllocatorConfig,
+    pub provisioner: ProvisionerConfig,
 }
 
 fn default_sweep_interval_secs() -> u64 {
@@ -62,7 +73,11 @@ impl Config {
     ///
     /// `dev_mode` is passed explicitly so callers can override the value from
     /// the config file (e.g. `gl-cli` forces dev mode unless `--prod` is given).
+    ///
+    /// The provisioner kind is read from `self.provisioner.kind`; only
+    /// [`ProvisionerKind::Hello`] is supported today.
     pub fn build_provisioner(&self, dev_mode: bool, sys: Arc<dyn SysRunner>) -> HelloProvisioner {
+        let _kind = &self.provisioner.kind; // consulted here; extended in #18 for Ghost
         let storage = self.allocator.build();
         HelloProvisioner::new(
             self.domain.clone(),
@@ -129,7 +144,6 @@ mod tests {
 base_dir = "/tmp/goopy"
 domain = "goopy.life"
 life_in_days = 7
-provisioner_kind = "Hello"
 port_range_start = 9000
 port_range_end = 9100
 dev_mode = true
@@ -137,6 +151,8 @@ cors_origin = "https://goopy.life"
 bind_address = "127.0.0.1:8080"
 [registry]
 path = "/tmp/goopy.db"
+[provisioner]
+kind = "Hello"
 "#;
 
     #[test]
@@ -161,7 +177,6 @@ kind = "PlainDir"
         let toml = r#"
 base_dir = "/tmp/goopy"
 life_in_days = 7
-provisioner_kind = "Hello"
 port_range_start = 40000
 port_range_end = 49999
 dev_mode = false
@@ -173,6 +188,9 @@ path = "/tmp/goopy.db"
 
 [allocator]
 kind = "PlainDir"
+
+[provisioner]
+kind = "Hello"
 "#;
         let err = write_config(toml).unwrap_err();
         assert!(matches!(err, Error::Config(_)));
@@ -241,5 +259,61 @@ kind = "PlainDir"
         // port_range_start and port_range_end are both u32 — assert distinct
         // values so a field swap in build_manager_config would fail this test.
         assert_ne!(manager_cfg.port_range_start, manager_cfg.port_range_end);
+    }
+
+    #[test]
+    fn provisioner_section_hello_kind_parses() {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            VALID_BASE
+        );
+        let cfg = write_config(&toml).expect("should parse");
+        assert_eq!(cfg.provisioner.kind, ProvisionerKind::Hello);
+    }
+
+    #[test]
+    fn missing_provisioner_section_returns_config_error() {
+        let toml = r#"
+base_dir = "/tmp/goopy"
+domain = "goopy.life"
+ssl_email = "admin@goopy.life"
+life_in_days = 7
+port_range_start = 9000
+port_range_end = 9100
+dev_mode = true
+cors_origin = "https://goopy.life"
+bind_address = "127.0.0.1:8080"
+[registry]
+path = "/tmp/goopy.db"
+[allocator]
+kind = "PlainDir"
+"#;
+        let err = write_config(toml).unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[test]
+    fn top_level_provisioner_kind_field_is_rejected() {
+        let toml = r#"
+base_dir = "/tmp/goopy"
+domain = "goopy.life"
+ssl_email = "admin@goopy.life"
+life_in_days = 7
+provisioner_kind = "Hello"
+port_range_start = 9000
+port_range_end = 9100
+dev_mode = true
+cors_origin = "https://goopy.life"
+bind_address = "127.0.0.1:8080"
+[registry]
+path = "/tmp/goopy.db"
+[allocator]
+kind = "PlainDir"
+"#;
+        let err = write_config(toml).unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
     }
 }

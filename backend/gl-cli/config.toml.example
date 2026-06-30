@@ -6,7 +6,6 @@
 base_dir        = "./test-temp"
 domain          = "localhost"
 life_in_days    = 7
-provisioner_kind = "Hello"
 port_range_start = 50000
 port_range_end   = 51000
 dev_mode        = true        # ignored by CLI; use --prod flag to switch
@@ -20,3 +19,7 @@ path = "./registry.db"
 # Which allocator to use: "PlainDir" (plain filesystem) or "Zfs" (ZFS datasets)
 kind = "PlainDir"
 # pool and quota_mb are only needed for kind = "Zfs"
+
+[provisioner]
+# Which provisioner to use: "Hello" (no-op dev provisioner) or "Ghost" (real Ghost install, #18)
+kind = "Hello"
