@@ -4,11 +4,87 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::params;
+use rusqlite::{params, Connection};
 
 use super::GoopyRegistry;
 use crate::goopy::Goopy;
 use crate::shared_types::*;
+
+/// The latest schema version understood by this build.
+///
+/// Increment this constant whenever a new migration step is added to
+/// [`MIGRATIONS`].
+const LATEST_VERSION: u32 = 1;
+
+/// Ordered list of migration steps.
+///
+/// Each entry is `(target_version, sql)`.  The runner applies every step whose
+/// `target_version` is greater than the current `user_version`, then sets
+/// `user_version` to `target_version` after each successful step.
+///
+/// Version 1 establishes the current schema as the baseline.  No destructive
+/// DDL is needed here because [`SqliteRegistry::new`] already issues
+/// `CREATE TABLE IF NOT EXISTS` before calling [`migrate`]; this step simply
+/// records that the DB is at a known good version.
+const MIGRATIONS: &[(u32, &str)] = &[(
+    1,
+    "
+    CREATE TABLE IF NOT EXISTS goopies (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        slug             TEXT    UNIQUE NOT NULL,
+        life_in_days     INTEGER NOT NULL,
+        created_at       TEXT    NOT NULL,
+        status           TEXT    NOT NULL,
+        working_dir      TEXT    NOT NULL,
+        port             INTEGER NOT NULL,
+        provisioner_kind TEXT    NOT NULL,
+        service_version  TEXT    NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS allocated_ports (
+        port INTEGER PRIMARY KEY,
+        slug TEXT    NOT NULL UNIQUE
+    );
+    ",
+)];
+
+/// Apply any pending schema migrations and bump `PRAGMA user_version` after
+/// each successful step.
+///
+/// Steps are applied in order; each step is skipped when the DB's current
+/// `user_version` is already at or above the step's target version.  The
+/// function is idempotent: calling it on an up-to-date database is a no-op.
+///
+/// After all steps are applied the DB must be at [`LATEST_VERSION`]; a debug
+/// assertion enforces this invariant at development time.
+fn migrate(conn: &Connection) -> Result<(), Error> {
+    let mut current: u32 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(Error::SchemaMigration)?;
+
+    for &(target, sql) in MIGRATIONS {
+        if current >= target {
+            continue;
+        }
+
+        conn.execute_batch(sql).map_err(Error::SchemaMigration)?;
+
+        // `PRAGMA user_version = <n>` does not accept bound parameters, so we
+        // format the integer directly.  `target` is a `u32` literal so there
+        // is no injection risk here.
+        conn.execute_batch(&format!("PRAGMA user_version = {target};"))
+            .map_err(Error::SchemaMigration)?;
+
+        current = target;
+    }
+
+    debug_assert_eq!(
+        current, LATEST_VERSION,
+        "migrate() must leave the DB at LATEST_VERSION"
+    );
+
+    Ok(())
+}
 
 /// SQLite-backed implementation of [`GoopyRegistry`].
 ///
@@ -62,29 +138,15 @@ impl SqliteRegistry {
                     source: RegistrySource::WalModeUnavailable(mode),
                 });
             }
+
+            migrate(&conn)?;
+        } else {
+            // In-memory DBs always start at version 0 and need the schema
+            // applied, but we skip user_version tracking since each test gets a
+            // fresh DB anyway.
+            conn.execute_batch(MIGRATIONS.last().map(|&(_, sql)| sql).unwrap_or(""))
+                .map_err(Error::SchemaMigration)?;
         }
-
-        conn.execute_batch(
-            "
-            CREATE TABLE IF NOT EXISTS goopies (
-                id               INTEGER PRIMARY KEY AUTOINCREMENT,
-                slug             TEXT    UNIQUE NOT NULL,
-                life_in_days     INTEGER NOT NULL,
-                created_at       TEXT    NOT NULL,
-                status           TEXT    NOT NULL,
-                working_dir      TEXT    NOT NULL,
-                port             INTEGER NOT NULL,
-                provisioner_kind TEXT    NOT NULL,
-                service_version  TEXT    NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS allocated_ports (
-                port INTEGER PRIMARY KEY,
-                slug TEXT    NOT NULL UNIQUE
-            );
-            ",
-        )
-        .map_err(Error::SchemaMigration)?;
 
         Ok(Self { pool })
     }
@@ -686,6 +748,111 @@ mod tests {
         assert!(
             matches!(err, Error::RowParse { field, .. } if field == "provisioner_kind"),
             "{err:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Migration harness tests
+    // -------------------------------------------------------------------------
+
+    /// Simulates a pre-migration database by opening a file-backed DB,
+    /// dropping the tables to reproduce an "old" schema shape, resetting
+    /// `user_version` to 0, then calling `SqliteRegistry::new` again.
+    /// Asserts that the migration runs, the tables are (re-)created, and
+    /// `user_version` is bumped to the latest version.
+    #[test]
+    fn migration_runs_on_outdated_file_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("migrate_test.db");
+
+        // First open: creates a fully-initialised DB at LATEST_VERSION.
+        SqliteRegistry::new(&db_path).unwrap();
+
+        // Simulate an "old" database: drop both tables and reset user_version.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "
+                DROP TABLE IF EXISTS goopies;
+                DROP TABLE IF EXISTS allocated_ports;
+                PRAGMA user_version = 0;
+                ",
+            )
+            .unwrap();
+
+            // Confirm the user tables are gone before we open again.
+            // Note: sqlite_sequence (created by AUTOINCREMENT) may still be
+            // present — we only check for the two user-defined tables.
+            let table_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('goopies', 'allocated_ports')",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(table_count, 0, "user tables should be absent before migration");
+
+            let ver: u32 = conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(ver, 0, "user_version should be 0 before migration");
+        }
+
+        // Second open: triggers migrate() and should re-create the tables.
+        SqliteRegistry::new(&db_path).unwrap();
+
+        // Verify the outcome directly via a raw connection.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+
+        let ver: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            ver,
+            LATEST_VERSION,
+            "user_version should equal LATEST_VERSION after migration"
+        );
+
+        let table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('goopies', 'allocated_ports')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count, 2, "both tables should exist after migration");
+    }
+
+    /// Asserts that opening an already up-to-date file-backed DB a second time
+    /// is a no-op: `new()` succeeds without error and `user_version` stays at
+    /// the latest value.
+    #[test]
+    fn migration_is_noop_on_up_to_date_file_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("noop_test.db");
+
+        // First open: initialise to latest version.
+        SqliteRegistry::new(&db_path).unwrap();
+
+        // Capture the version before the second open.
+        let version_before: u32 = {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap()
+        };
+        assert_eq!(version_before, LATEST_VERSION);
+
+        // Second open: must succeed without error.
+        SqliteRegistry::new(&db_path).unwrap();
+
+        // Version must be unchanged.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let version_after: u32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            version_after, LATEST_VERSION,
+            "user_version must be unchanged on a no-op open"
         );
     }
 }
