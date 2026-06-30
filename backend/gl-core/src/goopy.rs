@@ -1,7 +1,7 @@
 use crate::shared_types::*;
 
-use std::path::PathBuf;
 use chrono::{DateTime, Utc};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Goopy {
@@ -14,4 +14,3 @@ pub struct Goopy {
     pub provisioner_kind: ProvisionerKind,
     pub service_version: String,
 }
-

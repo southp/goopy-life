@@ -122,11 +122,15 @@ impl std::error::Error for RegistrySource {
 }
 
 impl From<r2d2::Error> for RegistrySource {
-    fn from(e: r2d2::Error) -> Self { RegistrySource::Pool(e) }
+    fn from(e: r2d2::Error) -> Self {
+        RegistrySource::Pool(e)
+    }
 }
 
 impl From<rusqlite::Error> for RegistrySource {
-    fn from(e: rusqlite::Error) -> Self { RegistrySource::Sqlite(e) }
+    fn from(e: rusqlite::Error) -> Self {
+        RegistrySource::Sqlite(e)
+    }
 }
 
 #[cfg(test)]
@@ -157,16 +161,18 @@ mod tests {
 
     #[test]
     fn provisioner_kind_display_round_trip() {
-        for kind in [ProvisionerKind::Hello] {
-            let s = kind.to_string();
-            let parsed = ProvisionerKind::from_str(&s).expect("should round-trip");
-            assert_eq!(parsed, kind, "round-trip failed for {s}");
-        }
+        let kind = ProvisionerKind::Hello;
+        let s = kind.to_string();
+        let parsed = ProvisionerKind::from_str(&s).expect("should round-trip");
+        assert_eq!(parsed, kind, "round-trip failed for {s}");
     }
 
     #[test]
     fn provisioner_kind_from_str_unknown_returns_invalid() {
-        assert!(matches!(ProvisionerKind::from_str("NonExistent"), Err(Error::Invalid)));
+        assert!(matches!(
+            ProvisionerKind::from_str("NonExistent"),
+            Err(Error::Invalid)
+        ));
     }
 
     #[test]
@@ -180,12 +186,19 @@ mod tests {
 
     #[test]
     fn allocator_kind_from_str_unknown_returns_invalid() {
-        assert!(matches!(AllocatorKind::from_str("NonExistent"), Err(Error::Invalid)));
+        assert!(matches!(
+            AllocatorKind::from_str("NonExistent"),
+            Err(Error::Invalid)
+        ));
     }
 
     #[test]
     fn row_parse_error_display() {
-        let e = Error::RowParse { slug: "a-b-c".into(), field: "status", value: "Bogus".into() };
+        let e = Error::RowParse {
+            slug: "a-b-c".into(),
+            field: "status",
+            value: "Bogus".into(),
+        };
         let s = e.to_string();
         assert!(s.contains("a-b-c"), "{s}");
         assert!(s.contains("status"), "{s}");
@@ -202,7 +215,10 @@ pub enum Error {
     Io(std::io::Error),
     /// General database operation failure.
     /// `context` describes what was being attempted (e.g. `"save"`, `"pool get"`).
-    Registry { context: &'static str, source: RegistrySource },
+    Registry {
+        context: &'static str,
+        source: RegistrySource,
+    },
     SchemaMigration(rusqlite::Error),
     PortExhausted,
     /// A subprocess (zfs, ghost, systemctl, etc.) ran but returned a non-zero
@@ -212,7 +228,11 @@ pub enum Error {
     SlugExhausted,
     /// A row read from the database could not be parsed back into a `Goopy`.
     /// Carries the slug being loaded, the field that failed, and its raw value.
-    RowParse { slug: String, field: &'static str, value: String },
+    RowParse {
+        slug: String,
+        field: &'static str,
+        value: String,
+    },
 }
 
 impl std::error::Error for Error {
@@ -240,7 +260,10 @@ impl std::fmt::Display for Error {
             Error::Subprocess(msg) => write!(f, "subprocess error: {}", msg),
             Error::SlugExhausted => write!(f, "slug generation exhausted"),
             Error::RowParse { slug, field, value } => {
-                write!(f, "corrupt row (slug={slug}, field={field}, value={value:?})")
+                write!(
+                    f,
+                    "corrupt row (slug={slug}, field={field}, value={value:?})"
+                )
             }
         }
     }

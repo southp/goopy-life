@@ -58,6 +58,63 @@ fn default_sweep_interval_secs() -> u64 {
     86400
 }
 
+impl Config {
+    /// Build a [`HelloProvisioner`] from the current configuration.
+    ///
+    /// `dev_mode` is passed explicitly so callers can override the value from
+    /// the config file (e.g. `gl-cli` forces dev mode unless `--prod` is given).
+    pub fn build_provisioner(&self, dev_mode: bool, sys: Arc<dyn SysRunner>) -> HelloProvisioner {
+        let storage = self.allocator.build();
+        HelloProvisioner::new(
+            self.domain.clone(),
+            dev_mode,
+            self.bind_address.clone(),
+            storage,
+            sys,
+        )
+    }
+
+    /// Build a [`GoopyManagerConfig`] from the current configuration.
+    pub fn build_manager_config(&self) -> GoopyManagerConfig {
+        GoopyManagerConfig {
+            base_dir: self.base_dir.clone(),
+            domain: self.domain.clone(),
+            ssl_email: self.ssl_email.clone(),
+            life_in_days: self.life_in_days,
+            port_range_start: self.port_range_start,
+            port_range_end: self.port_range_end,
+        }
+    }
+
+    pub fn from_file(path: &Path) -> Result<Self, Error> {
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| Error::Config(format!("could not read {}: {}", path.display(), e)))?;
+        let cfg: Self = toml::from_str(&contents)
+            .map_err(|e| Error::Config(format!("could not parse {}: {}", path.display(), e)))?;
+        if cfg.life_in_days <= 0 {
+            return Err(Error::Config("life_in_days must be > 0".into()));
+        }
+        if cfg.port_range_start >= cfg.port_range_end {
+            return Err(Error::Config(
+                "port_range_start must be less than port_range_end".into(),
+            ));
+        }
+        if let AllocatorKind::Zfs = cfg.allocator.kind {
+            if cfg.allocator.pool.trim().is_empty() {
+                return Err(Error::Config(
+                    "allocator.pool must be set when kind = \"Zfs\"".into(),
+                ));
+            }
+            if cfg.allocator.quota_mb == 0 {
+                return Err(Error::Config(
+                    "allocator.quota_mb must be > 0 when kind = \"Zfs\"".into(),
+                ));
+            }
+        }
+        Ok(cfg)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,56 +246,5 @@ kind = "PlainDir"
         // port_range_start and port_range_end are both u32 — assert distinct
         // values so a field swap in build_manager_config would fail this test.
         assert_ne!(manager_cfg.port_range_start, manager_cfg.port_range_end);
-    }
-}
-
-impl Config {
-    /// Build a [`HelloProvisioner`] from the current configuration.
-    ///
-    /// `dev_mode` is passed explicitly so callers can override the value from
-    /// the config file (e.g. `gl-cli` forces dev mode unless `--prod` is given).
-    pub fn build_provisioner(&self, dev_mode: bool, sys: Arc<dyn SysRunner>) -> HelloProvisioner {
-        let storage = self.allocator.build();
-        HelloProvisioner::new(self.domain.clone(), dev_mode, self.bind_address.clone(), storage, sys)
-    }
-
-    /// Build a [`GoopyManagerConfig`] from the current configuration.
-    pub fn build_manager_config(&self) -> GoopyManagerConfig {
-        GoopyManagerConfig {
-            base_dir: self.base_dir.clone(),
-            domain: self.domain.clone(),
-            ssl_email: self.ssl_email.clone(),
-            life_in_days: self.life_in_days,
-            port_range_start: self.port_range_start,
-            port_range_end: self.port_range_end,
-        }
-    }
-
-    pub fn from_file(path: &Path) -> Result<Self, Error> {
-        let contents = std::fs::read_to_string(path)
-            .map_err(|e| Error::Config(format!("could not read {}: {}", path.display(), e)))?;
-        let cfg: Self = toml::from_str(&contents)
-            .map_err(|e| Error::Config(format!("could not parse {}: {}", path.display(), e)))?;
-        if cfg.life_in_days <= 0 {
-            return Err(Error::Config("life_in_days must be > 0".into()));
-        }
-        if cfg.port_range_start >= cfg.port_range_end {
-            return Err(Error::Config(
-                "port_range_start must be less than port_range_end".into(),
-            ));
-        }
-        if let AllocatorKind::Zfs = cfg.allocator.kind {
-            if cfg.allocator.pool.trim().is_empty() {
-                return Err(Error::Config(
-                    "allocator.pool must be set when kind = \"Zfs\"".into(),
-                ));
-            }
-            if cfg.allocator.quota_mb == 0 {
-                return Err(Error::Config(
-                    "allocator.quota_mb must be > 0 when kind = \"Zfs\"".into(),
-                ));
-            }
-        }
-        Ok(cfg)
     }
 }

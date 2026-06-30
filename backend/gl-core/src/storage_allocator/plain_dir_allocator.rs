@@ -44,7 +44,9 @@ mod tests {
         let base = tempdir().unwrap();
         let target = base.path().join("goopy-alloc");
 
-        PlainDirAllocator.allocate(&target).expect("allocate should succeed");
+        PlainDirAllocator
+            .allocate(&target)
+            .expect("allocate should succeed");
         assert!(target.is_dir(), "directory should exist after allocate");
     }
 
@@ -54,7 +56,9 @@ mod tests {
         let target = base.path().join("goopy-alloc-idem");
 
         PlainDirAllocator.allocate(&target).expect("first allocate");
-        PlainDirAllocator.allocate(&target).expect("second allocate should not fail");
+        PlainDirAllocator
+            .allocate(&target)
+            .expect("second allocate should not fail");
         assert!(target.is_dir());
     }
 
@@ -62,9 +66,13 @@ mod tests {
     fn release_removes_directory() {
         let base = tempdir().unwrap();
         let target = base.path().join("goopy-release");
-        PlainDirAllocator.allocate(&target).expect("setup: allocate should succeed");
+        PlainDirAllocator
+            .allocate(&target)
+            .expect("setup: allocate should succeed");
 
-        PlainDirAllocator.release(&target).expect("release should succeed");
+        PlainDirAllocator
+            .release(&target)
+            .expect("release should succeed");
         assert!(!target.exists(), "directory should be gone after release");
     }
 
@@ -74,6 +82,8 @@ mod tests {
         let target = base.path().join("goopy-release-idem");
         // Directory does not exist — second release must also succeed.
 
-        PlainDirAllocator.release(&target).expect("release on missing path should be Ok");
+        PlainDirAllocator
+            .release(&target)
+            .expect("release on missing path should be Ok");
     }
 }

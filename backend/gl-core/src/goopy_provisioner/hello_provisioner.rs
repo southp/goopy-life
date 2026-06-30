@@ -5,10 +5,10 @@ use std::sync::Arc;
 use tracing::{debug, info, instrument};
 
 use super::GoopyProvisioner;
+use crate::Goopy;
 use crate::shared_types::*;
 use crate::storage_allocator::StorageAllocator;
 use crate::sys_utils::SysRunner;
-use crate::Goopy;
 
 /// A minimal HTTP provisioner that serves a "Hello, I am {slug}" page.
 ///
@@ -400,7 +400,10 @@ mod tests {
     #[test]
     fn render_nginx_config_contains_slug_domain_port() {
         let cfg = HelloProvisioner::render_nginx_config(
-            "tasty-lucky-clover", "goopy.life", 9876, "127.0.0.1:3000",
+            "tasty-lucky-clover",
+            "goopy.life",
+            9876,
+            "127.0.0.1:3000",
         );
         assert!(cfg.contains("tasty-lucky-clover.goopy.life"));
         assert!(cfg.contains("proxy_pass http://127.0.0.1:9876"));
@@ -410,16 +413,27 @@ mod tests {
     #[test]
     fn render_nginx_config_contains_auth_request_directives() {
         let cfg = HelloProvisioner::render_nginx_config(
-            "tasty-lucky-clover", "goopy.life", 9876, "127.0.0.1:3000",
+            "tasty-lucky-clover",
+            "goopy.life",
+            9876,
+            "127.0.0.1:3000",
         );
-        assert!(cfg.contains("auth_request /goopy-alive-check;"),
-            "nginx config must include auth_request directive");
-        assert!(cfg.contains("proxy_pass http://127.0.0.1:3000/goopies/tasty-lucky-clover/alive;"),
-            "alive-check location must proxy to the correct gl-serv endpoint");
-        assert!(cfg.contains("error_page 410 = @expired;"),
-            "nginx config must map 410 to @expired named location");
-        assert!(cfg.contains("return 302 https://goopy.life/expired;"),
-            "expired location must redirect to /expired page");
+        assert!(
+            cfg.contains("auth_request /goopy-alive-check;"),
+            "nginx config must include auth_request directive"
+        );
+        assert!(
+            cfg.contains("proxy_pass http://127.0.0.1:3000/goopies/tasty-lucky-clover/alive;"),
+            "alive-check location must proxy to the correct gl-serv endpoint"
+        );
+        assert!(
+            cfg.contains("error_page 410 = @expired;"),
+            "nginx config must map 410 to @expired named location"
+        );
+        assert!(
+            cfg.contains("return 302 https://goopy.life/expired;"),
+            "expired location must redirect to /expired page"
+        );
     }
 
     /// Verifies that `provision` in dev mode writes the server script.
@@ -433,7 +447,9 @@ mod tests {
         let port = find_free_port();
         let provisioner = dev_provisioner();
         let goopy = test_goopy(&working_dir, port);
-        provisioner.provision(&goopy).expect("dev provision should succeed");
+        provisioner
+            .provision(&goopy)
+            .expect("dev provision should succeed");
 
         let script = working_dir.join("server.py");
         assert!(script.exists(), "server.py should be written");
@@ -447,7 +463,9 @@ mod tests {
 
         // Clean up the spawned process
         let pid = fs::read_to_string(&pid_path).unwrap();
-        let _ = std::process::Command::new("kill").args([pid.trim()]).output();
+        let _ = std::process::Command::new("kill")
+            .args([pid.trim()])
+            .output();
     }
 
     /// Verifies that `deprovision` in dev mode removes the working directory.
@@ -461,7 +479,9 @@ mod tests {
         let port = find_free_port();
         let provisioner = dev_provisioner();
         let goopy = test_goopy(&working_dir, port);
-        provisioner.provision(&goopy).expect("dev provision should succeed");
+        provisioner
+            .provision(&goopy)
+            .expect("dev provision should succeed");
         provisioner
             .deprovision(&goopy)
             .expect("dev deprovision should succeed");
@@ -490,13 +510,18 @@ mod tests {
         );
 
         let goopy = test_goopy(&working_dir, 9876);
-        provisioner.provision(&goopy).expect("prod provision should succeed");
+        provisioner
+            .provision(&goopy)
+            .expect("prod provision should succeed");
 
         // server.py is written via std::fs::write directly — check the file on disk.
         let server_py = working_dir.join("server.py");
         assert!(server_py.exists(), "server.py should be written to disk");
         let content = fs::read_to_string(&server_py).unwrap();
-        assert!(content.contains("tasty-lucky-clover"), "server.py should contain slug");
+        assert!(
+            content.contains("tasty-lucky-clover"),
+            "server.py should contain slug"
+        );
         assert!(content.contains("9876"), "server.py should contain port");
 
         let calls = mock_sys.recorded_calls();
@@ -512,21 +537,34 @@ mod tests {
             })
             .collect();
         assert!(
-            sudo_writes.iter().any(|p| p.contains("/etc/systemd/system/")),
+            sudo_writes
+                .iter()
+                .any(|p| p.contains("/etc/systemd/system/")),
             "should write systemd service file"
         );
         assert!(
-            sudo_writes.iter().any(|p| p.contains("/etc/nginx/sites-available/")),
+            sudo_writes
+                .iter()
+                .any(|p| p.contains("/etc/nginx/sites-available/")),
             "should write nginx config"
         );
 
         let verb_seq: Vec<&str> = calls
             .iter()
-            .filter_map(|c| if let MockCall::SudoRun { args } = c { Some(args) } else { None })
+            .filter_map(|c| {
+                if let MockCall::SudoRun { args } = c {
+                    Some(args)
+                } else {
+                    None
+                }
+            })
             .flat_map(|args| args.iter().map(|s| s.as_str()))
             .filter(|a| ["daemon-reload", "enable", "start", "ln", "reload"].contains(a))
             .collect();
-        assert_eq!(verb_seq, ["daemon-reload", "enable", "start", "ln", "reload"]);
+        assert_eq!(
+            verb_seq,
+            ["daemon-reload", "enable", "start", "ln", "reload"]
+        );
     }
 
     /// Verifies that `deprovision` in production mode issues the expected sequence
@@ -547,14 +585,22 @@ mod tests {
         );
 
         let goopy = test_goopy(&working_dir, 9876);
-        provisioner.deprovision(&goopy).expect("prod deprovision should succeed");
+        provisioner
+            .deprovision(&goopy)
+            .expect("prod deprovision should succeed");
 
         let calls = mock_sys.recorded_calls();
 
         // Verify ordered stop → disable → daemon-reload → reload verb sequence.
         let verb_seq: Vec<&str> = calls
             .iter()
-            .filter_map(|c| if let MockCall::SudoRun { args } = c { Some(args) } else { None })
+            .filter_map(|c| {
+                if let MockCall::SudoRun { args } = c {
+                    Some(args)
+                } else {
+                    None
+                }
+            })
             .flat_map(|args| args.iter().map(|s| s.as_str()))
             .filter(|a| ["stop", "disable", "daemon-reload", "reload"].contains(a))
             .collect();
@@ -563,14 +609,24 @@ mod tests {
         // Verify rm was issued for the systemd service file and nginx configs.
         let run_args: Vec<&[String]> = calls
             .iter()
-            .filter_map(|c| if let MockCall::SudoRun { args } = c { Some(args.as_slice()) } else { None })
+            .filter_map(|c| {
+                if let MockCall::SudoRun { args } = c {
+                    Some(args.as_slice())
+                } else {
+                    None
+                }
+            })
             .collect();
         assert!(
-            run_args.iter().any(|args| args.iter().any(|a| a.contains("/etc/systemd/system/"))),
+            run_args
+                .iter()
+                .any(|args| args.iter().any(|a| a.contains("/etc/systemd/system/"))),
             "should remove systemd service file"
         );
         assert!(
-            run_args.iter().any(|args| args.iter().any(|a| a.contains("/etc/nginx/sites-available/"))),
+            run_args.iter().any(|args| args
+                .iter()
+                .any(|a| a.contains("/etc/nginx/sites-available/"))),
             "should remove nginx config"
         );
     }
