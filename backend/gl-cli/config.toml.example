@@ -5,7 +5,6 @@
 
 base_dir        = "./test-temp"
 domain          = "localhost"
-ssl_email       = "dev@example.com"
 life_in_days    = 7
 provisioner_kind = "Hello"
 port_range_start = 50000

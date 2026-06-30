@@ -13,7 +13,6 @@ use std::thread::{JoinHandle, ThreadId};
 pub struct GoopyManagerConfig {
     pub base_dir: PathBuf,
     pub domain: String,
-    pub ssl_email: String,
     pub life_in_days: i32,
     pub port_range_start: u32,
     pub port_range_end: u32,
@@ -25,7 +24,6 @@ pub struct GoopyManager<
 > {
     pub base_dir: PathBuf,
     pub domain: String,
-    pub ssl_email: String,
     pub goopy_life_in_days: i32,
     pub port_range_start: u32,
     pub port_range_end: u32,
@@ -46,7 +44,6 @@ where
         Self {
             base_dir: config.base_dir,
             domain: config.domain,
-            ssl_email: config.ssl_email,
             goopy_life_in_days: config.life_in_days,
             port_range_start: config.port_range_start,
             port_range_end: config.port_range_end,
@@ -361,7 +358,6 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: PathBuf::from("/tmp"),
                 domain: "test.example".into(),
-                ssl_email: "test@example.com".into(),
                 life_in_days: 7,
                 port_range_start: 9000,
                 port_range_end: 9100,
@@ -391,7 +387,6 @@ mod tests {
                 GoopyManagerConfig {
                     base_dir: PathBuf::from("/tmp"),
                     domain: "test.example".into(),
-                    ssl_email: "test@example.com".into(),
                     life_in_days: bad,
                     port_range_start: 9000,
                     port_range_end: 9100,
@@ -414,7 +409,6 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: PathBuf::from("/tmp/test-goopy"),
                 domain: "test.example".into(),
-                ssl_email: "test@example.com".into(),
                 life_in_days: 7,
                 port_range_start: 8080,
                 port_range_end: 9080,
@@ -553,7 +547,6 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: PathBuf::from("/tmp"),
                 domain: "test.example".into(),
-                ssl_email: "test@example.com".into(),
                 life_in_days: 7,
                 port_range_start: 9000,
                 port_range_end: 9100,

@@ -40,7 +40,6 @@ impl AllocatorConfig {
 pub struct Config {
     pub base_dir: PathBuf,
     pub domain: String,
-    pub ssl_email: String,
     pub life_in_days: i32,
     pub provisioner_kind: ProvisionerKind,
     pub port_range_start: u32,
@@ -79,7 +78,6 @@ impl Config {
         GoopyManagerConfig {
             base_dir: self.base_dir.clone(),
             domain: self.domain.clone(),
-            ssl_email: self.ssl_email.clone(),
             life_in_days: self.life_in_days,
             port_range_start: self.port_range_start,
             port_range_end: self.port_range_end,
@@ -130,7 +128,6 @@ mod tests {
     const VALID_BASE: &str = r#"
 base_dir = "/tmp/goopy"
 domain = "goopy.life"
-ssl_email = "admin@goopy.life"
 life_in_days = 7
 provisioner_kind = "Hello"
 port_range_start = 9000
@@ -163,7 +160,6 @@ kind = "PlainDir"
         // Omit `domain`
         let toml = r#"
 base_dir = "/tmp/goopy"
-ssl_email = "admin@goopy.life"
 life_in_days = 7
 provisioner_kind = "Hello"
 port_range_start = 40000
@@ -239,7 +235,6 @@ kind = "PlainDir"
         let manager_cfg = cfg.build_manager_config();
         assert_eq!(manager_cfg.base_dir, cfg.base_dir);
         assert_eq!(manager_cfg.domain, cfg.domain);
-        assert_eq!(manager_cfg.ssl_email, cfg.ssl_email);
         assert_eq!(manager_cfg.life_in_days, cfg.life_in_days);
         assert_eq!(manager_cfg.port_range_start, cfg.port_range_start);
         assert_eq!(manager_cfg.port_range_end, cfg.port_range_end);

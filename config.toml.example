@@ -4,9 +4,6 @@ base_dir = "/opt/goopy-life/data"
 # Public domain (e.g. "goopy.life" — instances get {slug}.{domain})
 domain = "goopy.life"
 
-# Email for SSL certificate registration
-ssl_email = "admin@goopy.life"
-
 # How long each goopy lives (days)
 life_in_days = 7
 
