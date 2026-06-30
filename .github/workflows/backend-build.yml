@@ -2,9 +2,9 @@ name: Backend build
 
 on:
   push:
-    branches: [ "trunk" ]
+    paths: ['backend/**']
   pull_request:
-    branches: [ "**" ]
+    paths: ['backend/**']
 
 env:
   CARGO_TERM_COLOR: always
@@ -34,3 +34,5 @@ jobs:
       run: cargo test --verbose
     - name: Run ZFS tests (root required)
       run: sudo env "PATH=$PATH" "HOME=$HOME" cargo test -p gl-core --verbose -- --ignored
+    - name: Lint
+      run: cargo clippy --all-targets -- -D warnings
