@@ -2,6 +2,7 @@ name: Frontend build and lint
 
 on:
   push:
+    branches: ['trunk']
     paths: ['frontend/**']
   pull_request:
     paths: ['frontend/**']
