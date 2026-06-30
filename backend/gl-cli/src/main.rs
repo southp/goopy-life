@@ -199,7 +199,17 @@ fn main() {
                 Cmd::List {} => match gm.list() {
                     Ok(goopies) => {
                         for gp in goopies {
-                            println!("{:?}", gp);
+                            println!(
+                                "{slug}\n  status:           {status}\n  life_in_days:     {life_in_days}\n  created_at:       {created_at}\n  port:             {port}\n  provisioner_kind: {provisioner_kind}\n  service_version:  {service_version}\n  working_dir:      {working_dir}\n",
+                                slug = gp.slug,
+                                status = gp.status,
+                                life_in_days = gp.life_in_days,
+                                created_at = gp.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
+                                port = gp.port,
+                                provisioner_kind = gp.provisioner_kind,
+                                service_version = gp.service_version,
+                                working_dir = gp.working_dir.display(),
+                            );
                         }
                     }
                     Err(e) => {
