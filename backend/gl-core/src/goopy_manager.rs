@@ -69,8 +69,13 @@ where
         let mut new_goopy = None;
         for _ in 0..MAX_RETRIES {
             let slug = crate::slug_generator::generate_slug();
-            debug_assert!(!slug.is_empty(), "slug generator must not produce empty slugs");
-            let port = self.registry.acquire_port(&slug, self.port_range_start, self.port_range_end)?;
+            debug_assert!(
+                !slug.is_empty(),
+                "slug generator must not produce empty slugs"
+            );
+            let port =
+                self.registry
+                    .acquire_port(&slug, self.port_range_start, self.port_range_end)?;
 
             let candidate = Goopy {
                 slug: slug.clone(),
@@ -91,7 +96,11 @@ where
                 Err(Error::AlreadyExists) => {
                     tracing::warn!(slug = %slug, "slug collision, retrying");
                     if let Err(rel_err) = self.registry.release_port(port) {
-                        tracing::error!("spawn: release port {} on slug collision error: {:?}", port, rel_err);
+                        tracing::error!(
+                            "spawn: release port {} on slug collision error: {:?}",
+                            port,
+                            rel_err
+                        );
                     }
                     continue;
                 }
@@ -124,15 +133,18 @@ where
                     if let Err(e) = registry.update_status(&goopy_clone.slug, Status::Done) {
                         tracing::error!("spawning: update {} error: {:?}", goopy_clone.slug, e);
                     }
-                },
+                }
                 Err(err) => {
-                    tracing::error!("provisioning for goopy: {} failed: {:?}", goopy_clone.slug, err);
+                    tracing::error!(
+                        "provisioning for goopy: {} failed: {:?}",
+                        goopy_clone.slug,
+                        err
+                    );
 
                     if let Err(e) = registry.release_port(port) {
                         tracing::error!("spawn: release port {} error: {:?}", port, e);
                     }
-                    if let Err(e) = registry.update_status(&goopy_clone.slug, Status::Failed)
-                    {
+                    if let Err(e) = registry.update_status(&goopy_clone.slug, Status::Failed) {
                         tracing::error!("spawning: update {} error: {:?}", goopy_clone.slug, e);
                     }
                 }
@@ -175,16 +187,19 @@ where
                     if let Err(e) = registry.release_port(port) {
                         tracing::error!("despawning: release port {} error: {:?}", port, e);
                     }
-                },
+                }
                 Err(err) => {
-                    tracing::error!("deprovisioning for goopy: {} failed: {:?}", goopy_clone.slug, err);
+                    tracing::error!(
+                        "deprovisioning for goopy: {} failed: {:?}",
+                        goopy_clone.slug,
+                        err
+                    );
 
                     // Intentionally not calling release_port here: the port stays
                     // reserved so the stuck goopy remains visible for investigation.
                     // The operator can retry `despawn` once the underlying issue is
                     // resolved, which will release the port on success.
-                    if let Err(e) = registry.update_status(&goopy_clone.slug, Status::Failed)
-                    {
+                    if let Err(e) = registry.update_status(&goopy_clone.slug, Status::Failed) {
                         tracing::error!("despawning: update {} error: {:?}", goopy_clone.slug, e);
                     }
                 }
@@ -299,11 +314,26 @@ mod tests {
                 Ok(())
             }
         }
-        fn load(&self, _slug: &str) -> Result<Option<Goopy>, Error> { Ok(None) }
-        fn delete(&self, _slug: &str) -> Result<(), Error> { Ok(()) }
-        fn list(&self) -> Result<Vec<Goopy>, Error> { Ok(vec![]) }
-        fn update_status(&self, _slug: &str, _new_status: Status) -> Result<(), Error> { Ok(()) }
-        fn acquire_port(&self, _slug: &str, range_start: u32, _range_end: u32) -> Result<u32, Error> { Ok(range_start) }
+        fn load(&self, _slug: &str) -> Result<Option<Goopy>, Error> {
+            Ok(None)
+        }
+        fn delete(&self, _slug: &str) -> Result<(), Error> {
+            Ok(())
+        }
+        fn list(&self) -> Result<Vec<Goopy>, Error> {
+            Ok(vec![])
+        }
+        fn update_status(&self, _slug: &str, _new_status: Status) -> Result<(), Error> {
+            Ok(())
+        }
+        fn acquire_port(
+            &self,
+            _slug: &str,
+            range_start: u32,
+            _range_end: u32,
+        ) -> Result<u32, Error> {
+            Ok(range_start)
+        }
         fn release_port(&self, _port: u32) -> Result<(), Error> {
             *self.release_calls.lock().unwrap() += 1;
             Ok(())
@@ -313,12 +343,20 @@ mod tests {
     struct NoopProvisioner;
 
     impl GoopyProvisioner for NoopProvisioner {
-        fn provision(&self, _goopy: &Goopy) -> Result<(), Error> { Ok(()) }
-        fn deprovision(&self, _goopy: &Goopy) -> Result<(), Error> { Ok(()) }
-        fn kind(&self) -> ProvisionerKind { ProvisionerKind::Hello }
+        fn provision(&self, _goopy: &Goopy) -> Result<(), Error> {
+            Ok(())
+        }
+        fn deprovision(&self, _goopy: &Goopy) -> Result<(), Error> {
+            Ok(())
+        }
+        fn kind(&self) -> ProvisionerKind {
+            ProvisionerKind::Hello
+        }
     }
 
-    fn make_test_manager(registry: SqliteRegistry) -> GoopyManager<SqliteRegistry, NoopProvisioner> {
+    fn make_test_manager(
+        registry: SqliteRegistry,
+    ) -> GoopyManager<SqliteRegistry, NoopProvisioner> {
         GoopyManager::new(
             GoopyManagerConfig {
                 base_dir: PathBuf::from("/tmp"),
@@ -362,7 +400,10 @@ mod tests {
                 NoopProvisioner,
             );
             let err = gm.spawn().unwrap_err();
-            assert!(matches!(err, Error::Invalid), "expected Invalid for life_in_days={bad}");
+            assert!(
+                matches!(err, Error::Invalid),
+                "expected Invalid for life_in_days={bad}"
+            );
         }
     }
 
@@ -387,9 +428,16 @@ mod tests {
 
         // First save returns AlreadyExists; spawn must retry and succeed on the second attempt.
         let result = gm.spawn();
-        assert!(result.is_ok(), "spawn should succeed after retrying a slug collision");
+        assert!(
+            result.is_ok(),
+            "spawn should succeed after retrying a slug collision"
+        );
         // The port acquired for the colliding slug must have been released before retrying.
-        assert_eq!(*release_calls.lock().unwrap(), 1, "release_port should be called once on slug collision");
+        assert_eq!(
+            *release_calls.lock().unwrap(),
+            1,
+            "release_port should be called once on slug collision"
+        );
     }
 
     #[test]
@@ -437,7 +485,9 @@ mod tests {
         // Insert an expired goopy with Despawning status — should be skipped
         let despawning = make_goopy("despawning-slug", 10, 9001, Status::Despawning);
         registry.save(&despawning).unwrap();
-        registry.acquire_port("despawning-slug", 9001, 9002).unwrap();
+        registry
+            .acquire_port("despawning-slug", 9001, 9002)
+            .unwrap();
 
         let gm = make_test_manager(registry);
 
@@ -471,13 +521,27 @@ mod tests {
     fn sweep_collects_despawn_errors() {
         struct FailingUpdateRegistry(SqliteRegistry);
         impl GoopyRegistry for FailingUpdateRegistry {
-            fn save(&self, gp: &Goopy) -> Result<(), Error> { self.0.save(gp) }
-            fn load(&self, slug: &str) -> Result<Option<Goopy>, Error> { self.0.load(slug) }
-            fn delete(&self, slug: &str) -> Result<(), Error> { self.0.delete(slug) }
-            fn list(&self) -> Result<Vec<Goopy>, Error> { self.0.list() }
-            fn update_status(&self, _: &str, _: Status) -> Result<(), Error> { Err(Error::Invalid) }
-            fn acquire_port(&self, slug: &str, s: u32, e: u32) -> Result<u32, Error> { self.0.acquire_port(slug, s, e) }
-            fn release_port(&self, p: u32) -> Result<(), Error> { self.0.release_port(p) }
+            fn save(&self, gp: &Goopy) -> Result<(), Error> {
+                self.0.save(gp)
+            }
+            fn load(&self, slug: &str) -> Result<Option<Goopy>, Error> {
+                self.0.load(slug)
+            }
+            fn delete(&self, slug: &str) -> Result<(), Error> {
+                self.0.delete(slug)
+            }
+            fn list(&self) -> Result<Vec<Goopy>, Error> {
+                self.0.list()
+            }
+            fn update_status(&self, _: &str, _: Status) -> Result<(), Error> {
+                Err(Error::Invalid)
+            }
+            fn acquire_port(&self, slug: &str, s: u32, e: u32) -> Result<u32, Error> {
+                self.0.acquire_port(slug, s, e)
+            }
+            fn release_port(&self, p: u32) -> Result<(), Error> {
+                self.0.release_port(p)
+            }
         }
 
         let inner = SqliteRegistry::new(Path::new(":memory:")).unwrap();
@@ -511,7 +575,10 @@ mod tests {
         let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
         let (slug, port, _) = gm.spawn().expect("spawn should succeed");
         assert!(!slug.is_empty(), "slug should be non-empty");
-        assert!(port >= 9000 && port < 9100, "port should be in configured range");
+        assert!(
+            (9000..9100).contains(&port),
+            "port should be in configured range"
+        );
     }
 
     #[test]
@@ -556,13 +623,17 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             let g = gm.get(&slug).unwrap().unwrap();
-            if g.status == Status::Done { break; }
+            if g.status == Status::Done {
+                break;
+            }
             assert!(std::time::Instant::now() < deadline, "spawn timed out");
             let should_break = {
                 let jobs = gm.jobs.lock().unwrap();
-                jobs.get(&thread_id).map_or(true, |h| h.is_finished())
+                jobs.get(&thread_id).is_none_or(|h| h.is_finished())
             };
-            if should_break { break; }
+            if should_break {
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
@@ -576,7 +647,10 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
-        assert!(gm.get(&slug).unwrap().is_none(), "should be gone after despawn");
+        assert!(
+            gm.get(&slug).unwrap().is_none(),
+            "should be gone after despawn"
+        );
     }
 
     #[test]

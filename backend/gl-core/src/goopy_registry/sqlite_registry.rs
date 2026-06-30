@@ -6,9 +6,9 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::params;
 
+use super::GoopyRegistry;
 use crate::goopy::Goopy;
 use crate::shared_types::*;
-use super::GoopyRegistry;
 
 /// SQLite-backed implementation of [`GoopyRegistry`].
 ///
@@ -27,11 +27,10 @@ impl SqliteRegistry {
     pub fn new(db_path: &Path) -> Result<Self, Error> {
         let is_memory = db_path == Path::new(":memory:");
 
-        let manager = SqliteConnectionManager::file(db_path)
-            .with_init(|conn| {
-                conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
-                Ok(())
-            });
+        let manager = SqliteConnectionManager::file(db_path).with_init(|conn| {
+            conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
+            Ok(())
+        });
 
         // Only the literal ":memory:" path is recognised as in-memory; URI-form
         // in-memory databases (file::memory:?cache=shared) are not supported.
@@ -40,15 +39,23 @@ impl SqliteRegistry {
         let pool = Pool::builder()
             .max_size(pool_size)
             .build(manager)
-            .map_err(|e| Error::Registry { context: "pool build", source: e.into() })?;
+            .map_err(|e| Error::Registry {
+                context: "pool build",
+                source: e.into(),
+            })?;
 
-        let conn = pool.get()
-            .map_err(|e| Error::Registry { context: "pool get", source: e.into() })?;
+        let conn = pool.get().map_err(|e| Error::Registry {
+            context: "pool get",
+            source: e.into(),
+        })?;
 
         if !is_memory {
             let mode: String = conn
                 .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
-                .map_err(|e| Error::Registry { context: "wal mode check", source: e.into() })?;
+                .map_err(|e| Error::Registry {
+                    context: "wal mode check",
+                    source: e.into(),
+                })?;
             if mode != "wal" {
                 return Err(Error::Registry {
                     context: "wal mode check",
@@ -105,12 +112,20 @@ fn parse_row(
             error = %e,
             "row parse failed"
         );
-        Error::RowParse { slug: slug.clone(), field: "created_at", value: created_at_str.clone() }
+        Error::RowParse {
+            slug: slug.clone(),
+            field: "created_at",
+            value: created_at_str.clone(),
+        }
     })?;
 
     let status = Status::from_str(&status_str).map_err(|_| {
         tracing::error!(slug = %slug, field = "status", value = %status_str, "row parse failed");
-        Error::RowParse { slug: slug.clone(), field: "status", value: status_str.clone() }
+        Error::RowParse {
+            slug: slug.clone(),
+            field: "status",
+            value: status_str.clone(),
+        }
     })?;
 
     let provisioner_kind = ProvisionerKind::from_str(&provisioner_kind_str).map_err(|_| {
@@ -145,8 +160,10 @@ fn parse_row(
 impl GoopyRegistry for SqliteRegistry {
     #[tracing::instrument(skip(self))]
     fn save(&self, gp: &Goopy) -> Result<(), Error> {
-        let conn = self.pool.get()
-            .map_err(|e| Error::Registry { context: "pool get", source: e.into() })?;
+        let conn = self.pool.get().map_err(|e| Error::Registry {
+            context: "pool get",
+            source: e.into(),
+        })?;
 
         let result = conn.execute(
             "INSERT OR FAIL INTO goopies
@@ -178,15 +195,20 @@ impl GoopyRegistry for SqliteRegistry {
             }
             Err(e) => {
                 tracing::error!(slug = %gp.slug, "save failed: {e}");
-                Err(Error::Registry { context: "save", source: e.into() })
+                Err(Error::Registry {
+                    context: "save",
+                    source: e.into(),
+                })
             }
         }
     }
 
     #[tracing::instrument(skip(self))]
     fn load(&self, slug: &str) -> Result<Option<Goopy>, Error> {
-        let conn = self.pool.get()
-            .map_err(|e| Error::Registry { context: "pool get", source: e.into() })?;
+        let conn = self.pool.get().map_err(|e| Error::Registry {
+            context: "pool get",
+            source: e.into(),
+        })?;
 
         let result = conn.query_row(
             "SELECT slug, life_in_days, created_at, status, working_dir,
@@ -209,9 +231,30 @@ impl GoopyRegistry for SqliteRegistry {
 
         match result {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(Error::Registry { context: "load", source: e.into() }),
-            Ok((slug, life_in_days, created_at_str, status_str, working_dir_str, port, provisioner_kind_str, service_version)) => {
-                let gp = parse_row(slug, life_in_days, created_at_str, status_str, working_dir_str, port, provisioner_kind_str, service_version)?;
+            Err(e) => Err(Error::Registry {
+                context: "load",
+                source: e.into(),
+            }),
+            Ok((
+                slug,
+                life_in_days,
+                created_at_str,
+                status_str,
+                working_dir_str,
+                port,
+                provisioner_kind_str,
+                service_version,
+            )) => {
+                let gp = parse_row(
+                    slug,
+                    life_in_days,
+                    created_at_str,
+                    status_str,
+                    working_dir_str,
+                    port,
+                    provisioner_kind_str,
+                    service_version,
+                )?;
                 tracing::debug!(slug = %gp.slug, "loaded goopy");
                 Ok(Some(gp))
             }
@@ -220,15 +263,20 @@ impl GoopyRegistry for SqliteRegistry {
 
     #[tracing::instrument(skip(self))]
     fn update_status(&self, slug: &str, new_status: Status) -> Result<(), Error> {
-        let conn = self.pool.get()
-            .map_err(|e| Error::Registry { context: "pool get", source: e.into() })?;
+        let conn = self.pool.get().map_err(|e| Error::Registry {
+            context: "pool get",
+            source: e.into(),
+        })?;
 
         let n = conn
             .execute(
                 "UPDATE goopies SET status = ?1 WHERE slug = ?2",
                 params![new_status.to_string(), slug],
             )
-            .map_err(|e| Error::Registry { context: "update status", source: e.into() })?;
+            .map_err(|e| Error::Registry {
+                context: "update status",
+                source: e.into(),
+            })?;
 
         if n == 0 {
             tracing::error!(slug = %slug, "update_status: not found");
@@ -241,12 +289,17 @@ impl GoopyRegistry for SqliteRegistry {
 
     #[tracing::instrument(skip(self))]
     fn delete(&self, slug: &str) -> Result<(), Error> {
-        let conn = self.pool.get()
-            .map_err(|e| Error::Registry { context: "pool get", source: e.into() })?;
+        let conn = self.pool.get().map_err(|e| Error::Registry {
+            context: "pool get",
+            source: e.into(),
+        })?;
 
         let n = conn
             .execute("DELETE FROM goopies WHERE slug = ?1", params![slug])
-            .map_err(|e| Error::Registry { context: "delete", source: e.into() })?;
+            .map_err(|e| Error::Registry {
+                context: "delete",
+                source: e.into(),
+            })?;
 
         if n == 0 {
             tracing::error!(slug = %slug, "delete: not found");
@@ -259,8 +312,10 @@ impl GoopyRegistry for SqliteRegistry {
 
     #[tracing::instrument(skip(self))]
     fn list(&self) -> Result<Vec<Goopy>, Error> {
-        let conn = self.pool.get()
-            .map_err(|e| Error::Registry { context: "pool get", source: e.into() })?;
+        let conn = self.pool.get().map_err(|e| Error::Registry {
+            context: "pool get",
+            source: e.into(),
+        })?;
 
         let mut stmt = conn
             .prepare(
@@ -268,7 +323,10 @@ impl GoopyRegistry for SqliteRegistry {
                         port, provisioner_kind, service_version
                  FROM goopies ORDER BY created_at",
             )
-            .map_err(|e| Error::Registry { context: "list prepare", source: e.into() })?;
+            .map_err(|e| Error::Registry {
+                context: "list prepare",
+                source: e.into(),
+            })?;
 
         let goopies = stmt
             .query_map([], |row| {
@@ -283,11 +341,34 @@ impl GoopyRegistry for SqliteRegistry {
                     row.get::<_, String>("service_version")?,
                 ))
             })
-            .map_err(|e| Error::Registry { context: "list query", source: e.into() })?
+            .map_err(|e| Error::Registry {
+                context: "list query",
+                source: e.into(),
+            })?
             .map(|r| {
-                let (slug, life_in_days, created_at_str, status_str, working_dir_str, port, provisioner_kind_str, service_version) =
-                    r.map_err(|e| Error::Registry { context: "list row", source: e.into() })?;
-                parse_row(slug, life_in_days, created_at_str, status_str, working_dir_str, port, provisioner_kind_str, service_version)
+                let (
+                    slug,
+                    life_in_days,
+                    created_at_str,
+                    status_str,
+                    working_dir_str,
+                    port,
+                    provisioner_kind_str,
+                    service_version,
+                ) = r.map_err(|e| Error::Registry {
+                    context: "list row",
+                    source: e.into(),
+                })?;
+                parse_row(
+                    slug,
+                    life_in_days,
+                    created_at_str,
+                    status_str,
+                    working_dir_str,
+                    port,
+                    provisioner_kind_str,
+                    service_version,
+                )
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -296,12 +377,15 @@ impl GoopyRegistry for SqliteRegistry {
 
     #[tracing::instrument(skip(self))]
     fn acquire_port(&self, slug: &str, range_start: u32, range_end: u32) -> Result<u32, Error> {
-        let mut conn = self.pool.get()
-            .map_err(|e| Error::Registry { context: "pool get", source: e.into() })?;
+        let mut conn = self.pool.get().map_err(|e| Error::Registry {
+            context: "pool get",
+            source: e.into(),
+        })?;
 
-        let tx = conn
-            .transaction()
-            .map_err(|e| Error::Registry { context: "transaction", source: e.into() })?;
+        let tx = conn.transaction().map_err(|e| Error::Registry {
+            context: "transaction",
+            source: e.into(),
+        })?;
 
         // O(n) scan across the range. Acceptable for ranges of a few hundred ports;
         // for larger ranges a single-query approach (SELECT MIN unused port) is preferable.
@@ -313,8 +397,10 @@ impl GoopyRegistry for SqliteRegistry {
 
             match result {
                 Ok(1) => {
-                    tx.commit()
-                        .map_err(|e| Error::Registry { context: "commit", source: e.into() })?;
+                    tx.commit().map_err(|e| Error::Registry {
+                        context: "commit",
+                        source: e.into(),
+                    })?;
                     tracing::debug!(port = port, "acquired port");
                     return Ok(port);
                 }
@@ -323,7 +409,10 @@ impl GoopyRegistry for SqliteRegistry {
                     continue;
                 }
                 Err(e) => {
-                    return Err(Error::Registry { context: "acquire port", source: e.into() });
+                    return Err(Error::Registry {
+                        context: "acquire port",
+                        source: e.into(),
+                    });
                 }
             }
         }
@@ -334,15 +423,20 @@ impl GoopyRegistry for SqliteRegistry {
 
     #[tracing::instrument(skip(self))]
     fn release_port(&self, port: u32) -> Result<(), Error> {
-        let conn = self.pool.get()
-            .map_err(|e| Error::Registry { context: "pool get", source: e.into() })?;
+        let conn = self.pool.get().map_err(|e| Error::Registry {
+            context: "pool get",
+            source: e.into(),
+        })?;
 
         let n = conn
             .execute(
                 "DELETE FROM allocated_ports WHERE port = ?1",
                 params![port as i64],
             )
-            .map_err(|e| Error::Registry { context: "release port", source: e.into() })?;
+            .map_err(|e| Error::Registry {
+                context: "release port",
+                source: e.into(),
+            })?;
 
         if n == 0 {
             return Err(Error::NotFound);
@@ -457,8 +551,8 @@ mod tests {
         let p1 = r.acquire_port("slug-a", 9000, 9010).unwrap();
         let p2 = r.acquire_port("slug-b", 9000, 9010).unwrap();
         assert_ne!(p1, p2);
-        assert!(p1 >= 9000 && p1 < 9010);
-        assert!(p2 >= 9000 && p2 < 9010);
+        assert!((9000..9010).contains(&p1));
+        assert!((9000..9010).contains(&p2));
     }
 
     #[test]
@@ -505,13 +599,21 @@ mod tests {
 
         let results: Vec<u32> = handles
             .into_iter()
-            .map(|h| h.join().expect("thread should not panic").expect("acquire should succeed"))
+            .map(|h| {
+                h.join()
+                    .expect("thread should not panic")
+                    .expect("acquire should succeed")
+            })
             .collect();
 
         let mut sorted = results.clone();
         sorted.sort();
         sorted.dedup();
-        assert_eq!(sorted.len(), results.len(), "all acquired ports should be unique");
+        assert_eq!(
+            sorted.len(),
+            results.len(),
+            "all acquired ports should be unique"
+        );
         assert_eq!(sorted.len(), 50, "all 50 ports should be acquired");
     }
 
@@ -544,7 +646,7 @@ mod tests {
         }
         let err = r.load("bad-ts").unwrap_err();
         assert!(
-            matches!(err, Error::RowParse { ref field, .. } if *field == "created_at"),
+            matches!(err, Error::RowParse { field, .. } if field == "created_at"),
             "{err:?}"
         );
     }
@@ -563,7 +665,7 @@ mod tests {
         }
         let err = r.load("bad-status").unwrap_err();
         assert!(
-            matches!(err, Error::RowParse { ref field, .. } if *field == "status"),
+            matches!(err, Error::RowParse { field, .. } if field == "status"),
             "{err:?}"
         );
     }
@@ -582,7 +684,7 @@ mod tests {
         }
         let err = r.load("bad-pk").unwrap_err();
         assert!(
-            matches!(err, Error::RowParse { ref field, .. } if *field == "provisioner_kind"),
+            matches!(err, Error::RowParse { field, .. } if field == "provisioner_kind"),
             "{err:?}"
         );
     }

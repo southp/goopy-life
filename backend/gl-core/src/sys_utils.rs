@@ -90,17 +90,9 @@ pub struct MockSysRunner {
 #[cfg(any(test, feature = "test-utils"))]
 #[derive(Debug, Clone)]
 pub enum MockCall {
-    Run {
-        program: String,
-        args: Vec<String>,
-    },
-    SudoRun {
-        args: Vec<String>,
-    },
-    SudoWrite {
-        path: String,
-        content: String,
-    },
+    Run { program: String, args: Vec<String> },
+    SudoRun { args: Vec<String> },
+    SudoWrite { path: String, content: String },
 }
 
 #[cfg(any(test, feature = "test-utils"))]

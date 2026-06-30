@@ -2,6 +2,7 @@ name: Backend build
 
 on:
   push:
+    branches: ['trunk']
     paths: ['backend/**']
   pull_request:
     paths: ['backend/**']

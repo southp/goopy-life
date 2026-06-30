@@ -31,7 +31,9 @@ impl StorageAllocator for ZfsAllocator {
     fn allocate(&self, path: &Path) -> Result<(), Error> {
         let slug = path
             .file_name()
-            .ok_or_else(|| Error::Subprocess(format!("path has no final component: {}", path.display())))?
+            .ok_or_else(|| {
+                Error::Subprocess(format!("path has no final component: {}", path.display()))
+            })?
             .to_string_lossy()
             .into_owned();
         let dataset = format!("{}/{}", self.pool, slug);
@@ -54,7 +56,9 @@ impl StorageAllocator for ZfsAllocator {
             error!(%dataset, %stderr, "zfs create failed");
             return Err(Error::Subprocess(format!(
                 "zfs create failed for dataset '{}' (exit status: {}): {}",
-                dataset, output.status, stderr.trim()
+                dataset,
+                output.status,
+                stderr.trim()
             )));
         }
 
@@ -73,7 +77,9 @@ impl StorageAllocator for ZfsAllocator {
             error!(%dataset, %stderr, "chown of dataset root failed");
             return Err(Error::Subprocess(format!(
                 "chown failed for '{}' (exit status: {}): {}",
-                path.display(), chown_output.status, stderr.trim()
+                path.display(),
+                chown_output.status,
+                stderr.trim()
             )));
         }
 
@@ -85,7 +91,9 @@ impl StorageAllocator for ZfsAllocator {
     fn release(&self, path: &Path) -> Result<(), Error> {
         let slug = path
             .file_name()
-            .ok_or_else(|| Error::Subprocess(format!("path has no final component: {}", path.display())))?
+            .ok_or_else(|| {
+                Error::Subprocess(format!("path has no final component: {}", path.display()))
+            })?
             .to_string_lossy()
             .into_owned();
         let dataset = format!("{}/{}", self.pool, slug);
@@ -107,7 +115,9 @@ impl StorageAllocator for ZfsAllocator {
             error!(%dataset, %stderr, "zfs destroy failed");
             return Err(Error::Subprocess(format!(
                 "zfs destroy failed for dataset '{}' (exit status: {}): {}",
-                dataset, output.status, stderr.trim()
+                dataset,
+                output.status,
+                stderr.trim()
             )));
         }
 
@@ -172,7 +182,10 @@ mod tests {
             .args(["list", &dataset])
             .output()
             .expect("zfs list should run");
-        assert!(list_output.status.success(), "dataset should exist after allocate");
+        assert!(
+            list_output.status.success(),
+            "dataset should exist after allocate"
+        );
 
         // Mountpoint is inherited from the pool root (no -o mountpoint= is passed to
         // zfs create). The pool must be configured with the correct mountpoint via
@@ -193,7 +206,9 @@ mod tests {
         let dataset = format!("{}/goopy-zfs-test-release", TESTPOOL);
 
         // Setup: create via allocate so the dataset mirrors production state
-        allocator.allocate(&path).expect("setup: allocate should succeed");
+        allocator
+            .allocate(&path)
+            .expect("setup: allocate should succeed");
 
         allocator.release(&path).expect("release should succeed");
 
@@ -201,8 +216,14 @@ mod tests {
             .args(["list", &dataset])
             .output()
             .expect("zfs list should run");
-        assert!(!output.status.success(), "dataset should be gone after release");
-        assert!(!path.exists(), "mount point directory should be removed after release");
+        assert!(
+            !output.status.success(),
+            "dataset should be gone after release"
+        );
+        assert!(
+            !path.exists(),
+            "mount point directory should be removed after release"
+        );
 
         // Cleanup guard (no-op if already gone)
         std::process::Command::new("zfs")
@@ -218,9 +239,15 @@ mod tests {
         let path = PathBuf::from(format!("/{}/goopy-zfs-test-idempotent", TESTPOOL));
         let dataset = format!("{}/goopy-zfs-test-idempotent", TESTPOOL);
 
-        allocator.allocate(&path).expect("setup: allocate should succeed");
-        allocator.release(&path).expect("first release should succeed");
-        allocator.release(&path).expect("second release should succeed (idempotent)");
+        allocator
+            .allocate(&path)
+            .expect("setup: allocate should succeed");
+        allocator
+            .release(&path)
+            .expect("first release should succeed");
+        allocator
+            .release(&path)
+            .expect("second release should succeed (idempotent)");
 
         // Cleanup guard (no-op if already gone)
         std::process::Command::new("zfs")
@@ -236,14 +263,21 @@ mod tests {
         let path = PathBuf::from(format!("/{}/goopy-zfs-test-alloc-idem", TESTPOOL));
         let dataset = format!("{}/goopy-zfs-test-alloc-idem", TESTPOOL);
 
-        allocator.allocate(&path).expect("first allocate should succeed");
-        allocator.allocate(&path).expect("second allocate should succeed (idempotent)");
+        allocator
+            .allocate(&path)
+            .expect("first allocate should succeed");
+        allocator
+            .allocate(&path)
+            .expect("second allocate should succeed (idempotent)");
 
         let list_output = std::process::Command::new("zfs")
             .args(["list", &dataset])
             .output()
             .expect("zfs list should run");
-        assert!(list_output.status.success(), "dataset should still exist after second allocate");
+        assert!(
+            list_output.status.success(),
+            "dataset should still exist after second allocate"
+        );
 
         // Cleanup
         std::process::Command::new("zfs")
