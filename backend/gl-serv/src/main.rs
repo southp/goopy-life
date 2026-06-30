@@ -386,7 +386,6 @@ mod tests {
         gl_core::Config {
             base_dir: PathBuf::from("/tmp/goopy-test"),
             domain: domain.to_string(),
-            ssl_email: "test@example.com".to_string(),
             life_in_days: 7,
             provisioner_kind: ProvisionerKind::Hello,
             port_range_start: 9000,
@@ -414,7 +413,6 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: cfg.base_dir.clone(),
                 domain: cfg.domain.clone(),
-                ssl_email: cfg.ssl_email.clone(),
                 life_in_days: cfg.life_in_days,
                 port_range_start: cfg.port_range_start,
                 port_range_end: cfg.port_range_end,
@@ -496,7 +494,6 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: PathBuf::from("/tmp/goopy-test"),
                 domain: cfg.domain.clone(),
-                ssl_email: cfg.ssl_email.clone(),
                 life_in_days: cfg.life_in_days,
                 port_range_start: cfg.port_range_start,
                 port_range_end: cfg.port_range_end,
@@ -794,7 +791,6 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: cfg.base_dir.clone(),
                 domain: cfg.domain.clone(),
-                ssl_email: cfg.ssl_email.clone(),
                 life_in_days: cfg.life_in_days,
                 port_range_start: cfg.port_range_start,
                 port_range_end: cfg.port_range_end,
@@ -823,7 +819,6 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: cfg.base_dir.clone(),
                 domain: cfg.domain.clone(),
-                ssl_email: cfg.ssl_email.clone(),
                 life_in_days: cfg.life_in_days,
                 port_range_start: cfg.port_range_start,
                 port_range_end: cfg.port_range_end,

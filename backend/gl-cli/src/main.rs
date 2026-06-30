@@ -97,12 +97,11 @@ fn main() {
     }
 
     println!(
-        "Config: {path}\n  db:                {db}\n  base_dir:          {base_dir}\n  domain:            {domain}\n  ssl_email:         {ssl_email}\n  life_in_days:      {life_in_days}\n  provisioner:       {provisioner}\n  port range:        {port_start}–{port_end}\n  allocator:         {alloc_kind}\n  allocator pool:    {alloc_pool}\n  allocator quota:   {alloc_quota} MB\n  cors_origin:       {cors_origin}\n  bind_address:      {bind_address}\n  sweep_interval:    {sweep}s\n  mode:              {mode}",
+        "Config: {path}\n  db:                {db}\n  base_dir:          {base_dir}\n  domain:            {domain}\n  life_in_days:      {life_in_days}\n  provisioner:       {provisioner}\n  port range:        {port_start}–{port_end}\n  allocator:         {alloc_kind}\n  allocator pool:    {alloc_pool}\n  allocator quota:   {alloc_quota} MB\n  cors_origin:       {cors_origin}\n  bind_address:      {bind_address}\n  sweep_interval:    {sweep}s\n  mode:              {mode}",
         path = cli.config.display(),
         db = cfg.registry.path.display(),
         base_dir = cfg.base_dir.display(),
         domain = cfg.domain,
-        ssl_email = cfg.ssl_email,
         life_in_days = cfg.life_in_days,
         provisioner = cfg.provisioner_kind,
         port_start = cfg.port_range_start,
