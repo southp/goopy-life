@@ -1,0 +1,40 @@
+name: Frontend build and lint
+
+on:
+  push:
+    paths: ['frontend/**']
+  pull_request:
+    paths: ['frontend/**']
+
+jobs:
+  build-and-lint:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'yarn'
+          cache-dependency-path: frontend/yarn.lock
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Build
+        env:
+          # next.config.ts throws at build time if NEXT_PUBLIC_GL_API_URL is unset.
+          # lib/config.ts throws if GL_CONFIG_API_URL is unset, but degrades gracefully
+          # when the URL is unreachable — so a dummy value is sufficient for CI.
+          NEXT_PUBLIC_GL_API_URL: http://localhost:3001
+          GL_CONFIG_API_URL: http://localhost:3001
+        run: yarn build
+
+      - name: Lint
+        run: yarn lint
