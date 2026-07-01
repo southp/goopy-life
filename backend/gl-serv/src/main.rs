@@ -1,5 +1,7 @@
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
 
+use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -9,6 +11,9 @@ use chrono::{Duration, Utc};
 use clap::Parser;
 use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
 use gl_core::{GoopyManager, RealSysRunner};
+use tower_governor::GovernorLayer;
+use tower_governor::governor::GovernorConfigBuilder;
+use tower_governor::key_extractor::SmartIpKeyExtractor;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
@@ -230,18 +235,120 @@ async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Rate limiting helpers
+// ---------------------------------------------------------------------------
+
+/// Convert a `tower_governor` error into a JSON API response.
+///
+/// The common case (`TooManyRequests`) becomes a `429` with a JSON body and a
+/// `Retry-After` header, matching the error shape used elsewhere in the API.
+/// `tower_governor` already sets `retry-after` / `x-ratelimit-after` as integer
+/// headers, but its default body is plain text, so we replace it.
+///
+/// Any other variant (e.g. `UnableToExtractKey` when no client IP can be
+/// resolved, or an internal governor error) indicates a server-side problem
+/// rather than client abuse, so it maps to `500`. In production nginx always
+/// sets `X-Real-IP`, so `UnableToExtractKey` should never occur.
+fn rate_limit_error_handler(err: tower_governor::GovernorError) -> Response<Body> {
+    match err {
+        tower_governor::GovernorError::TooManyRequests { wait_time, headers } => {
+            let body = serde_json::json!({
+                "error": format!("rate limit exceeded; retry in {}s", wait_time),
+                "code": "too_many_requests",
+            })
+            .to_string();
+
+            let mut resp = Response::builder()
+                .status(StatusCode::TOO_MANY_REQUESTS)
+                .header("content-type", "application/json")
+                .header("retry-after", wait_time)
+                .body(Body::from(body))
+                .expect("building 429 response should not fail");
+
+            // Propagate any extra headers governor computed (e.g. x-ratelimit-after).
+            if let Some(headers) = headers {
+                for (name, value) in &headers {
+                    resp.headers_mut().insert(name.clone(), value.clone());
+                }
+            }
+
+            resp
+        }
+        other => {
+            tracing::error!(error = ?other, "rate-limit middleware failed");
+            let body = serde_json::json!({
+                "error": "internal rate-limit error",
+                "code": "internal_error",
+            })
+            .to_string();
+
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .expect("building 500 response should not fail")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Router builder (shared by main and tests)
 // ---------------------------------------------------------------------------
 
-fn build_router(state: Arc<AppState>, cors: CorsLayer) -> Router {
-    Router::new()
+/// Build the application router.
+///
+/// Two separate `GovernorLayer`s are applied:
+/// - A **tight** limit (`provision_burst` / `provision_period_secs`) covers
+///   only `POST /goopies` (the expensive provisioning path).
+/// - A **loose** limit (`read_burst` / `read_period_secs`) covers all read
+///   endpoints.
+///
+/// Both use `SmartIpKeyExtractor`, which resolves the client IP from
+/// `X-Real-IP` (set by nginx), falling back to `X-Forwarded-For` and then the
+/// TCP peer address.
+fn build_router(
+    state: Arc<AppState>,
+    cors: CorsLayer,
+    rl: &gl_core::config::RateLimitConfig,
+) -> Router {
+    // Tight limit for the provisioning endpoint.
+    let provision_governor = GovernorConfigBuilder::default()
+        .key_extractor(SmartIpKeyExtractor)
+        .burst_size(rl.provision_burst)
+        .period(StdDuration::from_secs(rl.provision_period_secs))
+        .finish()
+        .expect("provision rate-limit config must be valid (burst > 0 and period > 0)");
+
+    let provision_layer =
+        GovernorLayer::new(provision_governor).error_handler(rate_limit_error_handler);
+
+    // Loose limit for read endpoints.
+    let read_governor = GovernorConfigBuilder::default()
+        .key_extractor(SmartIpKeyExtractor)
+        .burst_size(rl.read_burst)
+        .period(StdDuration::from_secs(rl.read_period_secs))
+        .finish()
+        .expect("read rate-limit config must be valid (burst > 0 and period > 0)");
+
+    let read_layer = GovernorLayer::new(read_governor).error_handler(rate_limit_error_handler);
+
+    let spawn_routes = Router::new()
         .route("/goopies", post(spawn_goopy))
+        .layer(provision_layer)
+        .with_state(Arc::clone(&state));
+
+    let read_routes = Router::new()
         .route("/goopies/{slug}", get(get_goopy))
         .route("/goopies/{slug}/alive", get(alive_check))
         .route("/config", get(get_config))
+        .layer(read_layer)
+        .with_state(Arc::clone(&state));
+
+    Router::new()
+        .merge(spawn_routes)
+        .merge(read_routes)
         .layer(cors)
         .layer(TraceLayer::new_for_http())
-        .with_state(state)
 }
 
 // ---------------------------------------------------------------------------
@@ -292,6 +399,7 @@ async fn main() {
 
     let bind_address = cfg.bind_address.clone();
     let sweep_interval_secs = cfg.sweep_interval_secs;
+    let ratelimit_cfg = cfg.ratelimit.clone();
 
     let state = Arc::new(AppState { manager, cfg });
 
@@ -331,7 +439,7 @@ async fn main() {
         });
     }
 
-    let app = build_router(state, cors);
+    let app = build_router(state, cors, &ratelimit_cfg);
 
     let listener = tokio::net::TcpListener::bind(&bind_address)
         .await
@@ -407,12 +515,26 @@ mod tests {
             provisioner: gl_core::config::ProvisionerConfig {
                 kind: ProvisionerKind::Hello,
             },
+            ratelimit: gl_core::config::RateLimitConfig::default(),
         }
     }
 
     /// Build a test router using the given registry (pass pre-seeded registries
     /// for tests that need existing goopies).
     fn make_router(domain: &str, registry: SqliteRegistry) -> Router {
+        make_router_with_rl(
+            domain,
+            registry,
+            gl_core::config::RateLimitConfig::default(),
+        )
+    }
+
+    /// Build a test router with explicit rate-limit settings.
+    fn make_router_with_rl(
+        domain: &str,
+        registry: SqliteRegistry,
+        rl: gl_core::config::RateLimitConfig,
+    ) -> Router {
         let cfg = test_cfg(domain);
         let manager: Arc<dyn ManagerService> = Arc::new(GoopyManager::new(
             GoopyManagerConfig {
@@ -431,7 +553,7 @@ mod tests {
             .allow_methods([Method::GET, Method::POST])
             .allow_headers(tower_http::cors::Any);
         let state = Arc::new(AppState { manager, cfg });
-        build_router(state, cors)
+        build_router(state, cors, &rl)
     }
 
     async fn body_json(body: Body) -> Value {
@@ -474,6 +596,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
                     .method("POST")
                     .uri("/goopies")
                     .body(Body::empty())
@@ -510,11 +633,12 @@ mod tests {
             .allow_methods([Method::GET, Method::POST])
             .allow_headers(tower_http::cors::Any);
         let state = Arc::new(AppState { manager, cfg });
-        let app = build_router(state, cors);
+        let app = build_router(state, cors, &gl_core::config::RateLimitConfig::default());
 
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
                     .method("POST")
                     .uri("/goopies")
                     .body(Body::empty())
@@ -539,6 +663,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
                     .uri("/goopies/happy-little-slug")
                     .body(Body::empty())
                     .unwrap(),
@@ -561,6 +686,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
                     .uri("/goopies/local-test-slug")
                     .body(Body::empty())
                     .unwrap(),
@@ -584,6 +710,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
                     .uri("/goopies/short-lived-slug")
                     .body(Body::empty())
                     .unwrap(),
@@ -652,6 +779,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
                     .uri("/goopies/no-such-slug")
                     .body(Body::empty())
                     .unwrap(),
@@ -676,6 +804,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
                     .uri("/goopies/alive-slug/alive")
                     .body(Body::empty())
                     .unwrap(),
@@ -696,6 +825,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
                     .uri("/goopies/expired-slug/alive")
                     .body(Body::empty())
                     .unwrap(),
@@ -716,6 +846,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
                     .uri("/goopies/spawning-slug/alive")
                     .body(Body::empty())
                     .unwrap(),
@@ -736,6 +867,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
                     .uri("/goopies/no-such/alive")
                     .body(Body::empty())
                     .unwrap(),
@@ -758,6 +890,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
                     .uri("/config")
                     .body(Body::empty())
                     .unwrap(),
@@ -785,6 +918,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
                     .method("GET")
                     .uri("/config")
                     .header("Origin", "https://example.com")
@@ -813,6 +947,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
                     .method("GET")
                     .uri("/config")
                     .header("Origin", "https://evil.example")
@@ -889,5 +1024,87 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "despawn timed out");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    // ── rate limiting ─────────────────────────────────────────────────────
+
+    /// A tight provision limit (burst = 1) should reject the second back-to-back
+    /// spawn from the same IP with 429 and a `Retry-After` header.
+    #[tokio::test]
+    async fn provision_rate_limit_returns_429_with_retry_after() {
+        let rl = gl_core::config::RateLimitConfig {
+            provision_burst: 1,
+            provision_period_secs: 60,
+            read_burst: 100,
+            read_period_secs: 1,
+        };
+        let app = make_router_with_rl(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+            rl,
+        );
+
+        let make_req = || {
+            Request::builder()
+                .method("POST")
+                .uri("/goopies")
+                .header("x-real-ip", "203.0.113.7")
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        // First request from this IP consumes the single burst token.
+        let first = app.clone().oneshot(make_req()).await.unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+
+        // Second request from the same IP is throttled.
+        let second = app.clone().oneshot(make_req()).await.unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            second.headers().contains_key("retry-after"),
+            "429 response must carry a Retry-After header",
+        );
+        assert_eq!(
+            second.headers().get("content-type").unwrap(),
+            "application/json",
+        );
+        let body = body_json(second.into_body()).await;
+        assert_eq!(body["code"], "too_many_requests");
+    }
+
+    /// The limit is keyed on the real client IP taken from `X-Real-IP`, so a
+    /// request from a different IP is not throttled by another IP's usage.
+    #[tokio::test]
+    async fn provision_rate_limit_is_per_real_client_ip() {
+        let rl = gl_core::config::RateLimitConfig {
+            provision_burst: 1,
+            provision_period_secs: 60,
+            read_burst: 100,
+            read_period_secs: 1,
+        };
+        let app = make_router_with_rl(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+            rl,
+        );
+
+        let make_req = |ip: &str| {
+            Request::builder()
+                .method("POST")
+                .uri("/goopies")
+                .header("x-real-ip", ip)
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        // Exhaust the burst for the first IP.
+        let first = app.clone().oneshot(make_req("198.51.100.1")).await.unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+        let throttled = app.clone().oneshot(make_req("198.51.100.1")).await.unwrap();
+        assert_eq!(throttled.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // A different IP still has its own fresh burst.
+        let other = app.clone().oneshot(make_req("198.51.100.2")).await.unwrap();
+        assert_eq!(other.status(), StatusCode::CREATED);
     }
 }
