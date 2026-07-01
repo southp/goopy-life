@@ -563,6 +563,47 @@ impl GoopyRegistry for SqliteRegistry {
         tracing::debug!(port = port, "released port");
         Ok(())
     }
+
+    #[tracing::instrument(skip(self))]
+    fn count_provisioned(&self) -> Result<u32, Error> {
+        let conn = self.pool.get().map_err(|e| Error::Registry {
+            context: "pool get",
+            source: e.into(),
+        })?;
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM goopies", [], |row| row.get(0))
+            .map_err(|e| Error::Registry {
+                context: "count provisioned",
+                source: e.into(),
+            })?;
+
+        Ok(count as u32)
+    }
+
+    #[tracing::instrument(skip(self))]
+    fn count_active(&self) -> Result<u32, Error> {
+        let conn = self.pool.get().map_err(|e| Error::Registry {
+            context: "pool get",
+            source: e.into(),
+        })?;
+
+        // Active = Spawning + Done (resident, consuming RAM).
+        // Failed and Despawning are excluded.
+        // When #96 (scale-to-zero) lands, add Suspended to the exclusion list.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM goopies WHERE status IN ('Spawning', 'Done')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| Error::Registry {
+                context: "count active",
+                source: e.into(),
+            })?;
+
+        Ok(count as u32)
+    }
 }
 
 #[cfg(test)]
@@ -626,6 +667,47 @@ mod tests {
         r.update_status("status-slug", Status::Done).unwrap();
         let loaded = r.load("status-slug").unwrap().unwrap();
         assert_eq!(loaded.status, Status::Done);
+    }
+
+    #[test]
+    fn count_provisioned_counts_all_rows_including_failed() {
+        let r = registry();
+        for (slug, status) in [
+            ("c-spawning", Status::Spawning),
+            ("c-done", Status::Done),
+            ("c-failed", Status::Failed),
+            ("c-despawning", Status::Despawning),
+        ] {
+            let mut gp = make_goopy(slug);
+            gp.status = status;
+            r.save(&gp).unwrap();
+        }
+        // All four rows count toward the disk-bound provisioned cap.
+        assert_eq!(r.count_provisioned().unwrap(), 4);
+    }
+
+    #[test]
+    fn count_active_counts_only_spawning_and_done() {
+        let r = registry();
+        for (slug, status) in [
+            ("a-spawning", Status::Spawning),
+            ("a-done", Status::Done),
+            ("a-failed", Status::Failed),
+            ("a-despawning", Status::Despawning),
+        ] {
+            let mut gp = make_goopy(slug);
+            gp.status = status;
+            r.save(&gp).unwrap();
+        }
+        // Only Spawning + Done are resident (RAM-consuming).
+        assert_eq!(r.count_active().unwrap(), 2);
+    }
+
+    #[test]
+    fn counts_are_zero_on_empty_registry() {
+        let r = registry();
+        assert_eq!(r.count_provisioned().unwrap(), 0);
+        assert_eq!(r.count_active().unwrap(), 0);
     }
 
     #[test]

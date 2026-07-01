@@ -17,4 +17,18 @@ pub trait GoopyRegistry {
 
     /// Release a previously-acquired port so it can be reused.
     fn release_port(&self, port: u32) -> Result<(), Error>;
+
+    /// Count all rows in the registry regardless of status.
+    ///
+    /// Used to enforce `max_provisioned` (disk-bound cap).
+    /// Includes `Failed` instances, which still hold a port/directory until
+    /// the sweep task reaps them.
+    fn count_provisioned(&self) -> Result<u32, Error>;
+
+    /// Count instances that are actively consuming RAM: `Spawning` and `Done`.
+    ///
+    /// Used to enforce `max_active` (RAM-bound cap).
+    /// `Failed` and `Despawning` instances are excluded.
+    /// Once #96 (scale-to-zero) lands, `Suspended` will also be excluded here.
+    fn count_active(&self) -> Result<u32, Error>;
 }

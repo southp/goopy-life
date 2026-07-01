@@ -105,21 +105,49 @@ struct ErrorResponse {
 // Error handling
 // ---------------------------------------------------------------------------
 
+/// How long (seconds) clients should wait before retrying a capacity-full
+/// spawn. Sent verbatim in the `Retry-After` header on 503 responses.
+const CAPACITY_RETRY_AFTER_SECS: &str = "30";
+
 enum AppError {
     NotFound(String),
     Invalid(String),
     ServiceUnavailable(String),
+    /// A cap was hit. Renders 503 with a `Retry-After` header and a body that
+    /// names which limit was exceeded (server-full vs. busy).
+    CapacityFull {
+        message: String,
+        code: String,
+    },
     Internal(String),
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        // CapacityFull needs an extra Retry-After header, so handle it up front.
+        if let AppError::CapacityFull { message, code } = self {
+            let mut response = (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: message,
+                    code,
+                }),
+            )
+                .into_response();
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                HeaderValue::from_static(CAPACITY_RETRY_AFTER_SECS),
+            );
+            return response;
+        }
+
         let (status, message, code) = match self {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg, "not_found"),
             AppError::Invalid(msg) => (StatusCode::BAD_REQUEST, msg, "invalid"),
             AppError::ServiceUnavailable(msg) => {
                 (StatusCode::SERVICE_UNAVAILABLE, msg, "service_unavailable")
             }
+            AppError::CapacityFull { .. } => unreachable!("handled above"),
             AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg, "internal_error"),
         };
         (
@@ -140,6 +168,24 @@ impl From<gl_core::Error> for AppError {
             gl_core::Error::Invalid => AppError::Invalid("invalid".into()),
             gl_core::Error::PortExhausted => {
                 AppError::ServiceUnavailable("port range exhausted".into())
+            }
+            gl_core::Error::CapacityFull { reason } => {
+                // Distinguish disk-bound (server full) from RAM-bound (busy).
+                let (message, code) = match reason {
+                    "max_provisioned" => (
+                        "server is full; no capacity for new instances".to_string(),
+                        "server_full".to_string(),
+                    ),
+                    "max_active" => (
+                        "server is busy; too many running instances".to_string(),
+                        "server_busy".to_string(),
+                    ),
+                    other => (
+                        format!("capacity full: {other}"),
+                        "capacity_full".to_string(),
+                    ),
+                };
+                AppError::CapacityFull { message, code }
             }
             other => AppError::Internal(other.to_string()),
         }
@@ -570,6 +616,8 @@ mod tests {
             cors_origin: "https://example.com".to_string(),
             bind_address: "127.0.0.1:0".to_string(),
             sweep_interval_secs: 86400,
+            max_active: 100,
+            max_provisioned: 100,
             registry: gl_core::config::RegistryConfig {
                 path: PathBuf::from(":memory:"),
             },
@@ -588,10 +636,12 @@ mod tests {
     /// Build a test router using the given registry (pass pre-seeded registries
     /// for tests that need existing goopies).
     fn make_router(domain: &str, registry: SqliteRegistry) -> Router {
-        make_router_with_rl(
+        make_router_with(
             domain,
             registry,
             gl_core::config::RateLimitConfig::default(),
+            100,
+            100,
         )
     }
 
@@ -601,6 +651,33 @@ mod tests {
         registry: SqliteRegistry,
         rl: gl_core::config::RateLimitConfig,
     ) -> Router {
+        make_router_with(domain, registry, rl, 100, 100)
+    }
+
+    /// Like [`make_router`] but with explicit capacity caps, for cap tests.
+    fn make_router_with_caps(
+        domain: &str,
+        registry: SqliteRegistry,
+        max_active: u32,
+        max_provisioned: u32,
+    ) -> Router {
+        make_router_with(
+            domain,
+            registry,
+            gl_core::config::RateLimitConfig::default(),
+            max_active,
+            max_provisioned,
+        )
+    }
+
+    /// Shared builder behind the three helpers above.
+    fn make_router_with(
+        domain: &str,
+        registry: SqliteRegistry,
+        rl: gl_core::config::RateLimitConfig,
+        max_active: u32,
+        max_provisioned: u32,
+    ) -> Router {
         let cfg = test_cfg(domain);
         let manager: Arc<dyn ManagerService> = Arc::new(GoopyManager::new(
             GoopyManagerConfig {
@@ -609,6 +686,8 @@ mod tests {
                 life_in_days: cfg.life_in_days,
                 port_range_start: cfg.port_range_start,
                 port_range_end: cfg.port_range_end,
+                max_active,
+                max_provisioned,
             },
             registry,
             NoopProvisioner,
@@ -691,6 +770,8 @@ mod tests {
                 life_in_days: cfg.life_in_days,
                 port_range_start: cfg.port_range_start,
                 port_range_end: cfg.port_range_end,
+                max_active: 100,
+                max_provisioned: 100,
             },
             SqliteRegistry::new(Path::new(":memory:")).unwrap(),
             NoopProvisioner,
@@ -716,6 +797,67 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = body_json(resp.into_body()).await;
         assert_eq!(body["code"], "service_unavailable");
+    }
+
+    #[tokio::test]
+    async fn spawn_returns_503_with_retry_after_when_provisioned_cap_hit() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        // One Failed goopy fills the (provisioned = 1) cap; Failed still counts.
+        seed_goopy(&registry, "full-server-slug", 7, 0, 9050, Status::Failed);
+        let app = make_router_with_caps("goopy.life", registry, 100, 1);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
+                    .method("POST")
+                    .uri("/goopies")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("30"),
+            "capacity-full 503 must carry a Retry-After header"
+        );
+        let body = body_json(resp.into_body()).await;
+        assert_eq!(body["code"], "server_full");
+    }
+
+    #[tokio::test]
+    async fn spawn_returns_503_server_busy_when_active_cap_hit() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        // One resident (Done) goopy fills the (active = 1) cap.
+        seed_goopy(&registry, "busy-server-slug", 7, 0, 9051, Status::Done);
+        let app = make_router_with_caps("goopy.life", registry, 1, 100);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
+                    .method("POST")
+                    .uri("/goopies")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("30")
+        );
+        let body = body_json(resp.into_body()).await;
+        assert_eq!(body["code"], "server_busy");
     }
 
     // ── get_goopy ─────────────────────────────────────────────────────────
@@ -1046,6 +1188,8 @@ mod tests {
                 life_in_days: cfg.life_in_days,
                 port_range_start: cfg.port_range_start,
                 port_range_end: cfg.port_range_end,
+                max_active: 100,
+                max_provisioned: 100,
             },
             SqliteRegistry::new(Path::new(":memory:")).unwrap(),
             NoopProvisioner,
@@ -1074,6 +1218,8 @@ mod tests {
                 life_in_days: cfg.life_in_days,
                 port_range_start: cfg.port_range_start,
                 port_range_end: cfg.port_range_end,
+                max_active: 100,
+                max_provisioned: 100,
             },
             registry,
             NoopProvisioner,

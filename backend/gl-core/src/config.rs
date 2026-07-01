@@ -118,6 +118,28 @@ pub struct Config {
     pub bind_address: String,
     #[serde(default = "default_sweep_interval_secs")]
     pub sweep_interval_secs: u64,
+    /// Maximum number of **resident** (running) instances allowed simultaneously.
+    ///
+    /// RAM-bound. Each Ghost process is roughly 150–250 MB. On a 2 GB droplet
+    /// minus OS/nginx/gl-serv overhead that leaves capacity for ~10 concurrent
+    /// instances (2 GB ÷ ~200 MB ≈ 10). Conservative default.
+    ///
+    /// Raise this cap once the machine is upgraded or profile data shows lower
+    /// per-instance RSS in practice.
+    #[serde(default = "default_max_active")]
+    pub max_active: u32,
+    /// Maximum number of instances that may **exist on disk** at any time.
+    ///
+    /// Disk-bound. On a 50 GB droplet with a 512 MB per-instance quota the
+    /// theoretical ceiling is ~90 instances (50 GB ÷ 512 MB). The beta default
+    /// is kept close to `max_active` because scale-to-zero (#96) has not landed
+    /// yet; once idle instances can suspend to ~0 RAM, raise this toward the
+    /// disk ceiling while `max_active` stays small.
+    ///
+    /// `Failed` instances count toward this cap (they still hold a port/dir
+    /// until the sweep task reaps them).
+    #[serde(default = "default_max_provisioned")]
+    pub max_provisioned: u32,
     pub registry: RegistryConfig,
     pub allocator: AllocatorConfig,
     pub provisioner: ProvisionerConfig,
@@ -127,6 +149,18 @@ pub struct Config {
 
 fn default_sweep_interval_secs() -> u64 {
     86400
+}
+
+/// Default RAM-bound resident-instance cap. See [`Config::max_active`].
+fn default_max_active() -> u32 {
+    10
+}
+
+/// Default disk-bound total-instance cap. See [`Config::max_provisioned`].
+///
+/// Kept equal to [`default_max_active`] until scale-to-zero (#96) ships.
+fn default_max_provisioned() -> u32 {
+    10
 }
 
 impl Config {
@@ -157,6 +191,8 @@ impl Config {
             life_in_days: self.life_in_days,
             port_range_start: self.port_range_start,
             port_range_end: self.port_range_end,
+            max_active: self.max_active,
+            max_provisioned: self.max_provisioned,
         }
     }
 

@@ -240,6 +240,11 @@ pub enum Error {
         field: &'static str,
         value: String,
     },
+    /// A capacity limit was hit; `reason` names which cap was exceeded
+    /// (e.g. `"max_provisioned"` or `"max_active"`).
+    CapacityFull {
+        reason: &'static str,
+    },
 }
 
 impl std::error::Error for Error {
@@ -278,6 +283,7 @@ impl std::fmt::Display for Error {
                     "corrupt row (slug={slug}, field={field}, value={value:?})"
                 )
             }
+            Error::CapacityFull { reason } => write!(f, "capacity full: {reason}"),
         }
     }
 }

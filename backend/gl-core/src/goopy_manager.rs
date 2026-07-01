@@ -14,6 +14,10 @@ pub struct GoopyManagerConfig {
     pub life_in_days: i32,
     pub port_range_start: u32,
     pub port_range_end: u32,
+    /// RAM-bound cap on resident (Spawning + Done) instances. See [`Config::max_active`].
+    pub max_active: u32,
+    /// Disk-bound cap on total provisioned instances. See [`Config::max_provisioned`].
+    pub max_provisioned: u32,
 }
 
 pub struct GoopyManager<
@@ -25,6 +29,8 @@ pub struct GoopyManager<
     pub goopy_life_in_days: i32,
     pub port_range_start: u32,
     pub port_range_end: u32,
+    pub max_active: u32,
+    pub max_provisioned: u32,
 
     registry: Arc<Registry>,
     provisioner: Arc<Provisioner>,
@@ -42,6 +48,8 @@ where
             goopy_life_in_days: config.life_in_days,
             port_range_start: config.port_range_start,
             port_range_end: config.port_range_end,
+            max_active: config.max_active,
+            max_provisioned: config.max_provisioned,
             registry: Arc::new(registry),
             provisioner: Arc::new(provisioner),
         }
@@ -51,6 +59,31 @@ where
     pub fn spawn(&self) -> Result<(String, u32), Error> {
         if self.goopy_life_in_days <= 0 {
             return Err(Error::Invalid);
+        }
+
+        // --- Capacity checks (before touching the port/row tables) ---
+        let provisioned = self.registry.count_provisioned()?;
+        if provisioned >= self.max_provisioned {
+            tracing::warn!(
+                provisioned,
+                max_provisioned = self.max_provisioned,
+                "spawn refused: max_provisioned cap reached"
+            );
+            return Err(Error::CapacityFull {
+                reason: "max_provisioned",
+            });
+        }
+
+        let active = self.registry.count_active()?;
+        if active >= self.max_active {
+            tracing::warn!(
+                active,
+                max_active = self.max_active,
+                "spawn refused: max_active cap reached"
+            );
+            return Err(Error::CapacityFull {
+                reason: "max_active",
+            });
         }
 
         const MAX_RETRIES: usize = 10;
@@ -321,6 +354,12 @@ mod tests {
             *self.release_calls.lock().unwrap() += 1;
             Ok(())
         }
+        fn count_provisioned(&self) -> Result<u32, Error> {
+            Ok(0)
+        }
+        fn count_active(&self) -> Result<u32, Error> {
+            Ok(0)
+        }
     }
 
     struct NoopProvisioner;
@@ -347,6 +386,8 @@ mod tests {
                 life_in_days: 7,
                 port_range_start: 9000,
                 port_range_end: 9100,
+                max_active: 100,
+                max_provisioned: 100,
             },
             registry,
             NoopProvisioner,
@@ -376,6 +417,8 @@ mod tests {
                     life_in_days: bad,
                     port_range_start: 9000,
                     port_range_end: 9100,
+                    max_active: 100,
+                    max_provisioned: 100,
                 },
                 SqliteRegistry::new(Path::new(":memory:")).unwrap(),
                 NoopProvisioner,
@@ -398,6 +441,8 @@ mod tests {
                 life_in_days: 7,
                 port_range_start: 8080,
                 port_range_end: 9080,
+                max_active: 100,
+                max_provisioned: 100,
             },
             CollideOnceRegistry {
                 save_calls: Mutex::new(0),
@@ -522,6 +567,12 @@ mod tests {
             fn release_port(&self, p: u32) -> Result<(), Error> {
                 self.0.release_port(p)
             }
+            fn count_provisioned(&self) -> Result<u32, Error> {
+                self.0.count_provisioned()
+            }
+            fn count_active(&self) -> Result<u32, Error> {
+                self.0.count_active()
+            }
         }
 
         let inner = SqliteRegistry::new(Path::new(":memory:")).unwrap();
@@ -536,6 +587,8 @@ mod tests {
                 life_in_days: 7,
                 port_range_start: 9000,
                 port_range_end: 9100,
+                max_active: 100,
+                max_provisioned: 100,
             },
             FailingUpdateRegistry(inner),
             NoopProvisioner,
@@ -688,6 +741,8 @@ mod tests {
                 life_in_days: 7,
                 port_range_start: 9050,
                 port_range_end: 9051,
+                max_active: 100,
+                max_provisioned: 100,
             },
             registry,
             DirCleaningProvisioner,
@@ -750,6 +805,8 @@ mod tests {
                 life_in_days: 7,
                 port_range_start: 9060,
                 port_range_end: 9062,
+                max_active: 100,
+                max_provisioned: 100,
             },
             registry,
             NoopProvisioner,
@@ -774,5 +831,112 @@ mod tests {
             gm.get("alive-one").unwrap().is_some(),
             "healthy Done instance should remain"
         );
+    }
+
+    // ── capacity caps ─────────────────────────────────────────────────────
+
+    /// Seed a row directly into the registry (bypassing spawn) so cap tests can
+    /// set up a precise mix of statuses without racing the spawn thread.
+    fn seed_row(registry: &SqliteRegistry, slug: &str, port: u32, status: Status) {
+        let goopy = make_goopy(slug, 0, port, status);
+        registry.save(&goopy).unwrap();
+        registry.acquire_port(slug, port, port + 1).unwrap();
+    }
+
+    fn manager_with_caps(
+        registry: SqliteRegistry,
+        max_active: u32,
+        max_provisioned: u32,
+    ) -> GoopyManager<SqliteRegistry, NoopProvisioner> {
+        GoopyManager::new(
+            GoopyManagerConfig {
+                base_dir: PathBuf::from("/tmp"),
+                domain: "test.example".into(),
+                life_in_days: 7,
+                port_range_start: 9000,
+                port_range_end: 9100,
+                max_active,
+                max_provisioned,
+            },
+            registry,
+            NoopProvisioner,
+        )
+    }
+
+    #[test]
+    fn spawn_refused_when_provisioned_cap_hit() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        // A single Failed row fills a provisioned=1 cap. Failed counts toward
+        // max_provisioned (holds a port/dir) but not toward max_active.
+        seed_row(&registry, "failed-one", 9010, Status::Failed);
+        // Generous active cap so only the provisioned cap can trip.
+        let gm = manager_with_caps(registry, 100, 1);
+
+        let err = gm.spawn().unwrap_err();
+        assert!(
+            matches!(err, Error::CapacityFull { reason } if reason == "max_provisioned"),
+            "expected CapacityFull(max_provisioned), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn spawn_refused_when_active_cap_hit() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        // A single Done row fills an active=1 cap; provisioned cap is generous.
+        seed_row(&registry, "done-one", 9020, Status::Done);
+        let gm = manager_with_caps(registry, 1, 100);
+
+        let err = gm.spawn().unwrap_err();
+        assert!(
+            matches!(err, Error::CapacityFull { reason } if reason == "max_active"),
+            "expected CapacityFull(max_active), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn failed_counts_toward_provisioned_not_active() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_row(&registry, "failed-a", 9030, Status::Failed);
+        seed_row(&registry, "failed-b", 9032, Status::Failed);
+        assert_eq!(registry.count_provisioned().unwrap(), 2);
+        assert_eq!(registry.count_active().unwrap(), 0);
+    }
+
+    #[test]
+    fn despawn_frees_an_active_and_provisioned_slot() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        // caps of 1/1: exactly one instance may exist and be resident.
+        let gm = manager_with_caps(registry, 1, 1);
+
+        // First spawn succeeds and (via NoopProvisioner) reaches Done.
+        let (slug, _) = gm.spawn().expect("first spawn should succeed");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let g = gm.get(&slug).unwrap().unwrap();
+            if g.status == Status::Done {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "spawn timed out");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Second spawn must be refused — both caps are full.
+        let err = gm.spawn().unwrap_err();
+        assert!(
+            matches!(err, Error::CapacityFull { .. }),
+            "expected CapacityFull, got {err:?}"
+        );
+
+        // Despawn the first instance to free the slot.
+        gm.despawn(slug.clone()).expect("despawn should succeed");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while gm.get(&slug).unwrap().is_some() {
+            assert!(std::time::Instant::now() < deadline, "despawn timed out");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Now spawning succeeds again.
+        gm.spawn()
+            .expect("spawn should succeed after freeing a slot");
     }
 }

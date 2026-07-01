@@ -29,6 +29,18 @@ bind_address = "127.0.0.1:3000"
 # How often to sweep expired instances (seconds; default 86400 = 24h)
 sweep_interval_secs = 86400
 
+# Maximum resident (running) instances — RAM-bound cap (default 10).
+# Each Ghost process is ~150–250 MB; a 2 GB droplet minus OS/nginx/gl-serv
+# overhead fits ~10 (2 GB ÷ ~200 MB). Raise after a machine upgrade.
+max_active = 10
+
+# Maximum instances that exist on disk — disk-bound cap (default 10).
+# 50 GB ÷ 512 MB per-instance quota ≈ 90 ceiling, but kept close to max_active
+# for beta because scale-to-zero (#96) hasn't landed. Raise toward the disk
+# ceiling once idle instances can suspend. Failed instances count toward this
+# cap until the sweep task reaps them.
+max_provisioned = 10
+
 [registry]
 # Registry data path
 path = "/opt/goopy-life/goopy.db"
