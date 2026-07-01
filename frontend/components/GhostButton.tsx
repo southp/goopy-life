@@ -106,8 +106,7 @@ export default function GhostButton() {
 				return;
 			}
 			if (data.status === "Done") {
-				const expired = Date.now() > new Date(data.expires_at).getTime();
-				if (expired) {
+				if (data.is_expired) {
 					localStorage.removeItem(LOCALSTORAGE_KEY);
 					setState({ kind: "expired", slug });
 				} else {
