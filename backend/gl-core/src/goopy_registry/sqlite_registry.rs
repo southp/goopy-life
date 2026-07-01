@@ -4,7 +4,7 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use super::GoopyRegistry;
 use crate::goopy::Goopy;
@@ -790,7 +790,10 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert_eq!(table_count, 0, "user tables should be absent before migration");
+            assert_eq!(
+                table_count, 0,
+                "user tables should be absent before migration"
+            );
 
             let ver: u32 = conn
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -808,8 +811,7 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(
-            ver,
-            LATEST_VERSION,
+            ver, LATEST_VERSION,
             "user_version should equal LATEST_VERSION after migration"
         );
 
