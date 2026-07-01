@@ -206,12 +206,16 @@ where
         self.registry.list()
     }
 
-    /// Despawn all expired goopy instances.
+    /// Despawn all expired goopy instances and reap all `Failed` instances.
     ///
-    /// An instance is considered expired when `now > created_at + life_in_days`.
+    /// **Expired instances** are those where `now > created_at + life_in_days`.
+    /// **Failed instances** are reaped regardless of age — a `Failed` status
+    /// means provisioning failed and it is safe to delete.  `Suspended`
+    /// instances are intentionally left alone; they hold valid data on disk and
+    /// are managed separately.
+    ///
     /// Instances with `Spawning` or `Despawning` status are skipped to avoid
-    /// interfering with in-progress operations; all other expired instances are
-    /// swept.
+    /// interfering with in-progress operations.
     ///
     /// Returns `(swept_count, per_despawn_errors)`. Errors from individual
     /// `despawn` calls are collected rather than aborting the sweep early.
@@ -230,14 +234,28 @@ where
                 continue;
             }
 
-            let expires_at = gp.created_at + Duration::days(gp.life_in_days as i64);
-            if now > expires_at {
+            let should_reap = if gp.status == Status::Failed {
                 tracing::info!(
                     slug = %gp.slug,
-                    status = %gp.status,
-                    expired_at = %expires_at,
-                    "sweeping expired instance"
+                    "sweeping Failed instance"
                 );
+                true
+            } else {
+                let expires_at = gp.created_at + Duration::days(gp.life_in_days as i64);
+                if now > expires_at {
+                    tracing::info!(
+                        slug = %gp.slug,
+                        status = %gp.status,
+                        expired_at = %expires_at,
+                        "sweeping expired instance"
+                    );
+                    true
+                } else {
+                    false
+                }
+            };
+
+            if should_reap {
                 match self.despawn(gp.slug) {
                     Ok(_) => swept += 1,
                     Err(e) => {
@@ -260,8 +278,9 @@ mod tests {
     use crate::goopy_provisioner::GoopyProvisioner;
     use crate::goopy_registry::GoopyRegistry;
     use crate::goopy_registry::sqlite_registry::SqliteRegistry;
+    use crate::storage_allocator::{PlainDirAllocator, StorageAllocator};
     use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     struct CollideOnceRegistry {
         save_calls: Mutex<u32>,
@@ -612,5 +631,148 @@ mod tests {
         let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
         let err = gm.despawn("no-such".to_string()).unwrap_err();
         assert!(matches!(err, Error::NotFound));
+    }
+
+    /// Provisioner that delegates storage cleanup to `PlainDirAllocator` so that
+    /// directory removal is exercised during deprovision.
+    struct DirCleaningProvisioner;
+
+    impl GoopyProvisioner for DirCleaningProvisioner {
+        fn provision(&self, _goopy: &Goopy) -> Result<(), Error> {
+            Ok(())
+        }
+
+        fn deprovision(&self, goopy: &Goopy) -> Result<(), Error> {
+            // Tolerant of a missing directory (matches PlainDirAllocator semantics).
+            PlainDirAllocator.release(&goopy.working_dir)
+        }
+
+        fn kind(&self) -> ProvisionerKind {
+            ProvisionerKind::Hello
+        }
+    }
+
+    /// sweep() must reap `Failed` instances: release their port and remove their
+    /// working directory.  The instance should be deleted from the registry and
+    /// its port should be returned to the pool so it can be re-acquired.
+    #[test]
+    fn sweep_reaps_failed_instances() {
+        let base_dir = tempfile::tempdir().expect("tempdir");
+        let working_dir = base_dir.path().join("failed-slug");
+
+        // Create the working directory to simulate a partial provision.
+        std::fs::create_dir_all(&working_dir).unwrap();
+        assert!(working_dir.exists(), "working dir must exist before sweep");
+
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+
+        // Seed a Failed instance directly, bypassing the spawn flow.
+        let failed = Goopy {
+            slug: "failed-slug".to_string(),
+            life_in_days: 7,
+            created_at: Utc::now(),
+            working_dir: working_dir.clone(),
+            port: 9050,
+            status: Status::Failed,
+            provisioner_kind: ProvisionerKind::Hello,
+            service_version: "0.1.0".to_string(),
+        };
+        registry.save(&failed).unwrap();
+        // Register the port so we can verify it gets released.
+        registry.acquire_port("failed-slug", 9050, 9051).unwrap();
+
+        let gm = GoopyManager::new(
+            GoopyManagerConfig {
+                base_dir: base_dir.path().to_path_buf(),
+                domain: "test.example".into(),
+                life_in_days: 7,
+                port_range_start: 9050,
+                port_range_end: 9051,
+            },
+            registry,
+            DirCleaningProvisioner,
+        );
+
+        let (reaped, errors) = gm.sweep().unwrap();
+        assert_eq!(reaped, 1, "one Failed instance should be reaped");
+        assert!(errors.is_empty(), "no sweep errors expected");
+
+        // Wait for the despawn background thread to finish.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while gm.get("failed-slug").unwrap().is_some() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "despawn timed out waiting for Failed instance to be removed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Instance must be gone from the registry.
+        assert!(
+            gm.get("failed-slug").unwrap().is_none(),
+            "Failed instance must be deleted from registry after sweep"
+        );
+
+        // Working directory must be removed.
+        assert!(
+            !working_dir.exists(),
+            "working directory must be removed after sweeping a Failed instance"
+        );
+
+        // Port 9050 must be released — acquiring it again should succeed.
+        let re_acquired = gm
+            .registry
+            .acquire_port("new-slug", 9050, 9051)
+            .expect("port 9050 should be available after the Failed instance is reaped");
+        assert_eq!(re_acquired, 9050, "the freed port should be re-acquirable");
+    }
+
+    /// sweep() must leave `Done` instances that have not yet expired untouched,
+    /// even if other instances are Failed and get reaped in the same pass.
+    #[test]
+    fn sweep_reaps_failed_but_leaves_healthy_instances() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+
+        // A Failed instance — should be reaped.
+        let failed = make_goopy("fail-one", 0, 9060, Status::Failed);
+        registry.save(&failed).unwrap();
+        registry.acquire_port("fail-one", 9060, 9061).unwrap();
+
+        // A healthy Done instance that has not expired — should survive.
+        let healthy = make_goopy("alive-one", 0, 9061, Status::Done);
+        registry.save(&healthy).unwrap();
+        registry.acquire_port("alive-one", 9061, 9062).unwrap();
+
+        let gm = GoopyManager::new(
+            GoopyManagerConfig {
+                base_dir: PathBuf::from("/tmp"),
+                domain: "test.example".into(),
+                life_in_days: 7,
+                port_range_start: 9060,
+                port_range_end: 9062,
+            },
+            registry,
+            NoopProvisioner,
+        );
+
+        let (reaped, errors) = gm.sweep().unwrap();
+        assert_eq!(reaped, 1, "only the Failed instance should be reaped");
+        assert!(errors.is_empty());
+
+        // Wait for despawn background thread.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while gm.get("fail-one").unwrap().is_some() {
+            assert!(std::time::Instant::now() < deadline, "despawn timed out");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(
+            gm.get("fail-one").unwrap().is_none(),
+            "Failed instance should be gone"
+        );
+        assert!(
+            gm.get("alive-one").unwrap().is_some(),
+            "healthy Done instance should remain"
+        );
     }
 }
