@@ -4,7 +4,7 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, TransactionBehavior, params};
 
 use super::GoopyRegistry;
 use crate::goopy::Goopy;
@@ -21,6 +21,10 @@ use crate::shared_types::*;
 /// step alone.  `IF NOT EXISTS` keeps it tolerant of databases created before
 /// versioning existed, whose `user_version` is still 0 even though the tables
 /// are already present.
+///
+/// Each step runs inside a transaction (see [`migrate`]), which constrains what
+/// its SQL may contain: no explicit `BEGIN`/`COMMIT`, and no statement SQLite
+/// forbids inside a transaction — notably `VACUUM` and `PRAGMA journal_mode`.
 const MIGRATIONS: &[(u32, &str)] = &[(
     1,
     "
@@ -49,6 +53,12 @@ const MIGRATIONS: &[(u32, &str)] = &[(
 /// cannot leave the two out of sync.
 const LATEST_VERSION: u32 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 
+/// Read the schema version SQLite records in the database header.
+fn read_user_version(conn: &Connection) -> Result<u32, Error> {
+    conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(Error::SchemaMigration)
+}
+
 /// Apply any pending schema migrations from `migrations` and bump
 /// `PRAGMA user_version` after each successful step.
 ///
@@ -60,18 +70,28 @@ const LATEST_VERSION: u32 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 /// so the runner can be tested against a multi-step chain independently of the
 /// production schema.
 ///
+/// # Atomicity
+///
+/// Each step's DDL and its `user_version` bump commit together in one
+/// transaction, so a step either lands completely or not at all.  Applying them
+/// as separate autocommit statements would let a crash in between leave the DB
+/// DDL-applied-but-not-version-bumped, and the next start would re-run that
+/// step — a hard failure for any step that is not idempotent.  Both SQLite DDL
+/// and `user_version` are transactional, so the rollback is complete.
+///
+/// This is why migration SQL must not open its own transaction; see
+/// [`MIGRATIONS`].
+///
 /// # Errors
 ///
 /// Returns [`Error::SchemaVersionTooNew`] when the DB's `user_version` exceeds
 /// the highest version in `migrations` — i.e. the database was written by a
 /// newer build than this one.  The check runs before any DDL is issued, so a
 /// database we cannot interpret is left untouched.
-fn migrate(conn: &Connection, migrations: &[(u32, &str)]) -> Result<(), Error> {
+fn migrate(conn: &mut Connection, migrations: &[(u32, &str)]) -> Result<(), Error> {
     let latest = migrations.last().map(|&(target, _)| target).unwrap_or(0);
 
-    let mut current: u32 = conn
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .map_err(Error::SchemaMigration)?;
+    let mut current = read_user_version(conn)?;
 
     if current > latest {
         return Err(Error::SchemaVersionTooNew {
@@ -85,13 +105,32 @@ fn migrate(conn: &Connection, migrations: &[(u32, &str)]) -> Result<(), Error> {
             continue;
         }
 
-        conn.execute_batch(sql).map_err(Error::SchemaMigration)?;
+        // `Immediate` takes the write lock up front rather than on the first
+        // write, so a concurrent opener waits out `busy_timeout` instead of
+        // failing a lock upgrade with SQLITE_BUSY.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(Error::SchemaMigration)?;
+
+        // `current` was read before the loop; re-read under the write lock in
+        // case another process (gl-serv and gl-cli share the same DB file)
+        // applied this step while we were waiting for it.
+        let actual = read_user_version(&tx)?;
+        if actual >= target {
+            // Dropping `tx` rolls back, but nothing was applied to roll back.
+            current = actual;
+            continue;
+        }
+
+        tx.execute_batch(sql).map_err(Error::SchemaMigration)?;
 
         // `PRAGMA user_version = <n>` does not accept bound parameters, so we
         // format the integer directly.  `target` is a `u32` literal so there
         // is no injection risk here.
-        conn.execute_batch(&format!("PRAGMA user_version = {target};"))
+        tx.execute_batch(&format!("PRAGMA user_version = {target};"))
             .map_err(Error::SchemaMigration)?;
+
+        tx.commit().map_err(Error::SchemaMigration)?;
 
         current = target;
     }
@@ -133,7 +172,7 @@ impl SqliteRegistry {
                 source: e.into(),
             })?;
 
-        let conn = pool.get().map_err(|e| Error::Registry {
+        let mut conn = pool.get().map_err(|e| Error::Registry {
             context: "pool get",
             source: e.into(),
         })?;
@@ -157,7 +196,7 @@ impl SqliteRegistry {
         // a fresh `:memory:` connection reports `user_version = 0`, so every
         // step is walked in order.  Special-casing in-memory here would break
         // as soon as a second migration step is added.
-        migrate(&conn, MIGRATIONS)?;
+        migrate(&mut conn, MIGRATIONS)?;
 
         tracing::debug!(
             db = %db_path.display(),
@@ -922,8 +961,7 @@ mod tests {
     ];
 
     fn user_version(conn: &Connection) -> u32 {
-        conn.query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap()
+        read_user_version(conn).unwrap()
     }
 
     fn table_exists(conn: &Connection, table: &str) -> bool {
@@ -963,13 +1001,13 @@ mod tests {
 
     /// Runs `case` against both a `:memory:` connection and a file-backed one,
     /// since the two paths differ in how SQLite persists `user_version`.
-    fn for_each_backing(case: impl Fn(&Connection)) {
-        let mem = Connection::open_in_memory().unwrap();
-        case(&mem);
+    fn for_each_backing(case: impl Fn(&mut Connection)) {
+        let mut mem = Connection::open_in_memory().unwrap();
+        case(&mut mem);
 
         let dir = tempfile::tempdir().unwrap();
-        let file = Connection::open(dir.path().join("runner_test.db")).unwrap();
-        case(&file);
+        let mut file = Connection::open(dir.path().join("runner_test.db")).unwrap();
+        case(&mut file);
     }
 
     #[test]
@@ -1060,6 +1098,93 @@ mod tests {
         for_each_backing(|conn| {
             migrate(conn, &[]).unwrap();
             assert_eq!(user_version(conn), 0);
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // Per-step atomicity
+    // -------------------------------------------------------------------------
+
+    /// A chain whose step 2 batch succeeds partway and then fails: `t2` is
+    /// created, then re-creating the existing `t1` errors.  Applied without a
+    /// transaction, this leaves `t2` behind; applied atomically, it leaves no
+    /// trace.
+    const FAILING_MIGRATIONS: &[(u32, &str)] = &[
+        (1, "CREATE TABLE t1 (a INTEGER);"),
+        (
+            2,
+            "CREATE TABLE t2 (b INTEGER); CREATE TABLE t1 (dup INTEGER);",
+        ),
+    ];
+
+    /// Pins the SQLite behaviour the runner's atomicity depends on: both DDL
+    /// and `user_version` are transactional, so a rollback undoes the pair.  If
+    /// this ever stopped holding, `migrate` would be silently non-atomic again.
+    #[test]
+    fn sqlite_rolls_back_user_version_and_ddl_together() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        conn.execute_batch(
+            "
+            BEGIN;
+            PRAGMA user_version = 7;
+            CREATE TABLE rolled_back (a INTEGER);
+            ROLLBACK;
+            ",
+        )
+        .unwrap();
+
+        assert_eq!(user_version(&conn), 0, "user_version must roll back");
+        assert!(!table_exists(&conn, "rolled_back"), "DDL must roll back");
+    }
+
+    #[test]
+    fn migrate_rolls_back_a_failed_step_entirely() {
+        for_each_backing(|conn| {
+            let err = migrate(conn, FAILING_MIGRATIONS).unwrap_err();
+            assert!(matches!(err, Error::SchemaMigration(_)), "{err:?}");
+
+            // Step 1 committed on its own, so the DB stays at version 1.
+            assert_eq!(
+                user_version(conn),
+                1,
+                "a failed step must not bump user_version"
+            );
+            assert!(table_exists(conn, "t1"), "step 1 should have committed");
+
+            // The discriminating assertion: `t2` was created by step 2's first
+            // statement before the second one failed.  Without a per-step
+            // transaction it survives, leaving the DB in a state no version
+            // number describes.
+            assert!(
+                !table_exists(conn, "t2"),
+                "a failed step must leave no partial DDL behind"
+            );
+        });
+    }
+
+    /// Stands in for a concurrent migrator: another process applied step 2 and
+    /// bumped `user_version` after this one had already read the old value.
+    /// The runner must notice when it takes the write lock and skip the step
+    /// rather than re-running its non-idempotent DDL.
+    #[test]
+    fn migrate_skips_a_step_applied_by_another_process() {
+        for_each_backing(|conn| {
+            seed_at_version(conn, 1);
+
+            // Simulate the other process having finished step 2.  Its DDL is
+            // applied here too, so re-running step 2 would fail with
+            // "table t2 already exists".
+            conn.execute_batch("CREATE TABLE t2 (b INTEGER); PRAGMA user_version = 2;")
+                .unwrap();
+
+            migrate(conn, TEST_MIGRATIONS).unwrap();
+
+            assert_eq!(user_version(conn), 3);
+            assert!(
+                column_exists(conn, "t1", "c"),
+                "step 3 should still have run"
+            );
         });
     }
 }
