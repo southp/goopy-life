@@ -42,7 +42,7 @@ where
     P: gl_core::goopy_provisioner::GoopyProvisioner + Send + Sync + 'static,
 {
     fn spawn(&self) -> Result<String, gl_core::Error> {
-        GoopyManager::spawn(self).map(|(slug, _, _)| slug)
+        GoopyManager::spawn(self).map(|(slug, _)| slug)
     }
 
     fn get(&self, slug: &str) -> Result<Option<gl_core::Goopy>, gl_core::Error> {

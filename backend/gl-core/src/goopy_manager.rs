@@ -4,10 +4,8 @@ use crate::goopy_registry::*;
 use crate::shared_types::*;
 
 use chrono::{Duration, Utc};
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::thread::{JoinHandle, ThreadId};
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub struct GoopyManagerConfig {
@@ -30,9 +28,6 @@ pub struct GoopyManager<
 
     registry: Arc<Registry>,
     provisioner: Arc<Provisioner>,
-
-    // TODO: This will also need to be cleaned up regularly
-    jobs: Mutex<HashMap<ThreadId, JoinHandle<()>>>,
 }
 
 impl<Registry, Provisioner> GoopyManager<Registry, Provisioner>
@@ -49,12 +44,11 @@ where
             port_range_end: config.port_range_end,
             registry: Arc::new(registry),
             provisioner: Arc::new(provisioner),
-            jobs: Mutex::new(HashMap::new()),
         }
     }
 
     #[tracing::instrument(skip(self))]
-    pub fn spawn(&self) -> Result<(String, u32, ThreadId), Error> {
+    pub fn spawn(&self) -> Result<(String, u32), Error> {
         if self.goopy_life_in_days <= 0 {
             return Err(Error::Invalid);
         }
@@ -123,7 +117,7 @@ where
         let provisioner = Arc::clone(&self.provisioner);
         let span = tracing::Span::current();
 
-        let handle = std::thread::spawn(move || {
+        std::thread::spawn(move || {
             let _guard = span.enter();
             match provisioner.provision(&goopy_clone) {
                 Ok(_) => {
@@ -148,14 +142,11 @@ where
             }
         });
 
-        let id = handle.thread().id();
-        self.jobs.lock().unwrap().insert(id, handle);
-
-        Ok((slug, port, id))
+        Ok((slug, port))
     }
 
     #[tracing::instrument(skip(self))]
-    pub fn despawn(&self, slug: String) -> Result<ThreadId, Error> {
+    pub fn despawn(&self, slug: String) -> Result<String, Error> {
         let Some(goopy) = self.get(&slug)? else {
             return Err(Error::NotFound);
         };
@@ -173,7 +164,8 @@ where
         let span = tracing::Span::current();
 
         let port = goopy.port;
-        let handle = std::thread::spawn(move || {
+        let slug_for_return = slug.clone();
+        std::thread::spawn(move || {
             let _guard = span.enter();
             let result = provisioner.deprovision(&goopy_clone);
             match result {
@@ -203,10 +195,7 @@ where
             }
         });
 
-        let id = handle.thread().id();
-        self.jobs.lock().unwrap().insert(id, handle);
-
-        Ok(id)
+        Ok(slug_for_return)
     }
 
     pub fn get(&self, slug: &str) -> Result<Option<Goopy>, Error> {
@@ -262,29 +251,6 @@ where
         tracing::info!(swept, "sweep complete");
         Ok((swept, errors))
     }
-
-    pub fn is_job_finished(&self, job_id: &ThreadId) -> bool {
-        self.jobs
-            .lock()
-            .unwrap()
-            .get(job_id)
-            .expect("job_id not tracked; callers must only pass IDs returned by spawn()")
-            .is_finished()
-    }
-}
-
-impl<Registry, Provisioner> Drop for GoopyManager<Registry, Provisioner>
-where
-    Registry: GoopyRegistry + Send + Sync + 'static,
-    Provisioner: GoopyProvisioner + Send + Sync + 'static,
-{
-    fn drop(&mut self) {
-        for (_, handle) in self.jobs.lock().unwrap().drain() {
-            if let Err(e) = handle.join() {
-                tracing::error!("worker thread panicked: {:?}", e);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -295,6 +261,7 @@ mod tests {
     use crate::goopy_registry::GoopyRegistry;
     use crate::goopy_registry::sqlite_registry::SqliteRegistry;
     use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
 
     struct CollideOnceRegistry {
         save_calls: Mutex<u32>,
@@ -566,7 +533,7 @@ mod tests {
     #[test]
     fn spawn_returns_slug_and_port() {
         let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
-        let (slug, port, _) = gm.spawn().expect("spawn should succeed");
+        let (slug, port) = gm.spawn().expect("spawn should succeed");
         assert!(!slug.is_empty(), "slug should be non-empty");
         assert!(
             (9000..9100).contains(&port),
@@ -577,7 +544,7 @@ mod tests {
     #[test]
     fn get_finds_goopy_after_spawn() {
         let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
-        let (slug, _, _) = gm.spawn().unwrap();
+        let (slug, _) = gm.spawn().unwrap();
         let g = gm.get(&slug).unwrap().expect("should find goopy");
         // NoopProvisioner completes synchronously, so status may be Done already.
         assert!(
@@ -596,8 +563,8 @@ mod tests {
     #[test]
     fn list_returns_spawned_instances() {
         let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
-        let (slug1, _, _) = gm.spawn().unwrap();
-        let (slug2, _, _) = gm.spawn().unwrap();
+        let (slug1, _) = gm.spawn().unwrap();
+        let (slug2, _) = gm.spawn().unwrap();
         let goopies = gm.list().unwrap();
         let slugs: Vec<&str> = goopies.iter().map(|g| g.slug.as_str()).collect();
         assert!(slugs.contains(&slug1.as_str()), "should contain slug1");
@@ -610,23 +577,17 @@ mod tests {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         let gm = make_test_manager(registry);
 
-        let (slug, _, thread_id) = gm.spawn().unwrap();
+        let (slug, _) = gm.spawn().unwrap();
 
-        // Wait for the spawn background thread to finish (NoopProvisioner is instant)
+        // Wait for the spawn background thread to finish by polling registry status.
+        // NoopProvisioner is instant so this usually completes on the first check.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             let g = gm.get(&slug).unwrap().unwrap();
-            if g.status == Status::Done {
+            if g.status == Status::Done || g.status == Status::Failed {
                 break;
             }
             assert!(std::time::Instant::now() < deadline, "spawn timed out");
-            let should_break = {
-                let jobs = gm.jobs.lock().unwrap();
-                jobs.get(&thread_id).is_none_or(|h| h.is_finished())
-            };
-            if should_break {
-                break;
-            }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 

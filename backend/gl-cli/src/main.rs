@@ -158,7 +158,10 @@ fn main() {
             let gm = GoopyManager::new(cfg.build_manager_config(), registry, provisioner);
             let mp = MultiProgress::new();
             let mut spinners = vec![];
-            let mut jobs = vec![];
+            // Slugs whose background jobs we must wait for before exiting.
+            // For spawn: wait until status leaves Spawning (→ Done or Failed).
+            // For despawn: wait until the row is gone (→ deleted) or status is Failed.
+            let mut pending_slugs: Vec<String> = vec![];
 
             match cmd {
                 Cmd::Spawn { count } => {
@@ -168,9 +171,9 @@ fn main() {
                         spinner.enable_steady_tick(Duration::from_millis(100));
 
                         match gm.spawn() {
-                            Ok((slug, port, job_id)) => {
+                            Ok((slug, port)) => {
                                 spinner.set_message(format!("Spawning {slug} (port {port}) ..."));
-                                jobs.push(job_id);
+                                pending_slugs.push(slug);
                             }
                             Err(e) => {
                                 tracing::error!(error = ?e, "spawn failed");
@@ -187,7 +190,7 @@ fn main() {
                         spinner.enable_steady_tick(Duration::from_millis(100));
 
                         match gm.despawn(s.to_string()) {
-                            Ok(job_id) => jobs.push(job_id),
+                            Ok(slug) => pending_slugs.push(slug),
                             Err(e) => {
                                 tracing::error!(error = ?e, "despawn failed");
                                 std::process::exit(1);
@@ -222,11 +225,18 @@ fn main() {
                 }
             }
 
-            while jobs
-                .iter()
-                .map(|job_id| gm.is_job_finished(job_id))
-                .any(|s| !s)
-            {
+            // Poll the registry until every background job has reached a terminal
+            // state.  A slug is considered finished when its status is no longer
+            // Spawning or Despawning (i.e. it transitioned to Done/Failed, or the
+            // row was deleted by a completed despawn).
+            while pending_slugs.iter().any(|slug| {
+                match gm.get(slug) {
+                    Ok(Some(g)) => g.status == Status::Spawning || g.status == Status::Despawning,
+                    // Row gone (successful despawn) or error reading — either way
+                    // no longer in-progress.
+                    Ok(None) | Err(_) => false,
+                }
+            }) {
                 std::thread::sleep(Duration::from_secs(1));
             }
 
