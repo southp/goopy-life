@@ -80,6 +80,7 @@ struct GoopyResponse {
     url: String,
     created_at: String,
     expires_at: String,
+    is_expired: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -177,6 +178,7 @@ async fn get_goopy(
     let goopy = goopy.ok_or_else(|| AppError::NotFound("not found".into()))?;
 
     let expires_at = goopy.created_at + Duration::days(goopy.life_in_days as i64);
+    let is_expired = Utc::now() >= expires_at;
 
     let url = if domain == "localhost" {
         format!("http://localhost:{}", goopy.port)
@@ -190,6 +192,7 @@ async fn get_goopy(
         url,
         created_at: goopy.created_at.to_rfc3339(),
         expires_at: expires_at.to_rfc3339(),
+        is_expired,
     }))
 }
 
@@ -593,6 +596,50 @@ mod tests {
 
         let expected_expires_at = (goopy.created_at + Duration::days(3)).to_rfc3339();
         assert_eq!(body["expires_at"], expected_expires_at);
+    }
+
+    #[tokio::test]
+    async fn get_goopy_is_expired_false_for_live_instance() {
+        // Created now with a 7-day life: is_expired must be false.
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_goopy(&registry, "live-slug", 7, 0, 9010, Status::Done);
+        let app = make_router("goopy.life", registry);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/goopies/live-slug")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp.into_body()).await;
+        assert_eq!(body["is_expired"], false);
+    }
+
+    #[tokio::test]
+    async fn get_goopy_is_expired_true_for_expired_instance() {
+        // Created 10 days ago with a 7-day life: is_expired must be true.
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_goopy(&registry, "old-slug", 7, 10, 9011, Status::Done);
+        let app = make_router("goopy.life", registry);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/goopies/old-slug")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp.into_body()).await;
+        assert_eq!(body["is_expired"], true);
     }
 
     #[tokio::test]

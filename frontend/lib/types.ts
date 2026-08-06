@@ -14,6 +14,7 @@ export interface GoopyResponse {
 	url: string;
 	created_at: string;
 	expires_at: string;
+	is_expired: boolean;
 }
 
 export interface ApiError {
