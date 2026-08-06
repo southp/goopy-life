@@ -4,11 +4,139 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::params;
+use rusqlite::{Connection, TransactionBehavior, params};
 
 use super::GoopyRegistry;
 use crate::goopy::Goopy;
 use crate::shared_types::*;
+
+/// Ordered list of migration steps.
+///
+/// Each entry is `(target_version, sql)`.  The runner applies every step whose
+/// `target_version` is greater than the current `user_version`, then sets
+/// `user_version` to `target_version` after each successful step.
+///
+/// Version 1 establishes the current schema as the baseline: it creates both
+/// tables outright, so a fresh database is fully initialised by running this
+/// step alone.  `IF NOT EXISTS` keeps it tolerant of databases created before
+/// versioning existed, whose `user_version` is still 0 even though the tables
+/// are already present.
+///
+/// Each step runs inside a transaction (see [`migrate`]), which constrains what
+/// its SQL may contain: no explicit `BEGIN`/`COMMIT`, and no statement SQLite
+/// forbids inside a transaction — notably `VACUUM` and `PRAGMA journal_mode`.
+const MIGRATIONS: &[(u32, &str)] = &[(
+    1,
+    "
+    CREATE TABLE IF NOT EXISTS goopies (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        slug             TEXT    UNIQUE NOT NULL,
+        life_in_days     INTEGER NOT NULL,
+        created_at       TEXT    NOT NULL,
+        status           TEXT    NOT NULL,
+        working_dir      TEXT    NOT NULL,
+        port             INTEGER NOT NULL,
+        provisioner_kind TEXT    NOT NULL,
+        service_version  TEXT    NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS allocated_ports (
+        port INTEGER PRIMARY KEY,
+        slug TEXT    NOT NULL UNIQUE
+    );
+    ",
+)];
+
+/// The latest schema version understood by this build.
+///
+/// Derived from [`MIGRATIONS`] rather than hand-maintained, so adding a step
+/// cannot leave the two out of sync.
+const LATEST_VERSION: u32 = MIGRATIONS[MIGRATIONS.len() - 1].0;
+
+/// Read the schema version SQLite records in the database header.
+fn read_user_version(conn: &Connection) -> Result<u32, Error> {
+    conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(Error::SchemaMigration)
+}
+
+/// Apply any pending schema migrations from `migrations` and bump
+/// `PRAGMA user_version` after each successful step.
+///
+/// Steps are applied in order; each step is skipped when the DB's current
+/// `user_version` is already at or above the step's target version.  The
+/// function is idempotent: calling it on an up-to-date database is a no-op.
+///
+/// `migrations` is a parameter rather than a direct reference to [`MIGRATIONS`]
+/// so the runner can be tested against a multi-step chain independently of the
+/// production schema.
+///
+/// # Atomicity
+///
+/// Each step's DDL and its `user_version` bump commit together in one
+/// transaction, so a step either lands completely or not at all.  Applying them
+/// as separate autocommit statements would let a crash in between leave the DB
+/// DDL-applied-but-not-version-bumped, and the next start would re-run that
+/// step — a hard failure for any step that is not idempotent.  Both SQLite DDL
+/// and `user_version` are transactional, so the rollback is complete.
+///
+/// This is why migration SQL must not open its own transaction; see
+/// [`MIGRATIONS`].
+///
+/// # Errors
+///
+/// Returns [`Error::SchemaVersionTooNew`] when the DB's `user_version` exceeds
+/// the highest version in `migrations` — i.e. the database was written by a
+/// newer build than this one.  The check runs before any DDL is issued, so a
+/// database we cannot interpret is left untouched.
+fn migrate(conn: &mut Connection, migrations: &[(u32, &str)]) -> Result<(), Error> {
+    let latest = migrations.last().map(|&(target, _)| target).unwrap_or(0);
+
+    let mut current = read_user_version(conn)?;
+
+    if current > latest {
+        return Err(Error::SchemaVersionTooNew {
+            found: current,
+            supported: latest,
+        });
+    }
+
+    for &(target, sql) in migrations {
+        if current >= target {
+            continue;
+        }
+
+        // `Immediate` takes the write lock up front rather than on the first
+        // write, so a concurrent opener waits out `busy_timeout` instead of
+        // failing a lock upgrade with SQLITE_BUSY.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(Error::SchemaMigration)?;
+
+        // `current` was read before the loop; re-read under the write lock in
+        // case another process (gl-serv and gl-cli share the same DB file)
+        // applied this step while we were waiting for it.
+        let actual = read_user_version(&tx)?;
+        if actual >= target {
+            // Dropping `tx` rolls back, but nothing was applied to roll back.
+            current = actual;
+            continue;
+        }
+
+        tx.execute_batch(sql).map_err(Error::SchemaMigration)?;
+
+        // `PRAGMA user_version = <n>` does not accept bound parameters, so we
+        // format the integer directly.  `target` is a `u32` literal so there
+        // is no injection risk here.
+        tx.execute_batch(&format!("PRAGMA user_version = {target};"))
+            .map_err(Error::SchemaMigration)?;
+
+        tx.commit().map_err(Error::SchemaMigration)?;
+
+        current = target;
+    }
+
+    Ok(())
+}
 
 /// SQLite-backed implementation of [`GoopyRegistry`].
 ///
@@ -44,7 +172,7 @@ impl SqliteRegistry {
                 source: e.into(),
             })?;
 
-        let conn = pool.get().map_err(|e| Error::Registry {
+        let mut conn = pool.get().map_err(|e| Error::Registry {
             context: "pool get",
             source: e.into(),
         })?;
@@ -64,27 +192,17 @@ impl SqliteRegistry {
             }
         }
 
-        conn.execute_batch(
-            "
-            CREATE TABLE IF NOT EXISTS goopies (
-                id               INTEGER PRIMARY KEY AUTOINCREMENT,
-                slug             TEXT    UNIQUE NOT NULL,
-                life_in_days     INTEGER NOT NULL,
-                created_at       TEXT    NOT NULL,
-                status           TEXT    NOT NULL,
-                working_dir      TEXT    NOT NULL,
-                port             INTEGER NOT NULL,
-                provisioner_kind TEXT    NOT NULL,
-                service_version  TEXT    NOT NULL
-            );
+        // Both file-backed and in-memory databases go through the same runner:
+        // a fresh `:memory:` connection reports `user_version = 0`, so every
+        // step is walked in order.  Special-casing in-memory here would break
+        // as soon as a second migration step is added.
+        migrate(&mut conn, MIGRATIONS)?;
 
-            CREATE TABLE IF NOT EXISTS allocated_ports (
-                port INTEGER PRIMARY KEY,
-                slug TEXT    NOT NULL UNIQUE
-            );
-            ",
-        )
-        .map_err(Error::SchemaMigration)?;
+        tracing::debug!(
+            db = %db_path.display(),
+            schema_version = LATEST_VERSION,
+            "registry schema ready"
+        );
 
         Ok(Self { pool })
     }
@@ -687,5 +805,386 @@ mod tests {
             matches!(err, Error::RowParse { field, .. } if field == "provisioner_kind"),
             "{err:?}"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Migration harness tests
+    // -------------------------------------------------------------------------
+
+    /// Simulates a pre-migration database by opening a file-backed DB,
+    /// dropping the tables to reproduce an "old" schema shape, resetting
+    /// `user_version` to 0, then calling `SqliteRegistry::new` again.
+    /// Asserts that the migration runs, the tables are (re-)created, and
+    /// `user_version` is bumped to the latest version.
+    #[test]
+    fn migration_runs_on_outdated_file_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("migrate_test.db");
+
+        // First open: creates a fully-initialised DB at LATEST_VERSION.
+        SqliteRegistry::new(&db_path).unwrap();
+
+        // Simulate an "old" database: drop both tables and reset user_version.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "
+                DROP TABLE IF EXISTS goopies;
+                DROP TABLE IF EXISTS allocated_ports;
+                PRAGMA user_version = 0;
+                ",
+            )
+            .unwrap();
+
+            // Confirm the user tables are gone before we open again.
+            // Note: sqlite_sequence (created by AUTOINCREMENT) may still be
+            // present — we only check for the two user-defined tables.
+            let table_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('goopies', 'allocated_ports')",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                table_count, 0,
+                "user tables should be absent before migration"
+            );
+
+            assert_eq!(
+                user_version(&conn),
+                0,
+                "user_version should be 0 before migration"
+            );
+        }
+
+        // Second open: triggers migrate() and should re-create the tables.
+        SqliteRegistry::new(&db_path).unwrap();
+
+        // Verify the outcome directly via a raw connection.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+
+        assert_eq!(
+            user_version(&conn),
+            LATEST_VERSION,
+            "user_version should equal LATEST_VERSION after migration"
+        );
+
+        let table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('goopies', 'allocated_ports')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count, 2, "both tables should exist after migration");
+    }
+
+    /// Asserts that opening an already up-to-date file-backed DB a second time
+    /// is a no-op: `new()` succeeds without error and `user_version` stays at
+    /// the latest value.
+    #[test]
+    fn migration_is_noop_on_up_to_date_file_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("noop_test.db");
+
+        // First open: initialise to latest version.
+        SqliteRegistry::new(&db_path).unwrap();
+
+        // Capture the version before the second open.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            assert_eq!(user_version(&conn), LATEST_VERSION);
+        }
+
+        // Second open: must succeed without error.
+        SqliteRegistry::new(&db_path).unwrap();
+
+        // Version must be unchanged.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        assert_eq!(
+            user_version(&conn),
+            LATEST_VERSION,
+            "user_version must be unchanged on a no-op open"
+        );
+    }
+
+    /// Regression guard: `:memory:` databases must go through the same
+    /// migration runner as file-backed ones, not a special-cased shortcut that
+    /// applies only one step's SQL.
+    #[test]
+    fn new_on_memory_db_initialises_to_latest_version() {
+        let r = registry();
+        let conn = r.pool.get().unwrap();
+
+        assert_eq!(
+            user_version(&conn),
+            LATEST_VERSION,
+            "an in-memory DB must be stamped at LATEST_VERSION"
+        );
+
+        let table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('goopies', 'allocated_ports')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            table_count, 2,
+            "both tables should exist in an in-memory DB"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Migration runner tests
+    //
+    // These drive `migrate` against a synthetic multi-step chain rather than
+    // the real `MIGRATIONS`, so the step-by-step behaviour is covered even
+    // while production sits at a single version.
+    // -------------------------------------------------------------------------
+
+    /// A three-step chain used to exercise the runner.
+    ///
+    /// Two properties make it a meaningful test fixture:
+    ///
+    /// * Step 3 is an `ALTER TABLE` on the table created by step 1, so applying
+    ///   the steps out of order — or skipping earlier ones — fails loudly with
+    ///   `no such table` instead of passing silently.
+    /// * No step uses `IF NOT EXISTS`, so re-applying an already-applied step
+    ///   errors.  A no-op run therefore has to genuinely skip, not just be
+    ///   idempotent by luck.
+    const TEST_MIGRATIONS: &[(u32, &str)] = &[
+        (1, "CREATE TABLE t1 (a INTEGER);"),
+        (2, "CREATE TABLE t2 (b INTEGER);"),
+        (3, "ALTER TABLE t1 ADD COLUMN c TEXT;"),
+    ];
+
+    fn user_version(conn: &Connection) -> u32 {
+        read_user_version(conn).unwrap()
+    }
+
+    fn table_exists(conn: &Connection, table: &str) -> bool {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                params![table],
+                |row| row.get(0),
+            )
+            .unwrap();
+        n > 0
+    }
+
+    fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                params![table, column],
+                |row| row.get(0),
+            )
+            .unwrap();
+        n > 0
+    }
+
+    /// Apply the SQL of every step up to and including `through`, then stamp
+    /// `user_version`, to simulate a DB left behind by an older build.
+    fn seed_at_version(conn: &Connection, through: u32) {
+        for &(target, sql) in TEST_MIGRATIONS {
+            if target > through {
+                break;
+            }
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute_batch(&format!("PRAGMA user_version = {through};"))
+            .unwrap();
+    }
+
+    /// Runs `case` against both a `:memory:` connection and a file-backed one,
+    /// since the two paths differ in how SQLite persists `user_version`.
+    fn for_each_backing(case: impl Fn(&mut Connection)) {
+        let mut mem = Connection::open_in_memory().unwrap();
+        case(&mut mem);
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut file = Connection::open(dir.path().join("runner_test.db")).unwrap();
+        case(&mut file);
+    }
+
+    #[test]
+    fn migrate_on_fresh_db_applies_every_step() {
+        for_each_backing(|conn| {
+            assert_eq!(user_version(conn), 0, "a fresh DB starts at version 0");
+
+            migrate(conn, TEST_MIGRATIONS).unwrap();
+
+            assert_eq!(user_version(conn), 3);
+            assert!(table_exists(conn, "t1"));
+            assert!(table_exists(conn, "t2"));
+            assert!(
+                column_exists(conn, "t1", "c"),
+                "step 3 must have run after step 1"
+            );
+        });
+    }
+
+    #[test]
+    fn migrate_from_v1_applies_only_remaining_steps() {
+        for_each_backing(|conn| {
+            seed_at_version(conn, 1);
+
+            migrate(conn, TEST_MIGRATIONS).unwrap();
+
+            assert_eq!(user_version(conn), 3);
+            assert!(table_exists(conn, "t2"), "step 2 should have run");
+            assert!(column_exists(conn, "t1", "c"), "step 3 should have run");
+        });
+    }
+
+    #[test]
+    fn migrate_from_v2_applies_only_remaining_steps() {
+        for_each_backing(|conn| {
+            seed_at_version(conn, 2);
+
+            // Step 1 and 2 are non-idempotent DDL, so this only succeeds if
+            // both are skipped.
+            migrate(conn, TEST_MIGRATIONS).unwrap();
+
+            assert_eq!(user_version(conn), 3);
+            assert!(column_exists(conn, "t1", "c"), "step 3 should have run");
+        });
+    }
+
+    #[test]
+    fn migrate_on_up_to_date_db_is_a_noop() {
+        for_each_backing(|conn| {
+            seed_at_version(conn, 3);
+
+            // Every step is non-idempotent, so re-running any of them would
+            // surface as an error here.
+            migrate(conn, TEST_MIGRATIONS).unwrap();
+
+            assert_eq!(user_version(conn), 3);
+        });
+    }
+
+    #[test]
+    fn migrate_rejects_db_stamped_newer_than_this_build() {
+        for_each_backing(|conn| {
+            conn.execute_batch("PRAGMA user_version = 99;").unwrap();
+
+            let err = migrate(conn, TEST_MIGRATIONS).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    Error::SchemaVersionTooNew {
+                        found: 99,
+                        supported: 3
+                    }
+                ),
+                "{err:?}"
+            );
+
+            // The DB must be left untouched: no DDL, no version rewrite.
+            assert!(
+                !table_exists(conn, "t1"),
+                "no step should have been applied"
+            );
+            assert_eq!(user_version(conn), 99, "user_version must not be rewritten");
+        });
+    }
+
+    #[test]
+    fn migrate_with_empty_migration_list_is_a_noop() {
+        for_each_backing(|conn| {
+            migrate(conn, &[]).unwrap();
+            assert_eq!(user_version(conn), 0);
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // Per-step atomicity
+    // -------------------------------------------------------------------------
+
+    /// A chain whose step 2 batch succeeds partway and then fails: `t2` is
+    /// created, then re-creating the existing `t1` errors.  Applied without a
+    /// transaction, this leaves `t2` behind; applied atomically, it leaves no
+    /// trace.
+    const FAILING_MIGRATIONS: &[(u32, &str)] = &[
+        (1, "CREATE TABLE t1 (a INTEGER);"),
+        (
+            2,
+            "CREATE TABLE t2 (b INTEGER); CREATE TABLE t1 (dup INTEGER);",
+        ),
+    ];
+
+    /// Pins the SQLite behaviour the runner's atomicity depends on: both DDL
+    /// and `user_version` are transactional, so a rollback undoes the pair.  If
+    /// this ever stopped holding, `migrate` would be silently non-atomic again.
+    #[test]
+    fn sqlite_rolls_back_user_version_and_ddl_together() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        conn.execute_batch(
+            "
+            BEGIN;
+            PRAGMA user_version = 7;
+            CREATE TABLE rolled_back (a INTEGER);
+            ROLLBACK;
+            ",
+        )
+        .unwrap();
+
+        assert_eq!(user_version(&conn), 0, "user_version must roll back");
+        assert!(!table_exists(&conn, "rolled_back"), "DDL must roll back");
+    }
+
+    #[test]
+    fn migrate_rolls_back_a_failed_step_entirely() {
+        for_each_backing(|conn| {
+            let err = migrate(conn, FAILING_MIGRATIONS).unwrap_err();
+            assert!(matches!(err, Error::SchemaMigration(_)), "{err:?}");
+
+            // Step 1 committed on its own, so the DB stays at version 1.
+            assert_eq!(
+                user_version(conn),
+                1,
+                "a failed step must not bump user_version"
+            );
+            assert!(table_exists(conn, "t1"), "step 1 should have committed");
+
+            // The discriminating assertion: `t2` was created by step 2's first
+            // statement before the second one failed.  Without a per-step
+            // transaction it survives, leaving the DB in a state no version
+            // number describes.
+            assert!(
+                !table_exists(conn, "t2"),
+                "a failed step must leave no partial DDL behind"
+            );
+        });
+    }
+
+    /// Stands in for a concurrent migrator: another process applied step 2 and
+    /// bumped `user_version` after this one had already read the old value.
+    /// The runner must notice when it takes the write lock and skip the step
+    /// rather than re-running its non-idempotent DDL.
+    #[test]
+    fn migrate_skips_a_step_applied_by_another_process() {
+        for_each_backing(|conn| {
+            seed_at_version(conn, 1);
+
+            // Simulate the other process having finished step 2.  Its DDL is
+            // applied here too, so re-running step 2 would fail with
+            // "table t2 already exists".
+            conn.execute_batch("CREATE TABLE t2 (b INTEGER); PRAGMA user_version = 2;")
+                .unwrap();
+
+            migrate(conn, TEST_MIGRATIONS).unwrap();
+
+            assert_eq!(user_version(conn), 3);
+            assert!(
+                column_exists(conn, "t1", "c"),
+                "step 3 should still have run"
+            );
+        });
     }
 }

@@ -220,6 +220,13 @@ pub enum Error {
         source: RegistrySource,
     },
     SchemaMigration(rusqlite::Error),
+    /// The database's `PRAGMA user_version` is newer than the schema this build
+    /// understands — e.g. after a binary downgrade.  Refusing to proceed is
+    /// safer than operating on a schema we cannot interpret.
+    SchemaVersionTooNew {
+        found: u32,
+        supported: u32,
+    },
     PortExhausted,
     /// A subprocess (zfs, ghost, systemctl, etc.) ran but returned a non-zero
     /// exit status.  The string contains the command name and stderr.
@@ -256,6 +263,12 @@ impl std::fmt::Display for Error {
             Error::Io(e) => write!(f, "io error: {}", e),
             Error::Registry { context, source } => write!(f, "registry error: {context}: {source}"),
             Error::SchemaMigration(e) => write!(f, "schema migration error: {}", e),
+            Error::SchemaVersionTooNew { found, supported } => write!(
+                f,
+                "database schema version {found} is newer than the highest version \
+                 this build supports ({supported}); upgrade the binary or restore \
+                 a compatible database"
+            ),
             Error::PortExhausted => write!(f, "port range exhausted"),
             Error::Subprocess(msg) => write!(f, "subprocess error: {}", msg),
             Error::SlugExhausted => write!(f, "slug generation exhausted"),
