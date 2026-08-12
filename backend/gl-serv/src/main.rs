@@ -306,6 +306,12 @@ fn rate_limit_error_handler(err: tower_governor::GovernorError) -> Response<Body
 /// Both use `SmartIpKeyExtractor`, which resolves the client IP from
 /// `X-Real-IP` (set by nginx), falling back to `X-Forwarded-For` and then the
 /// TCP peer address.
+///
+/// # Panics
+///
+/// Panics if a rate-limit value is zero. [`gl_core::Config::from_file`] rejects
+/// those before this is reached, so this is unreachable for any config loaded
+/// from disk.
 fn build_router(
     state: Arc<AppState>,
     cors: CorsLayer,
@@ -317,7 +323,7 @@ fn build_router(
         .burst_size(rl.provision_burst)
         .period(StdDuration::from_secs(rl.provision_period_secs))
         .finish()
-        .expect("provision rate-limit config must be valid (burst > 0 and period > 0)");
+        .expect("provision rate-limit values are validated by Config::from_file");
 
     let provision_layer =
         GovernorLayer::new(provision_governor).error_handler(rate_limit_error_handler);
@@ -328,7 +334,7 @@ fn build_router(
         .burst_size(rl.read_burst)
         .period(StdDuration::from_secs(rl.read_period_secs))
         .finish()
-        .expect("read rate-limit config must be valid (burst > 0 and period > 0)");
+        .expect("read rate-limit values are validated by Config::from_file");
 
     let read_layer = GovernorLayer::new(read_governor).error_handler(rate_limit_error_handler);
 

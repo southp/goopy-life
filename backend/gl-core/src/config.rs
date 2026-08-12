@@ -185,6 +185,26 @@ impl Config {
                 ));
             }
         }
+        // A zero burst or period cannot be turned into a rate limiter, so reject
+        // it here rather than letting gl-serv panic while building its router.
+        if cfg.ratelimit.provision_burst == 0 {
+            return Err(Error::Config(
+                "ratelimit.provision_burst must be > 0".into(),
+            ));
+        }
+        if cfg.ratelimit.provision_period_secs == 0 {
+            return Err(Error::Config(
+                "ratelimit.provision_period_secs must be > 0".into(),
+            ));
+        }
+        if cfg.ratelimit.read_burst == 0 {
+            return Err(Error::Config("ratelimit.read_burst must be > 0".into()));
+        }
+        if cfg.ratelimit.read_period_secs == 0 {
+            return Err(Error::Config(
+                "ratelimit.read_period_secs must be > 0".into(),
+            ));
+        }
         Ok(cfg)
     }
 }
@@ -376,5 +396,60 @@ kind = "PlainDir"
 "#;
         let err = write_config(toml).unwrap_err();
         assert!(matches!(err, Error::Config(_)));
+    }
+
+    /// Build a config with `[allocator]` plus a custom `[ratelimit]` section.
+    fn write_config_with_ratelimit(ratelimit: &str) -> Result<Config, Error> {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+{}
+"#,
+            VALID_BASE, ratelimit
+        );
+        write_config(&toml)
+    }
+
+    #[test]
+    fn omitted_ratelimit_section_uses_defaults() {
+        let cfg = write_config_with_ratelimit("").expect("should parse");
+        assert_eq!(cfg.ratelimit.provision_burst, 2);
+        assert_eq!(cfg.ratelimit.provision_period_secs, 60);
+        assert_eq!(cfg.ratelimit.read_burst, 30);
+        assert_eq!(cfg.ratelimit.read_period_secs, 2);
+    }
+
+    #[test]
+    fn partial_ratelimit_section_defaults_the_rest() {
+        let cfg = write_config_with_ratelimit("[ratelimit]\nprovision_burst = 5\n")
+            .expect("should parse");
+        assert_eq!(cfg.ratelimit.provision_burst, 5);
+        assert_eq!(cfg.ratelimit.read_burst, 30);
+    }
+
+    #[test]
+    fn zero_provision_burst_returns_config_error() {
+        let err = write_config_with_ratelimit("[ratelimit]\nprovision_burst = 0\n").unwrap_err();
+        assert!(matches!(err, Error::Config(ref s) if s.contains("provision_burst")));
+    }
+
+    #[test]
+    fn zero_provision_period_returns_config_error() {
+        let err =
+            write_config_with_ratelimit("[ratelimit]\nprovision_period_secs = 0\n").unwrap_err();
+        assert!(matches!(err, Error::Config(ref s) if s.contains("provision_period_secs")));
+    }
+
+    #[test]
+    fn zero_read_burst_returns_config_error() {
+        let err = write_config_with_ratelimit("[ratelimit]\nread_burst = 0\n").unwrap_err();
+        assert!(matches!(err, Error::Config(ref s) if s.contains("read_burst")));
+    }
+
+    #[test]
+    fn zero_read_period_returns_config_error() {
+        let err = write_config_with_ratelimit("[ratelimit]\nread_period_secs = 0\n").unwrap_err();
+        assert!(matches!(err, Error::Config(ref s) if s.contains("read_period_secs")));
     }
 }
