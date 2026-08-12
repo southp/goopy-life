@@ -295,6 +295,36 @@ fn rate_limit_error_handler(err: tower_governor::GovernorError) -> Response<Body
 // Router builder (shared by main and tests)
 // ---------------------------------------------------------------------------
 
+/// How often each governor evicts per-IP entries that are no longer rate
+/// limiting anything.
+const GOVERNOR_CLEANUP_INTERVAL_SECS: u64 = 60;
+
+/// Spawn the background task that periodically evicts a governor's stale
+/// per-IP entries.
+///
+/// `retain` is expected to call `retain_recent()` on the governor's limiter.
+/// It is taken as a closure rather than the limiter itself so that the
+/// limiter's concrete type — which mentions `governor` types that
+/// `tower_governor` does not re-export — stays inferred at the call site.
+fn spawn_governor_cleanup<F>(retain: F, label: &'static str)
+where
+    F: Fn() + Send + 'static,
+{
+    let interval_duration = StdDuration::from_secs(GOVERNOR_CLEANUP_INTERVAL_SECS);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(interval_duration);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // The first tick fires immediately; skip it so cleanup runs after one
+        // full interval rather than at startup, when there is nothing to evict.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            retain();
+            tracing::debug!(governor = label, "evicted stale rate-limit entries");
+        }
+    });
+}
+
 /// Build the application router.
 ///
 /// Two separate `GovernorLayer`s are applied:
@@ -306,6 +336,14 @@ fn rate_limit_error_handler(err: tower_governor::GovernorError) -> Response<Body
 /// Both use `SmartIpKeyExtractor`, which resolves the client IP from
 /// `X-Real-IP` (set by nginx), falling back to `X-Forwarded-For` and then the
 /// TCP peer address.
+///
+/// Each governor keeps one in-memory entry per distinct client IP, which is
+/// never reclaimed on its own — on a public, unauthenticated API that grows
+/// without bound. So this also spawns one background task per governor that
+/// calls `retain_recent()` every [`GOVERNOR_CLEANUP_INTERVAL_SECS`], dropping
+/// entries whose rate-limit state has fully replenished. The tasks are tied to
+/// the governors created here rather than to `main`, so tests exercise the same
+/// wiring; they must therefore be called from within a Tokio runtime.
 ///
 /// # Panics
 ///
@@ -325,6 +363,11 @@ fn build_router(
         .finish()
         .expect("provision rate-limit values are validated by Config::from_file");
 
+    {
+        let limiter = provision_governor.limiter().clone();
+        spawn_governor_cleanup(move || limiter.retain_recent(), "provision");
+    }
+
     let provision_layer =
         GovernorLayer::new(provision_governor).error_handler(rate_limit_error_handler);
 
@@ -335,6 +378,11 @@ fn build_router(
         .period(StdDuration::from_secs(rl.read_period_secs))
         .finish()
         .expect("read rate-limit values are validated by Config::from_file");
+
+    {
+        let limiter = read_governor.limiter().clone();
+        spawn_governor_cleanup(move || limiter.retain_recent(), "read");
+    }
 
     let read_layer = GovernorLayer::new(read_governor).error_handler(rate_limit_error_handler);
 
