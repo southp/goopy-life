@@ -173,8 +173,17 @@ server {{
 
     fn stop_service(&self, slug: &str) -> Result<(), Error> {
         let svc = format!("{}.service", Self::service_name(slug));
-        self.sys.sudo_run(&["systemctl", "stop", &svc])?;
-        self.sys.sudo_run(&["systemctl", "disable", &svc])?;
+
+        // `stop`/`disable` are tolerant of a missing or never-installed unit:
+        // a `Failed` instance may have only partial state, so a non-zero exit
+        // here (unit not loaded / not enabled) is expected and non-fatal. The
+        // authoritative cleanup is the `rm -f` + `daemon-reload` below.
+        if let Err(e) = self.sys.sudo_run(&["systemctl", "stop", &svc]) {
+            tracing::warn!(error = %e, %svc, "systemctl stop failed (unit may not exist), continuing");
+        }
+        if let Err(e) = self.sys.sudo_run(&["systemctl", "disable", &svc]) {
+            tracing::warn!(error = %e, %svc, "systemctl disable failed (unit may not exist), continuing");
+        }
 
         let path = format!("/etc/systemd/system/{svc}");
         self.sys.sudo_run(&["rm", "-f", &path])?;
