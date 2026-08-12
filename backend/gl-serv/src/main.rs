@@ -238,55 +238,67 @@ async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 // Rate limiting helpers
 // ---------------------------------------------------------------------------
 
+/// A throttled request's `429` response.
+///
+/// `tower_governor` already computes the wait time and a set of rate-limit
+/// headers (e.g. `x-ratelimit-after`), but its default body is plain text, so
+/// this re-renders it as the same `ErrorResponse` JSON shape used by
+/// [`AppError`] while preserving those headers.
+struct RateLimitedResponse {
+    /// Seconds until the client may retry, as reported by the governor.
+    wait_time: u64,
+    /// Extra rate-limit headers computed by the governor, if any.
+    extra_headers: Option<axum::http::HeaderMap>,
+}
+
+impl IntoResponse for RateLimitedResponse {
+    fn into_response(self) -> Response {
+        let mut resp = (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ErrorResponse {
+                error: format!("rate limit exceeded; retry in {}s", self.wait_time),
+                code: "too_many_requests".into(),
+            }),
+        )
+            .into_response();
+
+        let headers = resp.headers_mut();
+        if let Ok(value) = HeaderValue::from_str(&self.wait_time.to_string()) {
+            headers.insert(axum::http::header::RETRY_AFTER, value);
+        }
+        if let Some(extra) = self.extra_headers {
+            for (name, value) in &extra {
+                headers.insert(name.clone(), value.clone());
+            }
+        }
+
+        resp
+    }
+}
+
 /// Convert a `tower_governor` error into a JSON API response.
 ///
-/// The common case (`TooManyRequests`) becomes a `429` with a JSON body and a
-/// `Retry-After` header, matching the error shape used elsewhere in the API.
-/// `tower_governor` already sets `retry-after` / `x-ratelimit-after` as integer
-/// headers, but its default body is plain text, so we replace it.
+/// The common case (`TooManyRequests`) becomes a [`RateLimitedResponse`]: a
+/// `429` with a JSON body and a `Retry-After` header, matching the error shape
+/// used elsewhere in the API.
 ///
 /// Any other variant (e.g. `UnableToExtractKey` when no client IP can be
 /// resolved, or an internal governor error) indicates a server-side problem
-/// rather than client abuse, so it maps to `500`. In production nginx always
-/// sets `X-Real-IP`, so `UnableToExtractKey` should never occur.
+/// rather than client abuse, so it maps to `500` via [`AppError::Internal`]. In
+/// production nginx always sets `X-Real-IP`, so `UnableToExtractKey` should
+/// never occur.
 fn rate_limit_error_handler(err: tower_governor::GovernorError) -> Response<Body> {
     match err {
         tower_governor::GovernorError::TooManyRequests { wait_time, headers } => {
-            let body = serde_json::json!({
-                "error": format!("rate limit exceeded; retry in {}s", wait_time),
-                "code": "too_many_requests",
-            })
-            .to_string();
-
-            let mut resp = Response::builder()
-                .status(StatusCode::TOO_MANY_REQUESTS)
-                .header("content-type", "application/json")
-                .header("retry-after", wait_time)
-                .body(Body::from(body))
-                .expect("building 429 response should not fail");
-
-            // Propagate any extra headers governor computed (e.g. x-ratelimit-after).
-            if let Some(headers) = headers {
-                for (name, value) in &headers {
-                    resp.headers_mut().insert(name.clone(), value.clone());
-                }
+            RateLimitedResponse {
+                wait_time,
+                extra_headers: headers,
             }
-
-            resp
+            .into_response()
         }
         other => {
             tracing::error!(error = ?other, "rate-limit middleware failed");
-            let body = serde_json::json!({
-                "error": "internal rate-limit error",
-                "code": "internal_error",
-            })
-            .to_string();
-
-            Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .header("content-type", "application/json")
-                .body(Body::from(body))
-                .expect("building 500 response should not fail")
+            AppError::Internal("internal rate-limit error".into()).into_response()
         }
     }
 }
