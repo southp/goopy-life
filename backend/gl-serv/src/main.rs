@@ -802,6 +802,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/goopies/live-slug")
+                    .header("x-real-ip", "127.0.0.1")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -824,6 +825,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/goopies/old-slug")
+                    .header("x-real-ip", "127.0.0.1")
                     .body(Body::empty())
                     .unwrap(),
             )
