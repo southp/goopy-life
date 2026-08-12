@@ -33,7 +33,7 @@ kind = "Hello"
 # provisioning path and a looser one for read endpoints.
 #
 # The whole section is optional — omit it to use the defaults shown below,
-# which are sized for the 1 vCPU / 2 GB droplet.
+# which are sized for the 1 vCPU / 2 GB droplet. All four values must be > 0.
 #
 # Provisioning limit — applies to POST /goopies only.
 # Default: burst of 2 spawns, then 1 more allowed every 60s per IP.
