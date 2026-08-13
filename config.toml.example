@@ -18,7 +18,13 @@ dev_mode = false
 cors_origin = "https://goopy.life"
 
 # Address and port for gl-serv to bind; also used by nginx auth_request subrequests.
-bind_address = "0.0.0.0:3000"
+#
+# gl-serv must NOT be reachable directly from the internet: the per-IP rate
+# limiter below trusts nginx's X-Real-IP header, which a direct client could
+# forge to get a fresh bucket on every request. Bind to localhost so only nginx
+# (and its auth_request subrequests) can reach it. If you must bind a public
+# address, firewall this port to localhost instead.
+bind_address = "127.0.0.1:3000"
 
 # How often to sweep expired instances (seconds; default 86400 = 24h)
 sweep_interval_secs = 86400
@@ -38,3 +44,26 @@ quota_mb = 512
 [provisioner]
 # Which provisioner to use: "Hello" (no-op dev provisioner) or "Ghost" (real Ghost install, #18)
 kind = "Hello"
+
+[ratelimit]
+# Per-IP rate limiting for the API server (gl-serv only; ignored by the CLI).
+#
+# Limits are keyed on the *real* client IP, resolved from nginx's X-Real-IP
+# header (falling back to X-Forwarded-For, then the TCP peer address). This
+# assumes nginx is the only way to reach gl-serv — see bind_address above. Two
+# independent GCRA buckets are used: a tighter one for the expensive
+# provisioning path and a looser one for read endpoints.
+#
+# The whole section is optional — omit it to use the defaults shown below,
+# which are sized for the 1 vCPU / 2 GB droplet. All four values must be > 0.
+#
+# Provisioning limit — applies to POST /goopies only.
+# Default: burst of 2 spawns, then 1 more allowed every 60s per IP.
+provision_burst      = 2
+provision_period_secs = 60
+#
+# Read limit — applies to GET /goopies/:slug, /goopies/:slug/alive, /config.
+# Default: burst of 30, replenishing 1 token every 2s per IP (comfortable for
+# a frontend that polls the alive endpoint every couple of seconds).
+read_burst      = 30
+read_period_secs = 2

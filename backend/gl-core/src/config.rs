@@ -47,6 +47,65 @@ pub struct ProvisionerConfig {
     pub kind: ProvisionerKind,
 }
 
+/// Rate limiting configuration (`[ratelimit]` section in TOML).
+///
+/// Two independent GCRA (Generic Cell Rate Algorithm) buckets are configured:
+///
+/// * **Provision limit** — applied to `POST /goopies` only.  Defaults to a
+///   burst of 2 requests with one token replenished every 60 seconds, so a
+///   single IP can spawn at most 2 instances back-to-back and then must wait
+///   1 minute per additional spawn.  This matches the expected interaction
+///   pattern (one deliberate click) while blocking trivial abuse on the
+///   expensive provisioning path.
+///
+/// * **Read limit** — applied to all other endpoints (`GET /goopies/:slug`,
+///   `GET /goopies/:slug/alive`, `GET /config`).  Defaults to a burst of 30
+///   requests with one token replenished every 2 seconds, comfortable for a
+///   frontend that polls `alive` every few seconds but still rejects floods.
+///
+/// Both limits are per **real client IP**, resolved from the `X-Real-IP`
+/// header that nginx sets (falling back to `X-Forwarded-For` and then the
+/// TCP peer address).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct RateLimitConfig {
+    /// Burst size for `POST /goopies`.
+    #[serde(default = "default_provision_burst")]
+    pub provision_burst: u32,
+    /// Token replenishment period (seconds) for `POST /goopies`.
+    #[serde(default = "default_provision_period_secs")]
+    pub provision_period_secs: u64,
+    /// Burst size for read endpoints.
+    #[serde(default = "default_read_burst")]
+    pub read_burst: u32,
+    /// Token replenishment period (seconds) for read endpoints.
+    #[serde(default = "default_read_period_secs")]
+    pub read_period_secs: u64,
+}
+
+fn default_provision_burst() -> u32 {
+    2
+}
+fn default_provision_period_secs() -> u64 {
+    60
+}
+fn default_read_burst() -> u32 {
+    30
+}
+fn default_read_period_secs() -> u64 {
+    2
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            provision_burst: default_provision_burst(),
+            provision_period_secs: default_provision_period_secs(),
+            read_burst: default_read_burst(),
+            read_period_secs: default_read_period_secs(),
+        }
+    }
+}
+
 #[derive(Debug, serde::Deserialize)]
 pub struct Config {
     pub base_dir: PathBuf,
@@ -62,6 +121,8 @@ pub struct Config {
     pub registry: RegistryConfig,
     pub allocator: AllocatorConfig,
     pub provisioner: ProvisionerConfig,
+    #[serde(default)]
+    pub ratelimit: RateLimitConfig,
 }
 
 fn default_sweep_interval_secs() -> u64 {
@@ -123,6 +184,26 @@ impl Config {
                     "allocator.quota_mb must be > 0 when kind = \"Zfs\"".into(),
                 ));
             }
+        }
+        // A zero burst or period cannot be turned into a rate limiter, so reject
+        // it here rather than letting gl-serv panic while building its router.
+        if cfg.ratelimit.provision_burst == 0 {
+            return Err(Error::Config(
+                "ratelimit.provision_burst must be > 0".into(),
+            ));
+        }
+        if cfg.ratelimit.provision_period_secs == 0 {
+            return Err(Error::Config(
+                "ratelimit.provision_period_secs must be > 0".into(),
+            ));
+        }
+        if cfg.ratelimit.read_burst == 0 {
+            return Err(Error::Config("ratelimit.read_burst must be > 0".into()));
+        }
+        if cfg.ratelimit.read_period_secs == 0 {
+            return Err(Error::Config(
+                "ratelimit.read_period_secs must be > 0".into(),
+            ));
         }
         Ok(cfg)
     }
@@ -315,5 +396,60 @@ kind = "PlainDir"
 "#;
         let err = write_config(toml).unwrap_err();
         assert!(matches!(err, Error::Config(_)));
+    }
+
+    /// Build a config with `[allocator]` plus a custom `[ratelimit]` section.
+    fn write_config_with_ratelimit(ratelimit: &str) -> Result<Config, Error> {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+{}
+"#,
+            VALID_BASE, ratelimit
+        );
+        write_config(&toml)
+    }
+
+    #[test]
+    fn omitted_ratelimit_section_uses_defaults() {
+        let cfg = write_config_with_ratelimit("").expect("should parse");
+        assert_eq!(cfg.ratelimit.provision_burst, 2);
+        assert_eq!(cfg.ratelimit.provision_period_secs, 60);
+        assert_eq!(cfg.ratelimit.read_burst, 30);
+        assert_eq!(cfg.ratelimit.read_period_secs, 2);
+    }
+
+    #[test]
+    fn partial_ratelimit_section_defaults_the_rest() {
+        let cfg = write_config_with_ratelimit("[ratelimit]\nprovision_burst = 5\n")
+            .expect("should parse");
+        assert_eq!(cfg.ratelimit.provision_burst, 5);
+        assert_eq!(cfg.ratelimit.read_burst, 30);
+    }
+
+    #[test]
+    fn zero_provision_burst_returns_config_error() {
+        let err = write_config_with_ratelimit("[ratelimit]\nprovision_burst = 0\n").unwrap_err();
+        assert!(matches!(err, Error::Config(ref s) if s.contains("provision_burst")));
+    }
+
+    #[test]
+    fn zero_provision_period_returns_config_error() {
+        let err =
+            write_config_with_ratelimit("[ratelimit]\nprovision_period_secs = 0\n").unwrap_err();
+        assert!(matches!(err, Error::Config(ref s) if s.contains("provision_period_secs")));
+    }
+
+    #[test]
+    fn zero_read_burst_returns_config_error() {
+        let err = write_config_with_ratelimit("[ratelimit]\nread_burst = 0\n").unwrap_err();
+        assert!(matches!(err, Error::Config(ref s) if s.contains("read_burst")));
+    }
+
+    #[test]
+    fn zero_read_period_returns_config_error() {
+        let err = write_config_with_ratelimit("[ratelimit]\nread_period_secs = 0\n").unwrap_err();
+        assert!(matches!(err, Error::Config(ref s) if s.contains("read_period_secs")));
     }
 }
