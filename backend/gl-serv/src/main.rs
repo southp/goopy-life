@@ -702,6 +702,9 @@ mod tests {
         fn kind(&self) -> ProvisionerKind {
             ProvisionerKind::Hello
         }
+        fn service_version(&self) -> String {
+            "0.1.0".to_string()
+        }
     }
 
     // ── Test helpers ──────────────────────────────────────────────────────
