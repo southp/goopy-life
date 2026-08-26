@@ -1,3 +1,4 @@
+pub mod ghost_provisioner;
 pub mod hello_provisioner;
 mod nginx;
 
