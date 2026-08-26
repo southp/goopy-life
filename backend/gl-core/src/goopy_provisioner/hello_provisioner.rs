@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tracing::{info, instrument};
 
-use super::GoopyProvisioner;
+use super::{GoopyProvisioner, nginx};
 use crate::Goopy;
 use crate::shared_types::*;
 use crate::storage_allocator::StorageAllocator;
@@ -91,48 +91,6 @@ WantedBy=multi-user.target
         )
     }
 
-    fn render_nginx_config(slug: &str, domain: &str, port: u32, api_address: &str) -> String {
-        format!(
-            r#"server {{
-    listen 80;
-    server_name {slug}.{domain};
-    return 301 https://$host$request_uri;
-}}
-
-server {{
-    listen 443 ssl;
-    server_name {slug}.{domain};
-
-    ssl_certificate     /etc/letsencrypt/live/{domain}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/{domain}/privkey.pem;
-
-    location = /goopy-alive-check {{
-        internal;
-        proxy_pass http://{api_address}/goopies/{slug}/alive;
-        proxy_pass_request_body off;
-        proxy_set_header Content-Length "";
-    }}
-
-    location @expired {{
-        return 302 https://goopy.life/expired;
-    }}
-
-    location / {{
-        auth_request /goopy-alive-check;
-        error_page 410 = @expired;
-        proxy_pass http://127.0.0.1:{port};
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }}
-}}
-"#,
-            slug = slug,
-            domain = domain,
-            port = port,
-            api_address = api_address,
-        )
-    }
-
     fn service_name(slug: &str) -> String {
         format!("goopy-hello-{slug}")
     }
@@ -150,23 +108,6 @@ server {{
         self.sys.sudo_run(&["systemctl", "daemon-reload"])?;
         self.sys.sudo_run(&["systemctl", "enable", &svc])?;
         self.sys.sudo_run(&["systemctl", "start", &svc])
-    }
-
-    fn write_nginx_config(&self, slug: &str, domain: &str, port: u32) -> Result<(), Error> {
-        let content = Self::render_nginx_config(slug, domain, port, &self.api_address);
-        let path = format!("/etc/nginx/sites-available/goopy-{slug}");
-        self.sys.sudo_write(&path, &content)
-    }
-
-    fn enable_nginx_site(&self, slug: &str) -> Result<(), Error> {
-        let available = format!("/etc/nginx/sites-available/goopy-{slug}");
-        let enabled = format!("/etc/nginx/sites-enabled/goopy-{slug}");
-        self.sys.sudo_run(&["ln", "-sf", &available, &enabled])
-    }
-
-    fn reload_nginx(&self) -> Result<(), Error> {
-        self.sys.sudo_run(&["nginx", "-t"])?;
-        self.sys.sudo_run(&["systemctl", "reload", "nginx"])
     }
 
     // ── Production deprovisioning steps ─────────────────────────────────
@@ -188,14 +129,6 @@ server {{
         let path = format!("/etc/systemd/system/{svc}");
         self.sys.sudo_run(&["rm", "-f", &path])?;
         self.sys.sudo_run(&["systemctl", "daemon-reload"])
-    }
-
-    fn remove_nginx_site(&self, slug: &str) -> Result<(), Error> {
-        let enabled = format!("/etc/nginx/sites-enabled/goopy-{slug}");
-        let available = format!("/etc/nginx/sites-available/goopy-{slug}");
-        self.sys.sudo_run(&["rm", "-f", &enabled])?;
-        self.sys.sudo_run(&["rm", "-f", &available])?;
-        self.reload_nginx()
     }
 
     // ── Dev-mode helpers ────────────────────────────────────────────────
@@ -249,9 +182,14 @@ server {{
         } else {
             self.write_service_file(&goopy.slug, &goopy.working_dir)?;
             self.enable_service(&goopy.slug)?;
-            self.write_nginx_config(&goopy.slug, &self.domain, goopy.port)?;
-            self.enable_nginx_site(&goopy.slug)?;
-            self.reload_nginx()?;
+            nginx::install_site(
+                self.sys.as_ref(),
+                &goopy.slug,
+                &self.domain,
+                goopy.port,
+                &self.api_address,
+            )?;
+            nginx::reload(self.sys.as_ref())?;
         }
         Ok(())
     }
@@ -283,7 +221,7 @@ impl GoopyProvisioner for HelloProvisioner {
             self.kill_dev_server(&goopy.working_dir)
         } else {
             self.stop_service(&goopy.slug)
-                .and_then(|_| self.remove_nginx_site(&goopy.slug))
+                .and_then(|_| nginx::remove_site(self.sys.as_ref(), &goopy.slug))
         };
         if let Err(e) = self.storage.release(&goopy.working_dir) {
             tracing::warn!(error = %e, slug = %goopy.slug, "storage release failed during deprovision");
@@ -346,45 +284,6 @@ mod tests {
         );
         assert!(svc.contains("Goopy Hello - tasty-lucky-clover"));
         assert!(svc.contains("/data/goopies/tasty-lucky-clover/server.py"));
-    }
-
-    #[test]
-    fn render_nginx_config_contains_slug_domain_port() {
-        let cfg = HelloProvisioner::render_nginx_config(
-            "tasty-lucky-clover",
-            "goopy.life",
-            9876,
-            "127.0.0.1:3000",
-        );
-        assert!(cfg.contains("tasty-lucky-clover.goopy.life"));
-        assert!(cfg.contains("proxy_pass http://127.0.0.1:9876"));
-        assert!(cfg.contains("/etc/letsencrypt/live/goopy.life/"));
-    }
-
-    #[test]
-    fn render_nginx_config_contains_auth_request_directives() {
-        let cfg = HelloProvisioner::render_nginx_config(
-            "tasty-lucky-clover",
-            "goopy.life",
-            9876,
-            "127.0.0.1:3000",
-        );
-        assert!(
-            cfg.contains("auth_request /goopy-alive-check;"),
-            "nginx config must include auth_request directive"
-        );
-        assert!(
-            cfg.contains("proxy_pass http://127.0.0.1:3000/goopies/tasty-lucky-clover/alive;"),
-            "alive-check location must proxy to the correct gl-serv endpoint"
-        );
-        assert!(
-            cfg.contains("error_page 410 = @expired;"),
-            "nginx config must map 410 to @expired named location"
-        );
-        assert!(
-            cfg.contains("return 302 https://goopy.life/expired;"),
-            "expired location must redirect to /expired page"
-        );
     }
 
     /// Verifies that `provision` in dev mode writes the server script.

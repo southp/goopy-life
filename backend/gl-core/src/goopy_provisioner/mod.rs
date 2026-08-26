@@ -1,4 +1,5 @@
 pub mod hello_provisioner;
+mod nginx;
 
 use crate::Goopy;
 use crate::shared_types::*;
