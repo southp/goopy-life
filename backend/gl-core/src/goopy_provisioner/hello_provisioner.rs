@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use tracing::{debug, info, instrument};
+use tracing::{info, instrument};
 
 use super::GoopyProvisioner;
 use crate::Goopy;
@@ -203,7 +203,9 @@ server {{
     fn spawn_dev_server(&self, working_dir: &Path) -> Result<(), Error> {
         info!(working_dir = %working_dir.display(), "spawning dev server");
         let log_path = working_dir.join("server.log");
-        let pid = spawn_detached("python3", &["server.py"], working_dir, &log_path)?;
+        let pid =
+            self.sys
+                .spawn_detached("python3", &["server.py"], working_dir, &[], &log_path)?;
         let pid_path = working_dir.join("server.pid");
         info!(%pid, pid_path = %pid_path.display(), "writing PID file");
         std::fs::write(&pid_path, pid.to_string()).map_err(Error::Io)
@@ -230,7 +232,7 @@ server {{
         }
 
         info!(%pid, "killing dev server");
-        kill_pid(pid)?;
+        self.sys.kill_pid(pid)?;
         std::fs::remove_file(&pid_path).map_err(Error::Io)
     }
 
@@ -253,66 +255,6 @@ server {{
         }
         Ok(())
     }
-}
-
-// ── Dev-mode process helpers (hello_provisioner-specific) ───────────────────
-
-/// Spawn `program args` in `working_dir` as a detached background process,
-/// redirecting stderr to `log_path`. Waits ~200 ms and checks liveness;
-/// returns the PID on success or an error (with log contents) if the process
-/// exited immediately.
-fn spawn_detached(
-    program: &str,
-    args: &[&str],
-    working_dir: &Path,
-    log_path: &Path,
-) -> Result<u32, Error> {
-    let log_file = std::fs::File::create(log_path).map_err(Error::Io)?;
-
-    let mut cmd = std::process::Command::new(program);
-    cmd.args(args)
-        .current_dir(working_dir)
-        .stdout(std::process::Stdio::null())
-        .stderr(log_file);
-
-    let mut child = cmd.spawn().map_err(Error::Io)?;
-
-    // Give the process a moment to start up (or crash).
-    // 200 ms gives the process time to crash on import errors; well-behaved servers start in < 50 ms on this hardware.
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
-    // Check for an immediate exit — startup errors surface well within 200 ms.
-    match child.try_wait() {
-        Ok(Some(status)) => {
-            let log = std::fs::read_to_string(log_path).unwrap_or_default();
-            Err(Error::Subprocess(format!(
-                "{program} exited immediately (status {status})\n{log}"
-            )))
-        }
-        Ok(None) => {
-            let pid = child.id();
-            // Detach: forget the Child so that Drop does not wait on the process.
-            std::mem::forget(child);
-            Ok(pid)
-        }
-        Err(e) => Err(Error::Io(e)),
-    }
-}
-
-fn kill_pid(pid: &str) -> Result<(), Error> {
-    let out = std::process::Command::new("kill")
-        .args([pid.trim()])
-        .output()
-        .map_err(Error::Io)?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        if stderr.contains("No such process") {
-            debug!(%pid, "process already gone");
-        } else {
-            return Err(Error::Subprocess(format!("kill {pid}: {}", stderr.trim())));
-        }
-    }
-    Ok(())
 }
 
 impl GoopyProvisioner for HelloProvisioner {
