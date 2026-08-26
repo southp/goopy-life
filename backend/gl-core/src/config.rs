@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::goopy_manager::GoopyManagerConfig;
+use crate::goopy_provisioner::GoopyProvisioner;
+use crate::goopy_provisioner::ghost_provisioner::GhostProvisioner;
 use crate::goopy_provisioner::hello_provisioner::HelloProvisioner;
 use crate::shared_types::{AllocatorKind, Error, ProvisionerKind};
 use crate::storage_allocator::{PlainDirAllocator, StorageAllocator, ZfsAllocator};
@@ -40,11 +42,35 @@ impl AllocatorConfig {
 ///
 /// Mirrors [`AllocatorConfig`]: a flat struct with a `kind` discriminant plus
 /// kind-specific fields that are silently ignored when the kind does not apply.
-/// Ghost-specific fields (e.g. `ghost_source_dir`) will be added here in #18
-/// without breaking the `Hello` case.
 #[derive(Debug, serde::Deserialize)]
 pub struct ProvisionerConfig {
     pub kind: ProvisionerKind,
+    /// Prepared base Ghost install that instances soft-link to.
+    /// Required when `kind = "Ghost"`; ignored otherwise.
+    /// See `docs/GHOST_PROVISIONER.md` for how to prepare it.
+    #[serde(default)]
+    pub ghost_source_dir: PathBuf,
+    /// Version of the base install, recorded as each instance's `service_version`.
+    /// Required when `kind = "Ghost"`; ignored otherwise. Bump it after upgrading
+    /// the base install — existing instances keep the version they were created with.
+    #[serde(default)]
+    pub ghost_version: String,
+    /// Node.js binary used to run Ghost. systemd needs an absolute path, so this
+    /// is not resolved through `PATH`. Ignored unless `kind = "Ghost"`.
+    #[serde(default = "default_node_bin")]
+    pub node_bin: String,
+    /// Unprivileged OS user each instance's systemd unit runs as. Must be able to
+    /// write the instance working directory. Ignored unless `kind = "Ghost"`.
+    #[serde(default = "default_service_user")]
+    pub service_user: String,
+}
+
+fn default_node_bin() -> String {
+    "/usr/bin/node".to_string()
+}
+
+fn default_service_user() -> String {
+    "goopy".to_string()
 }
 
 /// Rate limiting configuration (`[ratelimit]` section in TOML).
@@ -186,23 +212,40 @@ fn default_max_provisioned() -> u32 {
 }
 
 impl Config {
-    /// Build a [`HelloProvisioner`] from the current configuration.
+    /// Build the provisioner named by `self.provisioner.kind`.
     ///
     /// `dev_mode` is passed explicitly so callers can override the value from
     /// the config file (e.g. `gl-cli` forces dev mode unless `--prod` is given).
     ///
-    /// The provisioner kind is read from `self.provisioner.kind`; only
-    /// [`ProvisionerKind::Hello`] is supported today.
-    pub fn build_provisioner(&self, dev_mode: bool, sys: Arc<dyn SysRunner>) -> HelloProvisioner {
-        let _kind = &self.provisioner.kind; // consulted here; extended in #18 for Ghost
+    /// Returned boxed because the kind is only known at runtime; the forwarding
+    /// impl in `goopy_provisioner` keeps it usable as `GoopyManager`'s generic
+    /// provisioner parameter.
+    pub fn build_provisioner(
+        &self,
+        dev_mode: bool,
+        sys: Arc<dyn SysRunner>,
+    ) -> Box<dyn GoopyProvisioner + Send + Sync> {
         let storage = self.allocator.build();
-        HelloProvisioner::new(
-            self.domain.clone(),
-            dev_mode,
-            self.bind_address.clone(),
-            storage,
-            sys,
-        )
+        match self.provisioner.kind {
+            ProvisionerKind::Hello => Box::new(HelloProvisioner::new(
+                self.domain.clone(),
+                dev_mode,
+                self.bind_address.clone(),
+                storage,
+                sys,
+            )),
+            ProvisionerKind::Ghost => Box::new(GhostProvisioner::new(
+                self.domain.clone(),
+                dev_mode,
+                self.bind_address.clone(),
+                self.provisioner.ghost_source_dir.clone(),
+                self.provisioner.ghost_version.clone(),
+                self.provisioner.node_bin.clone(),
+                self.provisioner.service_user.clone(),
+                storage,
+                sys,
+            )),
+        }
     }
 
     /// Build a [`GoopyManagerConfig`] from the current configuration.
@@ -278,6 +321,28 @@ impl Config {
             return Err(Error::Config(
                 "ratelimit.read_period_secs must be > 0".into(),
             ));
+        }
+        if let ProvisionerKind::Ghost = cfg.provisioner.kind {
+            if cfg.provisioner.ghost_source_dir.as_os_str().is_empty() {
+                return Err(Error::Config(
+                    "provisioner.ghost_source_dir must be set when kind = \"Ghost\"".into(),
+                ));
+            }
+            if cfg.provisioner.ghost_version.trim().is_empty() {
+                return Err(Error::Config(
+                    "provisioner.ghost_version must be set when kind = \"Ghost\"".into(),
+                ));
+            }
+            if cfg.provisioner.node_bin.trim().is_empty() {
+                return Err(Error::Config(
+                    "provisioner.node_bin must not be empty when kind = \"Ghost\"".into(),
+                ));
+            }
+            if cfg.provisioner.service_user.trim().is_empty() {
+                return Err(Error::Config(
+                    "provisioner.service_user must not be empty when kind = \"Ghost\"".into(),
+                ));
+            }
         }
         Ok(cfg)
     }
@@ -492,6 +557,122 @@ kind = "PlainDir"
         );
         let cfg = write_config(&toml).expect("should parse");
         assert_eq!(cfg.provisioner.kind, ProvisionerKind::Hello);
+    }
+
+    const GHOST_BASE: &str = r#"
+base_dir = "/tmp/goopy"
+domain = "goopy.life"
+life_in_days = 7
+port_range_start = 9000
+port_range_end = 9100
+dev_mode = false
+cors_origin = "https://goopy.life"
+bind_address = "127.0.0.1:8080"
+[registry]
+path = "/tmp/goopy.db"
+[allocator]
+kind = "PlainDir"
+"#;
+
+    #[test]
+    fn provisioner_section_ghost_kind_parses_with_defaults() {
+        let toml = format!(
+            r#"{}
+[provisioner]
+kind = "Ghost"
+ghost_source_dir = "/opt/goopy-life/ghost"
+ghost_version = "5.87.1"
+"#,
+            GHOST_BASE
+        );
+        let cfg = write_config(&toml).expect("should parse");
+        assert_eq!(cfg.provisioner.kind, ProvisionerKind::Ghost);
+        assert_eq!(
+            cfg.provisioner.ghost_source_dir,
+            PathBuf::from("/opt/goopy-life/ghost")
+        );
+        assert_eq!(cfg.provisioner.ghost_version, "5.87.1");
+        assert_eq!(cfg.provisioner.node_bin, "/usr/bin/node");
+        assert_eq!(cfg.provisioner.service_user, "goopy");
+    }
+
+    #[test]
+    fn ghost_missing_source_dir_rejected() {
+        let toml = format!(
+            r#"{}
+[provisioner]
+kind = "Ghost"
+ghost_version = "5.87.1"
+"#,
+            GHOST_BASE
+        );
+        let err = write_config(&toml).unwrap_err();
+        assert!(matches!(err, Error::Config(ref s) if s.contains("ghost_source_dir")));
+    }
+
+    #[test]
+    fn ghost_missing_version_rejected() {
+        let toml = format!(
+            r#"{}
+[provisioner]
+kind = "Ghost"
+ghost_source_dir = "/opt/goopy-life/ghost"
+"#,
+            GHOST_BASE
+        );
+        let err = write_config(&toml).unwrap_err();
+        assert!(matches!(err, Error::Config(ref s) if s.contains("ghost_version")));
+    }
+
+    #[test]
+    fn hello_kind_ignores_missing_ghost_fields() {
+        let toml = format!(
+            r#"{}
+[provisioner]
+kind = "Hello"
+"#,
+            GHOST_BASE
+        );
+        assert!(
+            write_config(&toml).is_ok(),
+            "Ghost-only fields must not be required for kind = \"Hello\""
+        );
+    }
+
+    #[test]
+    fn build_provisioner_returns_the_configured_kind() {
+        for (kind, extra) in [
+            ("Hello", ""),
+            (
+                "Ghost",
+                "ghost_source_dir = \"/opt/goopy-life/ghost\"\nghost_version = \"5.87.1\"",
+            ),
+        ] {
+            let toml = format!("{GHOST_BASE}\n[provisioner]\nkind = \"{kind}\"\n{extra}\n");
+            let cfg = write_config(&toml).expect("should parse");
+            let provisioner = cfg.build_provisioner(true, Arc::new(crate::RealSysRunner));
+            assert_eq!(
+                provisioner.kind().to_string(),
+                kind,
+                "build_provisioner should honour provisioner.kind"
+            );
+        }
+    }
+
+    #[test]
+    fn ghost_provisioner_stamps_the_configured_version() {
+        let toml = format!(
+            r#"{}
+[provisioner]
+kind = "Ghost"
+ghost_source_dir = "/opt/goopy-life/ghost"
+ghost_version = "5.87.1"
+"#,
+            GHOST_BASE
+        );
+        let cfg = write_config(&toml).expect("should parse");
+        let provisioner = cfg.build_provisioner(true, Arc::new(crate::RealSysRunner));
+        assert_eq!(provisioner.service_version(), "5.87.1");
     }
 
     #[test]

@@ -732,6 +732,10 @@ mod tests {
             },
             provisioner: gl_core::config::ProvisionerConfig {
                 kind: ProvisionerKind::Hello,
+                ghost_source_dir: std::path::PathBuf::new(),
+                ghost_version: String::new(),
+                node_bin: String::new(),
+                service_user: String::new(),
             },
             ratelimit: gl_core::config::RateLimitConfig::default(),
         }

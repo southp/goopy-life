@@ -140,15 +140,7 @@ fn main() {
             }
         }
         cmd => {
-            // Spawn, Despawn, List — all require HelloProvisioner/GoopyManager.
-            if cfg.provisioner.kind != ProvisionerKind::Hello {
-                tracing::error!(
-                    provisioner_kind = %cfg.provisioner.kind,
-                    "unsupported provisioner_kind; only 'Hello' is supported in this binary"
-                );
-                std::process::exit(1);
-            }
-
+            // Spawn, Despawn, List — all require a provisioner/GoopyManager.
             let provisioner = cfg.build_provisioner(dev_mode, sys);
 
             let registry = SqliteRegistry::new(&cfg.registry.path).unwrap_or_else(|e| {

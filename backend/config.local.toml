@@ -59,5 +59,12 @@ path = "./.local/registry.db"
 kind = "PlainDir"
 
 [provisioner]
-# "Hello" (no-op dev provisioner) or "Ghost" (real Ghost install, #18).
+# "Hello" (PoC page — the safe local default, needs no Ghost install) or
+# "Ghost" (real Ghost instances; see docs/GHOST_PROVISIONER.md).
 kind = "Hello"
+
+# To drive real Ghost instances locally, switch to:
+#   kind = "Ghost"
+#   ghost_source_dir = "/path/to/base-ghost-install"
+#   ghost_version    = "5.87.1"
+#   node_bin         = "/opt/homebrew/bin/node"   # output of `which node`
