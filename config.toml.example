@@ -66,12 +66,13 @@ quota_mb = 512
 [provisioner]
 # Which provisioner to use: "Ghost" (real Ghost instances) or "Hello" (PoC page, dev/testing)
 kind = "Ghost"
-# Prepared base Ghost install every instance soft-links to (Ghost only).
+# Prepared base Ghost install every instance soft-links to. Required for Ghost.
 # See docs/GHOST_PROVISIONER.md for how to prepare and upgrade it.
-ghost_source_dir = "/opt/goopy-life/ghost"
+source_dir = "/opt/goopy-life/ghost"
 # Version of that base install; stamped onto each instance as service_version.
-# Bump it after upgrading — existing instances keep the version they were created with.
-ghost_version = "5.87.1"
+# Required. Bump it after upgrading — existing instances keep the version they
+# were created with.
+version = "5.87.1"
 # Absolute path to the Node.js binary (systemd does not search PATH).
 node_bin = "/usr/bin/node"
 # Unprivileged user each instance's systemd unit runs as.

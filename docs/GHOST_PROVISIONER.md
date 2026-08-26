@@ -23,8 +23,8 @@ The rule is **symlink what Ghost reads, materialise what Ghost writes**.
 
 | Path in the instance dir | How it is created | Why |
 | --- | --- | --- |
-| `index.js`, `core/`, `node_modules/`, `package.json` | symlink → `ghost_source_dir` | Application code. Identical for every instance and never written to. |
-| `content/themes/casper` | symlink → `ghost_source_dir` | The stock theme ships with Ghost and is read-only. |
+| `index.js`, `core/`, `node_modules/`, `package.json` | symlink → `source_dir` | Application code. Identical for every instance and never written to. |
+| `content/themes/casper` | symlink → `source_dir` | The stock theme ships with Ghost and is read-only. |
 | `content/data/` | real directory | Holds `ghost.db`, this instance's SQLite database. |
 | `content/images/`, `content/media/`, `content/files/` | real directory | User uploads. |
 | `content/themes/` | real directory | So a user-uploaded theme lands here, next to the `casper` symlink. |
@@ -80,8 +80,8 @@ Then set the provisioner section in `/opt/goopy-life/config.toml`:
 ```toml
 [provisioner]
 kind = "Ghost"
-ghost_source_dir = "/opt/goopy-life/ghost"
-ghost_version = "5.87.1"
+source_dir = "/opt/goopy-life/ghost"
+version = "5.87.1"
 node_bin = "/usr/bin/node"
 service_user = "goopy"
 ```
@@ -97,7 +97,7 @@ sudo systemctl restart gl-serv
 - **Node.js** at `node_bin`. It must be an absolute path: systemd does not search
   `PATH` for `ExecStart`. Use the major version Ghost supports for the version
   you installed.
-- **`service_user`** (`goopy` by default) must be able to read `ghost_source_dir`
+- **`service_user`** (`goopy` by default) must be able to read `source_dir`
   and write the instance working directories under `base_dir`. Instances run as
   this user, never as root.
 - **A wildcard TLS certificate** for the domain at
@@ -136,7 +136,7 @@ they point at.
 
 ## Upgrading Ghost
 
-Instances are **pinned to the version they were created with**. `ghost_version`
+Instances are **pinned to the version they were created with**. `version`
 is recorded on every instance as `service_version` at spawn time, and the
 instance keeps running against the base install it was linked to. Beta runs a
 single Ghost version at a time; supporting several coexisting versions is a
@@ -150,7 +150,7 @@ To upgrade:
    ```bash
    ln -sfn /opt/goopy-life/ghost-5.90.0 /opt/goopy-life/ghost
    ```
-3. Bump `ghost_version` in `config.toml` to match, and restart `gl-serv`.
+3. Bump `version` in `config.toml` to match, and restart `gl-serv`.
 4. Instances spawned from now on use the new version. Existing instances keep
    running against the old one.
 

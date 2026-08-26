@@ -167,6 +167,8 @@ impl SysRunner for RealSysRunner {
 #[cfg(any(test, feature = "test-utils"))]
 pub struct MockSysRunner {
     calls: Mutex<Vec<MockCall>>,
+    #[allow(clippy::type_complexity)]
+    sudo_run_fails_when: Option<Box<dyn Fn(&[&str]) -> bool + Send + Sync>>,
 }
 
 /// A single recorded call to [`MockSysRunner`].
@@ -206,12 +208,63 @@ impl MockSysRunner {
     pub fn new() -> Self {
         Self {
             calls: Mutex::new(vec![]),
+            sudo_run_fails_when: None,
+        }
+    }
+
+    /// A mock whose `sudo_run` records the call and then fails whenever `pred`
+    /// matches its arguments.
+    ///
+    /// For exercising tolerance of commands that legitimately fail against
+    /// partial state — e.g. `systemctl stop` on a unit that was never installed.
+    pub fn failing_sudo_run(pred: impl Fn(&[&str]) -> bool + Send + Sync + 'static) -> Self {
+        Self {
+            calls: Mutex::new(vec![]),
+            sudo_run_fails_when: Some(Box::new(pred)),
         }
     }
 
     /// Returns all recorded calls in order.
     pub fn recorded_calls(&self) -> Vec<MockCall> {
         self.calls.lock().unwrap().clone()
+    }
+
+    /// Every argument passed to `sudo_run`, flattened in call order.
+    ///
+    /// This is what assertions actually want — both "these verbs ran in this
+    /// order" and "this path was removed" read off a flat list.
+    pub fn sudo_run_args(&self) -> Vec<String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| match c {
+                MockCall::SudoRun { args } => Some(args.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// Paths passed to `sudo_write`, in call order.
+    pub fn sudo_write_paths(&self) -> Vec<String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| match c {
+                MockCall::SudoWrite { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Content written to `path` by `sudo_write`, if any.
+    pub fn sudo_written_content(&self, path: &str) -> Option<String> {
+        self.calls.lock().unwrap().iter().find_map(|c| match c {
+            MockCall::SudoWrite { path: p, content } if p == path => Some(content.clone()),
+            _ => None,
+        })
     }
 }
 
@@ -236,6 +289,9 @@ impl SysRunner for MockSysRunner {
         self.calls.lock().unwrap().push(MockCall::SudoRun {
             args: args.iter().map(|s| s.to_string()).collect(),
         });
+        if self.sudo_run_fails_when.as_ref().is_some_and(|f| f(args)) {
+            return Err(Error::Subprocess(format!("mock failure for {args:?}")));
+        }
         Ok(())
     }
 

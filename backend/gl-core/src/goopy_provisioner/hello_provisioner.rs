@@ -1,10 +1,9 @@
-use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
 use tracing::{info, instrument};
 
-use super::{GoopyProvisioner, nginx};
+use super::{GoopyProvisioner, dev_process, nginx, systemd};
 use crate::Goopy;
 use crate::shared_types::*;
 use crate::storage_allocator::StorageAllocator;
@@ -95,80 +94,6 @@ WantedBy=multi-user.target
         format!("goopy-hello-{slug}")
     }
 
-    // ── Production provisioning steps ───────────────────────────────────
-
-    fn write_service_file(&self, slug: &str, working_dir: &Path) -> Result<(), Error> {
-        let content = Self::render_service_file(slug, working_dir);
-        let path = format!("/etc/systemd/system/{}.service", Self::service_name(slug));
-        self.sys.sudo_write(&path, &content)
-    }
-
-    fn enable_service(&self, slug: &str) -> Result<(), Error> {
-        let svc = format!("{}.service", Self::service_name(slug));
-        self.sys.sudo_run(&["systemctl", "daemon-reload"])?;
-        self.sys.sudo_run(&["systemctl", "enable", &svc])?;
-        self.sys.sudo_run(&["systemctl", "start", &svc])
-    }
-
-    // ── Production deprovisioning steps ─────────────────────────────────
-
-    fn stop_service(&self, slug: &str) -> Result<(), Error> {
-        let svc = format!("{}.service", Self::service_name(slug));
-
-        // `stop`/`disable` are tolerant of a missing or never-installed unit:
-        // a `Failed` instance may have only partial state, so a non-zero exit
-        // here (unit not loaded / not enabled) is expected and non-fatal. The
-        // authoritative cleanup is the `rm -f` + `daemon-reload` below.
-        if let Err(e) = self.sys.sudo_run(&["systemctl", "stop", &svc]) {
-            tracing::warn!(error = %e, %svc, "systemctl stop failed (unit may not exist), continuing");
-        }
-        if let Err(e) = self.sys.sudo_run(&["systemctl", "disable", &svc]) {
-            tracing::warn!(error = %e, %svc, "systemctl disable failed (unit may not exist), continuing");
-        }
-
-        let path = format!("/etc/systemd/system/{svc}");
-        self.sys.sudo_run(&["rm", "-f", &path])?;
-        self.sys.sudo_run(&["systemctl", "daemon-reload"])
-    }
-
-    // ── Dev-mode helpers ────────────────────────────────────────────────
-
-    fn spawn_dev_server(&self, working_dir: &Path) -> Result<(), Error> {
-        info!(working_dir = %working_dir.display(), "spawning dev server");
-        let log_path = working_dir.join("server.log");
-        let pid =
-            self.sys
-                .spawn_detached("python3", &["server.py"], working_dir, &[], &log_path)?;
-        let pid_path = working_dir.join("server.pid");
-        info!(%pid, pid_path = %pid_path.display(), "writing PID file");
-        std::fs::write(&pid_path, pid.to_string()).map_err(Error::Io)
-    }
-
-    fn kill_dev_server(&self, working_dir: &Path) -> Result<(), Error> {
-        let pid_path = working_dir.join("server.pid");
-        let pid_str = match fs::read_to_string(&pid_path) {
-            Ok(s) => s,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                info!(pid_path = %pid_path.display(), "no PID file found, nothing to kill");
-                return Ok(());
-            }
-            Err(e) => return Err(Error::Io(e)),
-        };
-        let pid = pid_str.trim();
-
-        if pid.is_empty() {
-            return Err(Error::Invalid);
-        }
-
-        if !pid.chars().all(|c| c.is_ascii_digit()) {
-            return Err(Error::Subprocess(format!("invalid PID in file: {pid:?}")));
-        }
-
-        info!(%pid, "killing dev server");
-        self.sys.kill_pid(pid)?;
-        std::fs::remove_file(&pid_path).map_err(Error::Io)
-    }
-
     // ── Inner provision (post-allocate steps) ───────────────────────────
 
     fn provision_inner(&self, goopy: &Goopy) -> Result<(), Error> {
@@ -178,10 +103,20 @@ WantedBy=multi-user.target
             .map_err(Error::Io)?;
 
         if self.dev_mode {
-            self.spawn_dev_server(&goopy.working_dir)?;
+            dev_process::spawn(
+                self.sys.as_ref(),
+                &goopy.working_dir,
+                "python3",
+                &["server.py"],
+                &[],
+                "server.log",
+            )?;
         } else {
-            self.write_service_file(&goopy.slug, &goopy.working_dir)?;
-            self.enable_service(&goopy.slug)?;
+            systemd::install_and_start(
+                self.sys.as_ref(),
+                &Self::service_name(&goopy.slug),
+                &Self::render_service_file(&goopy.slug, &goopy.working_dir),
+            )?;
             nginx::install_site(
                 self.sys.as_ref(),
                 &goopy.slug,
@@ -201,8 +136,8 @@ impl GoopyProvisioner for HelloProvisioner {
     }
 
     /// The Hello PoC ships with the crate, so its version *is* the crate version.
-    fn service_version(&self) -> String {
-        env!("CARGO_PKG_VERSION").to_string()
+    fn service_version(&self) -> &str {
+        env!("CARGO_PKG_VERSION")
     }
 
     #[instrument(skip(self), fields(slug = %goopy.slug, dev_mode = self.dev_mode))]
@@ -223,9 +158,9 @@ impl GoopyProvisioner for HelloProvisioner {
     #[instrument(skip(self), fields(slug = %goopy.slug, dev_mode = self.dev_mode))]
     fn deprovision(&self, goopy: &Goopy) -> Result<(), Error> {
         let result = if self.dev_mode {
-            self.kill_dev_server(&goopy.working_dir)
+            dev_process::kill(self.sys.as_ref(), &goopy.working_dir)
         } else {
-            self.stop_service(&goopy.slug)
+            systemd::stop_and_remove(self.sys.as_ref(), &Self::service_name(&goopy.slug))
                 .and_then(|_| nginx::remove_site(self.sys.as_ref(), &goopy.slug))
         };
         if let Err(e) = self.storage.release(&goopy.working_dir) {
@@ -242,6 +177,7 @@ mod tests {
     use super::*;
     use crate::storage_allocator::PlainDirAllocator;
     use crate::sys_utils::{MockCall, MockSysRunner, RealSysRunner};
+    use std::fs;
     use tempfile::tempdir;
 
     fn test_goopy(working_dir: &Path, port: u32) -> Goopy {

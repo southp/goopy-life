@@ -1,6 +1,8 @@
+mod dev_process;
 pub mod ghost_provisioner;
 pub mod hello_provisioner;
 mod nginx;
+mod systemd;
 
 use crate::Goopy;
 use crate::shared_types::*;
@@ -15,7 +17,7 @@ pub trait GoopyProvisioner {
     ///
     /// Instances are pinned to the version they were provisioned with: changing
     /// the configured version affects only instances created afterwards.
-    fn service_version(&self) -> String;
+    fn service_version(&self) -> &str;
 }
 
 /// Forwarding impl so a provisioner chosen at runtime (`Config::build_provisioner`)
@@ -33,7 +35,7 @@ impl GoopyProvisioner for Box<dyn GoopyProvisioner + Send + Sync> {
         (**self).kind()
     }
 
-    fn service_version(&self) -> String {
+    fn service_version(&self) -> &str {
         (**self).service_version()
     }
 }

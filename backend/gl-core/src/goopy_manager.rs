@@ -140,7 +140,7 @@ where
                 port,
                 status: Status::Spawning,
                 provisioner_kind: self.provisioner.kind(),
-                service_version: self.provisioner.service_version(),
+                service_version: self.provisioner.service_version().to_string(),
             };
 
             // Capacity is enforced by the insert itself rather than by a
@@ -433,8 +433,8 @@ mod tests {
         fn kind(&self) -> ProvisionerKind {
             ProvisionerKind::Hello
         }
-        fn service_version(&self) -> String {
-            "0.1.0".to_string()
+        fn service_version(&self) -> &str {
+            "0.1.0"
         }
     }
 
@@ -769,8 +769,8 @@ mod tests {
             ProvisionerKind::Hello
         }
 
-        fn service_version(&self) -> String {
-            "0.1.0".to_string()
+        fn service_version(&self) -> &str {
+            "0.1.0"
         }
     }
 

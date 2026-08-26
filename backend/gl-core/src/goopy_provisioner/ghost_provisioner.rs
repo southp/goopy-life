@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tracing::{info, instrument};
 
-use super::{GoopyProvisioner, nginx};
+use super::{GoopyProvisioner, dev_process, nginx, systemd};
 use crate::Goopy;
 use crate::shared_types::*;
 use crate::storage_allocator::StorageAllocator;
@@ -17,7 +17,7 @@ use crate::sys_utils::SysRunner;
 ///
 /// A full Ghost install is ~200 MB of `node_modules`, and installing one per
 /// instance would dominate provisioning time. Instead every instance shares a
-/// single prepared install at `ghost_source_dir` (see
+/// single prepared install at [`GhostConfig::source_dir`] (see
 /// `docs/GHOST_PROVISIONER.md` for how to prepare it) and the working directory
 /// is assembled from it in two parts:
 ///
@@ -52,16 +52,42 @@ pub struct GhostProvisioner {
     dev_mode: bool,
     /// Address on which gl-serv listens; used by nginx `auth_request` subrequests.
     api_address: String,
-    /// Prepared base Ghost install that every instance soft-links to.
-    ghost_source_dir: PathBuf,
-    /// Version of the base install, recorded on each instance it provisions.
-    ghost_version: String,
-    /// Node.js binary used to run Ghost. systemd requires an absolute path.
-    node_bin: String,
-    /// Unprivileged OS user the per-instance systemd unit runs as.
-    service_user: String,
+    ghost: GhostConfig,
     storage: Arc<dyn StorageAllocator>,
     sys: Arc<dyn SysRunner>,
+}
+
+/// Ghost-specific settings, deserialized from the `[provisioner]` TOML section
+/// when `kind = "Ghost"`.
+///
+/// These four values travel together from config to provisioner, so they are one
+/// type rather than four constructor arguments.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct GhostConfig {
+    /// Prepared base Ghost install that every instance soft-links to.
+    /// See `docs/GHOST_PROVISIONER.md` for how to prepare it.
+    pub source_dir: PathBuf,
+    /// Version of the base install, recorded on each instance it provisions.
+    ///
+    /// Deliberately configured rather than read from `source_dir/package.json`:
+    /// upgrading is an operator action (prepare a new install, repoint the
+    /// symlink, bump this), and pinning must not silently follow the base
+    /// install if that symlink moves under running instances.
+    pub version: String,
+    /// Node.js binary used to run Ghost. systemd requires an absolute path.
+    #[serde(default = "default_node_bin")]
+    pub node_bin: String,
+    /// Unprivileged OS user the per-instance systemd unit runs as.
+    #[serde(default = "default_service_user")]
+    pub service_user: String,
+}
+
+fn default_node_bin() -> String {
+    "/usr/bin/node".to_string()
+}
+
+fn default_service_user() -> String {
+    "goopy".to_string()
 }
 
 /// Entries symlinked from the base install: Ghost's own code, which it reads
@@ -78,15 +104,11 @@ const CONTENT_DIRS: &[&str] = &[
 const STOCK_THEME: &str = "casper";
 
 impl GhostProvisioner {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         domain: String,
         dev_mode: bool,
         api_address: String,
-        ghost_source_dir: PathBuf,
-        ghost_version: String,
-        node_bin: String,
-        service_user: String,
+        ghost: GhostConfig,
         storage: Arc<dyn StorageAllocator>,
         sys: Arc<dyn SysRunner>,
     ) -> Self {
@@ -94,10 +116,7 @@ impl GhostProvisioner {
             domain,
             dev_mode,
             api_address,
-            ghost_source_dir,
-            ghost_version,
-            node_bin,
-            service_user,
+            ghost,
             storage,
             sys,
         }
@@ -123,12 +142,12 @@ impl GhostProvisioner {
     fn materialize_instance_dir(&self, working_dir: &Path) -> Result<(), Error> {
         info!(
             working_dir = %working_dir.display(),
-            source = %self.ghost_source_dir.display(),
+            source = %self.ghost.source_dir.display(),
             "linking instance against base Ghost install"
         );
 
         for entry in SHARED_ENTRIES {
-            Self::force_symlink(&self.ghost_source_dir.join(entry), &working_dir.join(entry))?;
+            Self::force_symlink(&self.ghost.source_dir.join(entry), &working_dir.join(entry))?;
         }
 
         let content = working_dir.join("content");
@@ -140,7 +159,8 @@ impl GhostProvisioner {
         // instance's own (real) content/themes directory alongside this link.
         Self::force_symlink(
             &self
-                .ghost_source_dir
+                .ghost
+                .source_dir
                 .join("content")
                 .join("themes")
                 .join(STOCK_THEME),
@@ -226,95 +246,14 @@ TimeoutStopSec=30
 [Install]
 WantedBy=multi-user.target
 "#,
-            slug = slug,
-            user = self.service_user,
-            node_bin = self.node_bin,
+            user = self.ghost.service_user,
+            node_bin = self.ghost.node_bin,
             working_dir = working_dir.display(),
         )
     }
 
     fn service_name(slug: &str) -> String {
         format!("goopy-{slug}")
-    }
-
-    // ── Production provisioning steps ───────────────────────────────────
-
-    fn write_service_file(&self, slug: &str, working_dir: &Path) -> Result<(), Error> {
-        let content = self.render_service_file(slug, working_dir);
-        let path = format!("/etc/systemd/system/{}.service", Self::service_name(slug));
-        self.sys.sudo_write(&path, &content)
-    }
-
-    fn enable_service(&self, slug: &str) -> Result<(), Error> {
-        let svc = format!("{}.service", Self::service_name(slug));
-        self.sys.sudo_run(&["systemctl", "daemon-reload"])?;
-        self.sys.sudo_run(&["systemctl", "enable", &svc])?;
-        self.sys.sudo_run(&["systemctl", "start", &svc])
-    }
-
-    // ── Production deprovisioning steps ─────────────────────────────────
-
-    fn stop_service(&self, slug: &str) -> Result<(), Error> {
-        let svc = format!("{}.service", Self::service_name(slug));
-
-        // `stop`/`disable` tolerate a missing or never-installed unit: a `Failed`
-        // instance may hold only partial state, and sweep() reaps those, so a
-        // non-zero exit here must not block cleanup and strand the instance.
-        // The `rm -f` + `daemon-reload` below is the authoritative removal.
-        if let Err(e) = self.sys.sudo_run(&["systemctl", "stop", &svc]) {
-            tracing::warn!(error = %e, %svc, "systemctl stop failed (unit may not exist), continuing");
-        }
-        if let Err(e) = self.sys.sudo_run(&["systemctl", "disable", &svc]) {
-            tracing::warn!(error = %e, %svc, "systemctl disable failed (unit may not exist), continuing");
-        }
-
-        let path = format!("/etc/systemd/system/{svc}");
-        self.sys.sudo_run(&["rm", "-f", &path])?;
-        self.sys.sudo_run(&["systemctl", "daemon-reload"])
-    }
-
-    // ── Dev-mode helpers ────────────────────────────────────────────────
-
-    fn spawn_dev_server(&self, working_dir: &Path) -> Result<(), Error> {
-        info!(working_dir = %working_dir.display(), "spawning dev Ghost");
-        let log_path = working_dir.join("ghost.log");
-        // NODE_ENV selects config.production.json; dev mode refers to *our*
-        // mode, not Ghost's, and there is only ever one config per instance.
-        let pid = self.sys.spawn_detached(
-            &self.node_bin,
-            &["index.js"],
-            working_dir,
-            &[("NODE_ENV", "production")],
-            &log_path,
-        )?;
-        let pid_path = working_dir.join("server.pid");
-        info!(%pid, pid_path = %pid_path.display(), "writing PID file");
-        fs::write(&pid_path, pid.to_string()).map_err(Error::Io)
-    }
-
-    fn kill_dev_server(&self, working_dir: &Path) -> Result<(), Error> {
-        let pid_path = working_dir.join("server.pid");
-        let pid_str = match fs::read_to_string(&pid_path) {
-            Ok(s) => s,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                info!(pid_path = %pid_path.display(), "no PID file found, nothing to kill");
-                return Ok(());
-            }
-            Err(e) => return Err(Error::Io(e)),
-        };
-        let pid = pid_str.trim();
-
-        if pid.is_empty() {
-            return Err(Error::Invalid);
-        }
-
-        if !pid.chars().all(|c| c.is_ascii_digit()) {
-            return Err(Error::Subprocess(format!("invalid PID in file: {pid:?}")));
-        }
-
-        info!(%pid, "killing dev Ghost");
-        self.sys.kill_pid(pid)?;
-        fs::remove_file(&pid_path).map_err(Error::Io)
     }
 
     // ── Inner provision (post-allocate steps) ───────────────────────────
@@ -324,10 +263,22 @@ WantedBy=multi-user.target
         self.write_ghost_config(goopy)?;
 
         if self.dev_mode {
-            self.spawn_dev_server(&goopy.working_dir)?;
+            // NODE_ENV selects config.production.json; dev mode refers to *our*
+            // mode, not Ghost's, and there is only ever one config per instance.
+            dev_process::spawn(
+                self.sys.as_ref(),
+                &goopy.working_dir,
+                &self.ghost.node_bin,
+                &["index.js"],
+                &[("NODE_ENV", "production")],
+                "ghost.log",
+            )?;
         } else {
-            self.write_service_file(&goopy.slug, &goopy.working_dir)?;
-            self.enable_service(&goopy.slug)?;
+            systemd::install_and_start(
+                self.sys.as_ref(),
+                &Self::service_name(&goopy.slug),
+                &self.render_service_file(&goopy.slug, &goopy.working_dir),
+            )?;
             nginx::install_site(
                 self.sys.as_ref(),
                 &goopy.slug,
@@ -349,8 +300,8 @@ impl GoopyProvisioner for GhostProvisioner {
     /// The configured version of the base install. Recorded on each instance so
     /// it stays pinned to the Ghost it was created with, even after the operator
     /// upgrades the base install for subsequent instances.
-    fn service_version(&self) -> String {
-        self.ghost_version.clone()
+    fn service_version(&self) -> &str {
+        &self.ghost.version
     }
 
     #[instrument(skip(self), fields(slug = %goopy.slug, dev_mode = self.dev_mode))]
@@ -364,16 +315,16 @@ impl GoopyProvisioner for GhostProvisioner {
             return Err(e);
         }
 
-        info!(slug = %goopy.slug, version = %self.ghost_version, "provisioning complete");
+        info!(slug = %goopy.slug, version = %self.ghost.version, "provisioning complete");
         Ok(())
     }
 
     #[instrument(skip(self), fields(slug = %goopy.slug, dev_mode = self.dev_mode))]
     fn deprovision(&self, goopy: &Goopy) -> Result<(), Error> {
         let result = if self.dev_mode {
-            self.kill_dev_server(&goopy.working_dir)
+            dev_process::kill(self.sys.as_ref(), &goopy.working_dir)
         } else {
-            self.stop_service(&goopy.slug)
+            systemd::stop_and_remove(self.sys.as_ref(), &Self::service_name(&goopy.slug))
                 .and_then(|_| nginx::remove_site(self.sys.as_ref(), &goopy.slug))
         };
         // Releasing the working directory removes the symlinks themselves, not
@@ -435,33 +386,15 @@ mod tests {
             "goopy.life".to_string(),
             dev_mode,
             "127.0.0.1:3000".to_string(),
-            source.path().to_path_buf(),
-            "5.87.1".to_string(),
-            "/usr/bin/node".to_string(),
-            "goopy".to_string(),
+            GhostConfig {
+                source_dir: source.path().to_path_buf(),
+                version: "5.87.1".to_string(),
+                node_bin: "/usr/bin/node".to_string(),
+                service_user: "goopy".to_string(),
+            },
             Arc::new(PlainDirAllocator),
             sys,
         )
-    }
-
-    fn sudo_run_args(calls: &[MockCall]) -> Vec<&[String]> {
-        calls
-            .iter()
-            .filter_map(|c| match c {
-                MockCall::SudoRun { args } => Some(args.as_slice()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn sudo_write_paths(calls: &[MockCall]) -> Vec<&str> {
-        calls
-            .iter()
-            .filter_map(|c| match c {
-                MockCall::SudoWrite { path, .. } => Some(path.as_str()),
-                _ => None,
-            })
-            .collect()
     }
 
     #[test]
@@ -674,37 +607,26 @@ mod tests {
         p.provision(&test_goopy(&working_dir, 9876))
             .expect("prod provision should succeed");
 
-        let calls = mock.recorded_calls();
-
-        let unit = calls
-            .iter()
-            .find_map(|c| match c {
-                MockCall::SudoWrite { path, content } if path.contains("/etc/systemd/system/") => {
-                    Some((path.clone(), content.clone()))
-                }
-                _ => None,
-            })
+        let unit = mock
+            .sudo_written_content("/etc/systemd/system/goopy-tasty-lucky-clover.service")
             .expect("should write a systemd unit");
-        assert_eq!(
-            unit.0,
-            "/etc/systemd/system/goopy-tasty-lucky-clover.service"
-        );
-        assert!(unit.1.contains("Environment=NODE_ENV=production"));
-        assert!(unit.1.contains("User=goopy"), "Ghost must not run as root");
-        assert!(unit.1.contains(&format!(
+        assert!(unit.contains("Environment=NODE_ENV=production"));
+        assert!(unit.contains("User=goopy"), "Ghost must not run as root");
+        assert!(unit.contains(&format!(
             "ExecStart=/usr/bin/node \"{}/index.js\"",
             working_dir.display()
         )));
 
         assert!(
-            sudo_write_paths(&calls)
-                .contains(&"/etc/nginx/sites-available/goopy-tasty-lucky-clover"),
+            mock.sudo_write_paths()
+                .contains(&"/etc/nginx/sites-available/goopy-tasty-lucky-clover".to_string()),
             "should write the nginx site"
         );
 
-        let verb_seq: Vec<&str> = sudo_run_args(&calls)
+        let args = mock.sudo_run_args();
+        let verb_seq: Vec<&str> = args
             .iter()
-            .flat_map(|args| args.iter().map(|s| s.as_str()))
+            .map(String::as_str)
             .filter(|a| ["daemon-reload", "enable", "start", "ln", "reload"].contains(a))
             .collect();
         assert_eq!(
@@ -724,72 +646,22 @@ mod tests {
         p.deprovision(&test_goopy(&working_dir, 9876))
             .expect("prod deprovision should succeed");
 
-        let calls = mock.recorded_calls();
-        let verb_seq: Vec<&str> = sudo_run_args(&calls)
+        let args = mock.sudo_run_args();
+        let verb_seq: Vec<&str> = args
             .iter()
-            .flat_map(|args| args.iter().map(|s| s.as_str()))
+            .map(String::as_str)
             .filter(|a| ["stop", "disable", "daemon-reload", "reload"].contains(a))
             .collect();
         assert_eq!(verb_seq, ["stop", "disable", "daemon-reload", "reload"]);
 
-        let removed: Vec<&String> = sudo_run_args(&calls)
-            .iter()
-            .flat_map(|args| args.iter())
-            .collect();
         assert!(
-            removed
-                .iter()
-                .any(|a| *a == "/etc/systemd/system/goopy-tasty-lucky-clover.service"),
+            args.contains(&"/etc/systemd/system/goopy-tasty-lucky-clover.service".to_string()),
             "should remove the systemd unit"
         );
         assert!(
-            removed
-                .iter()
-                .any(|a| *a == "/etc/nginx/sites-available/goopy-tasty-lucky-clover"),
+            args.contains(&"/etc/nginx/sites-available/goopy-tasty-lucky-clover".to_string()),
             "should remove the nginx site"
         );
-    }
-
-    /// SysRunner whose `systemctl stop`/`disable` always fail, standing in for a
-    /// `Failed` instance whose unit was never installed.
-    struct NoUnitSysRunner {
-        inner: MockSysRunner,
-    }
-
-    impl SysRunner for NoUnitSysRunner {
-        fn run(&self, program: &str, args: &[&str]) -> Result<(), Error> {
-            self.inner.run(program, args)
-        }
-
-        fn sudo_run(&self, args: &[&str]) -> Result<(), Error> {
-            self.inner.sudo_run(args)?;
-            if args.first() == Some(&"systemctl")
-                && matches!(args.get(1), Some(&"stop") | Some(&"disable"))
-            {
-                return Err(Error::Subprocess("Unit not loaded.".to_string()));
-            }
-            Ok(())
-        }
-
-        fn sudo_write(&self, path: &str, content: &str) -> Result<(), Error> {
-            self.inner.sudo_write(path, content)
-        }
-
-        fn spawn_detached(
-            &self,
-            program: &str,
-            args: &[&str],
-            working_dir: &Path,
-            envs: &[(&str, &str)],
-            log_path: &Path,
-        ) -> Result<u32, Error> {
-            self.inner
-                .spawn_detached(program, args, working_dir, envs, log_path)
-        }
-
-        fn kill_pid(&self, pid: &str) -> Result<(), Error> {
-            self.inner.kill_pid(pid)
-        }
     }
 
     /// A `Failed` instance may never have had its unit installed. sweep() reaps
@@ -802,27 +674,21 @@ mod tests {
         let base = tempdir().unwrap();
         let working_dir = base.path().join("tasty-lucky-clover");
 
-        let sys = Arc::new(NoUnitSysRunner {
-            inner: MockSysRunner::new(),
-        });
+        let sys = Arc::new(MockSysRunner::failing_sudo_run(|args| {
+            matches!(args.get(1), Some(&"stop") | Some(&"disable"))
+        }));
         let p = provisioner(false, &source, sys.clone());
 
         p.deprovision(&test_goopy(&working_dir, 9876))
             .expect("deprovision must succeed even when the unit does not exist");
 
-        let calls = sys.inner.recorded_calls();
-        let args: Vec<&String> = sudo_run_args(&calls)
-            .iter()
-            .flat_map(|a| a.iter())
-            .collect();
+        let args = sys.sudo_run_args();
         assert!(
-            args.iter()
-                .any(|a| *a == "/etc/systemd/system/goopy-tasty-lucky-clover.service"),
+            args.contains(&"/etc/systemd/system/goopy-tasty-lucky-clover.service".to_string()),
             "unit file must still be removed"
         );
         assert!(
-            args.iter()
-                .any(|a| *a == "/etc/nginx/sites-available/goopy-tasty-lucky-clover"),
+            args.contains(&"/etc/nginx/sites-available/goopy-tasty-lucky-clover".to_string()),
             "nginx site must still be removed"
         );
     }
@@ -838,13 +704,11 @@ mod tests {
         p.provision(&test_goopy(&working_dir, 9876)).unwrap();
         p.deprovision(&test_goopy(&working_dir, 9876)).unwrap();
 
-        for args in sudo_run_args(&mock.recorded_calls()) {
-            for arg in args {
-                assert!(
-                    !arg.contains(' ') && !arg.contains(';') && !arg.contains('&'),
-                    "argument {arg:?} looks like a shell string; each value must be its own arg"
-                );
-            }
+        for arg in mock.sudo_run_args() {
+            assert!(
+                !arg.contains(' ') && !arg.contains(';') && !arg.contains('&'),
+                "argument {arg:?} looks like a shell string; each value must be its own arg"
+            );
         }
     }
 

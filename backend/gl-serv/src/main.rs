@@ -702,8 +702,8 @@ mod tests {
         fn kind(&self) -> ProvisionerKind {
             ProvisionerKind::Hello
         }
-        fn service_version(&self) -> String {
-            "0.1.0".to_string()
+        fn service_version(&self) -> &str {
+            "0.1.0"
         }
     }
 
@@ -730,13 +730,7 @@ mod tests {
                 pool: String::new(),
                 quota_mb: 0,
             },
-            provisioner: gl_core::config::ProvisionerConfig {
-                kind: ProvisionerKind::Hello,
-                ghost_source_dir: std::path::PathBuf::new(),
-                ghost_version: String::new(),
-                node_bin: String::new(),
-                service_user: String::new(),
-            },
+            provisioner: gl_core::config::ProvisionerConfig::Hello,
             ratelimit: gl_core::config::RateLimitConfig::default(),
         }
     }

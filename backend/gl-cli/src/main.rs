@@ -104,7 +104,7 @@ fn main() {
         base_dir = cfg.base_dir.display(),
         domain = cfg.domain,
         life_in_days = cfg.life_in_days,
-        provisioner = cfg.provisioner.kind,
+        provisioner = cfg.provisioner.kind(),
         port_start = cfg.port_range_start,
         port_end = cfg.port_range_end,
         alloc_kind = cfg.allocator.kind,

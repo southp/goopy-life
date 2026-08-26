@@ -48,10 +48,6 @@ server {{
     }}
 }}
 "#,
-        slug = slug,
-        domain = domain,
-        port = port,
-        api_address = api_address,
     )
 }
 
