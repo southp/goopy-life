@@ -124,7 +124,6 @@ WantedBy=multi-user.target
                 goopy.port,
                 &self.api_address,
             )?;
-            nginx::reload(self.sys.as_ref())?;
         }
         Ok(())
     }
@@ -176,7 +175,7 @@ impl GoopyProvisioner for HelloProvisioner {
 mod tests {
     use super::*;
     use crate::storage_allocator::PlainDirAllocator;
-    use crate::sys_utils::{MockCall, MockSysRunner, RealSysRunner};
+    use crate::sys_utils::{MockSysRunner, RealSysRunner};
     use std::fs;
     use tempfile::tempdir;
 
@@ -315,18 +314,7 @@ mod tests {
         );
         assert!(content.contains("9876"), "server.py should contain port");
 
-        let calls = mock_sys.recorded_calls();
-
-        let sudo_writes: Vec<&str> = calls
-            .iter()
-            .filter_map(|c| {
-                if let MockCall::SudoWrite { path, .. } = c {
-                    Some(path.as_str())
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let sudo_writes = mock_sys.sudo_write_paths();
         assert!(
             sudo_writes
                 .iter()
@@ -340,16 +328,10 @@ mod tests {
             "should write nginx config"
         );
 
-        let verb_seq: Vec<&str> = calls
+        let args = mock_sys.sudo_run_args();
+        let verb_seq: Vec<&str> = args
             .iter()
-            .filter_map(|c| {
-                if let MockCall::SudoRun { args } = c {
-                    Some(args)
-                } else {
-                    None
-                }
-            })
-            .flat_map(|args| args.iter().map(|s| s.as_str()))
+            .map(String::as_str)
             .filter(|a| ["daemon-reload", "enable", "start", "ln", "reload"].contains(a))
             .collect();
         assert_eq!(
@@ -380,44 +362,24 @@ mod tests {
             .deprovision(&goopy)
             .expect("prod deprovision should succeed");
 
-        let calls = mock_sys.recorded_calls();
+        let args = mock_sys.sudo_run_args();
 
         // Verify ordered stop → disable → daemon-reload → reload verb sequence.
-        let verb_seq: Vec<&str> = calls
+        let verb_seq: Vec<&str> = args
             .iter()
-            .filter_map(|c| {
-                if let MockCall::SudoRun { args } = c {
-                    Some(args)
-                } else {
-                    None
-                }
-            })
-            .flat_map(|args| args.iter().map(|s| s.as_str()))
+            .map(String::as_str)
             .filter(|a| ["stop", "disable", "daemon-reload", "reload"].contains(a))
             .collect();
         assert_eq!(verb_seq, ["stop", "disable", "daemon-reload", "reload"]);
 
         // Verify rm was issued for the systemd service file and nginx configs.
-        let run_args: Vec<&[String]> = calls
-            .iter()
-            .filter_map(|c| {
-                if let MockCall::SudoRun { args } = c {
-                    Some(args.as_slice())
-                } else {
-                    None
-                }
-            })
-            .collect();
         assert!(
-            run_args
-                .iter()
-                .any(|args| args.iter().any(|a| a.contains("/etc/systemd/system/"))),
+            args.iter().any(|a| a.contains("/etc/systemd/system/")),
             "should remove systemd service file"
         );
         assert!(
-            run_args.iter().any(|args| args
-                .iter()
-                .any(|a| a.contains("/etc/nginx/sites-available/"))),
+            args.iter()
+                .any(|a| a.contains("/etc/nginx/sites-available/")),
             "should remove nginx config"
         );
     }

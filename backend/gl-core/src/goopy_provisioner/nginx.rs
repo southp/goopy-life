@@ -59,7 +59,7 @@ fn enabled_path(slug: &str) -> String {
     format!("/etc/nginx/sites-enabled/goopy-{slug}")
 }
 
-/// Writes the site config and symlinks it into `sites-enabled`.
+/// Writes the site config, symlinks it into `sites-enabled`, and reloads nginx.
 pub(crate) fn install_site(
     sys: &dyn SysRunner,
     slug: &str,
@@ -70,7 +70,8 @@ pub(crate) fn install_site(
     let content = render_site(slug, domain, port, api_address);
     let available = available_path(slug);
     sys.sudo_write(&available, &content)?;
-    sys.sudo_run(&["ln", "-sf", &available, &enabled_path(slug)])
+    sys.sudo_run(&["ln", "-sf", &available, &enabled_path(slug)])?;
+    reload(sys)
 }
 
 /// Removes both the symlink and the site config, then reloads nginx.
@@ -81,7 +82,7 @@ pub(crate) fn remove_site(sys: &dyn SysRunner, slug: &str) -> Result<(), Error> 
 }
 
 /// Validates the nginx config and reloads the running server.
-pub(crate) fn reload(sys: &dyn SysRunner) -> Result<(), Error> {
+fn reload(sys: &dyn SysRunner) -> Result<(), Error> {
     sys.sudo_run(&["nginx", "-t"])?;
     sys.sudo_run(&["systemctl", "reload", "nginx"])
 }

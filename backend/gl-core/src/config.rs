@@ -589,7 +589,7 @@ source_dir = "/opt/goopy-life/ghost"
     }
 
     #[test]
-    fn hello_kind_ignores_missing_ghost_fields() {
+    fn hello_kind_needs_no_ghost_fields() {
         let toml = format!(
             r#"{}
 [provisioner]
@@ -599,7 +599,7 @@ kind = "Hello"
         );
         assert!(
             write_config(&toml).is_ok(),
-            "Ghost-only fields must not be required for kind = \"Hello\""
+            "the Hello variant carries no Ghost settings"
         );
     }
 

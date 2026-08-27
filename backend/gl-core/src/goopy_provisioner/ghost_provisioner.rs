@@ -286,7 +286,6 @@ WantedBy=multi-user.target
                 goopy.port,
                 &self.api_address,
             )?;
-            nginx::reload(self.sys.as_ref())?;
         }
         Ok(())
     }
