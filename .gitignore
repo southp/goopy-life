@@ -1,2 +1,16 @@
 # macOS
 .DS_Store
+
+# Local development runtime state (backend/config.local.toml writes here).
+# .gitkeep is tracked so the directory exists on checkout — SQLite will not
+# create a missing parent directory for its database file.
+backend/.local/*
+!backend/.local/.gitkeep
+
+# Per-developer config. The committed, ready-to-run one is
+# backend/config.local.toml; this is for local edits you do not want to share.
+backend/config.toml
+
+# Runtime state from earlier local layouts, before backend/.local/ existed.
+backend/registry.db
+backend/gl-cli/test-temp/

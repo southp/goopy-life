@@ -73,7 +73,8 @@ fn main() {
     if !cli.config.exists() {
         tracing::error!(
             path = %cli.config.display(),
-            "config file not found; copy config.toml.example and adjust it to get started"
+            "config file not found; try --config config.local.toml from backend/, \
+             the committed local default"
         );
         std::process::exit(1);
     }

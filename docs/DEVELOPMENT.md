@@ -126,10 +126,35 @@ Next.js application deployed on Vercel.
 
 ## Configuration
 
-Configuration is TOML-based. See `backend/gl-cli/config.toml.example` for a local
-development template, and [`deploy/config/`](../deploy/config/) for the files the
-droplets actually run — those are version-controlled and installed by the deploy,
-not edited on the host. See [DEPLOYMENT.md](DEPLOYMENT.md#configuration).
+Configuration is TOML-based, and every configuration the repository commits is
+parsed by `gl-core/tests/committed_configs.rs` on each CI run — so a newly
+required field fails the pull request that introduces it rather than someone's
+first afternoon on a fresh checkout.
+
+**Running locally** — `backend/config.local.toml` is committed and ready to use,
+no copying required:
+
+```bash
+cd backend
+cargo run -p gl-serv -- --config config.local.toml
+cargo run -p gl-cli  -- --config config.local.toml list
+```
+
+It binds `127.0.0.1:3001`, which is the API URL in
+`frontend/.env.local.example`, so `yarn dev` in `frontend/` talks to it with no
+edits on either side. Everything a run creates lands in `backend/.local/`, which
+is gitignored — delete that directory to reset to a clean slate. For local
+changes you would rather not share, `backend/config.toml` is gitignored.
+
+**Deployed configurations** live in [`deploy/config/`](../deploy/config/) and are
+installed on the droplets by the deploy, not edited on the host — see
+[DEPLOYMENT.md](DEPLOYMENT.md#configuration). The local config is deliberately
+not among them: that directory is the set `deploy.sh` can ship, and
+`dev_mode = true` on a real droplet would skip systemd, nginx and ZFS.
+
+`config.local.toml` doubles as the reference for every field: gl-cli and gl-serv
+read the same `Config`, so any configuration that works for one works for the
+other. There is no separate example file to fall out of date.
 
 Key settings:
 

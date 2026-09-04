@@ -1,0 +1,8 @@
+Runtime state for local development lives here — the SQLite registry and the
+per-instance working directories created by backend/config.local.toml.
+
+This file is committed only so the directory exists on a fresh checkout:
+SQLite creates a database file but not its parent directory, so without it the
+first local run fails with "unable to open database file".
+
+Everything else in here is gitignored. Delete the contents to reset local state.
