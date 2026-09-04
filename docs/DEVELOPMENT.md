@@ -152,8 +152,9 @@ installed on the droplets by the deploy, not edited on the host — see
 not among them: that directory is the set `deploy.sh` can ship, and
 `dev_mode = true` on a real droplet would skip systemd, nginx and ZFS.
 
-`backend/gl-cli/config.toml.example` predates the committed local config and
-documents the same fields; prefer `config.local.toml`.
+`config.local.toml` doubles as the reference for every field: gl-cli and gl-serv
+read the same `Config`, so any configuration that works for one works for the
+other. There is no separate example file to fall out of date.
 
 Key settings:
 

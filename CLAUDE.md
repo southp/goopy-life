@@ -40,7 +40,9 @@ frontend/    — Next.js app
 - **Storage:** `StorageAllocator` trait — `ZfsAllocator` (prod) / `PlainDirAllocator` (dev)
 - **Error handling:** custom `Error` enum in `shared_types.rs`
 - **Async boundary:** `gl-serv` uses `spawn_blocking` for registry calls
-- **Config:** TOML-based (`config.toml`); see `config.toml.example`
+- **Config:** TOML-based. `backend/config.local.toml` is committed and runs
+  locally as-is; `deploy/config/*.toml` are what the droplets run. All are
+  parsed by `gl-core/tests/committed_configs.rs` in CI
 - **Rust edition:** 2024
 
 ## Branching
