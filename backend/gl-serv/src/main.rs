@@ -702,6 +702,9 @@ mod tests {
         fn kind(&self) -> ProvisionerKind {
             ProvisionerKind::Hello
         }
+        fn service_version(&self) -> &str {
+            "0.1.0"
+        }
     }
 
     // ── Test helpers ──────────────────────────────────────────────────────
@@ -727,9 +730,7 @@ mod tests {
                 pool: String::new(),
                 quota_mb: 0,
             },
-            provisioner: gl_core::config::ProvisionerConfig {
-                kind: ProvisionerKind::Hello,
-            },
+            provisioner: gl_core::config::ProvisionerConfig::Hello,
             ratelimit: gl_core::config::RateLimitConfig::default(),
         }
     }

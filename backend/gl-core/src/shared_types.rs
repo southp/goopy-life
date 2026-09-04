@@ -27,7 +27,10 @@ impl std::str::FromStr for AllocatorKind {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ProvisionerKind {
+    /// Minimal PoC provisioner serving a static "Hello, I am {slug}" page.
     Hello,
+    /// Production provisioner: a real Ghost instance soft-linked to a shared base install.
+    Ghost,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -73,6 +76,7 @@ impl std::fmt::Display for ProvisionerKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ProvisionerKind::Hello => write!(f, "Hello"),
+            ProvisionerKind::Ghost => write!(f, "Ghost"),
         }
     }
 }
@@ -83,6 +87,7 @@ impl std::str::FromStr for ProvisionerKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "Hello" => Ok(ProvisionerKind::Hello),
+            "Ghost" => Ok(ProvisionerKind::Ghost),
             _ => Err(Error::Invalid),
         }
     }
@@ -161,10 +166,11 @@ mod tests {
 
     #[test]
     fn provisioner_kind_display_round_trip() {
-        let kind = ProvisionerKind::Hello;
-        let s = kind.to_string();
-        let parsed = ProvisionerKind::from_str(&s).expect("should round-trip");
-        assert_eq!(parsed, kind, "round-trip failed for {s}");
+        for kind in [ProvisionerKind::Hello, ProvisionerKind::Ghost] {
+            let s = kind.to_string();
+            let parsed = ProvisionerKind::from_str(&s).expect("should round-trip");
+            assert_eq!(parsed, kind, "round-trip failed for {s}");
+        }
     }
 
     #[test]
