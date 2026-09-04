@@ -14,6 +14,10 @@ I'm continuously rolling out updates in the dev instance at https://southp.dev. 
 
 The `deploy/` directory contains all artifacts needed to run the service on the droplet.
 
+The dev droplet and the Vercel frontend deploy themselves on every merge to
+`trunk`; production is deployed by hand. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+for the full picture and the one-time GitHub setup.
+
 ### Cross-compilation setup (one-time, on macOS)
 
 The droplet runs x86_64 Linux. Install the musl target and `cargo-zigbuild` (uses [Zig](https://ziglang.org/) as the cross-linker — no extra toolchain taps required):
@@ -49,7 +53,9 @@ sudo zfs set mountpoint=/opt/goopy-life/data zpool_ghost
 ### Deploying
 
 ```bash
-./deploy/deploy.sh user@droplet
+./deploy/deploy.sh user@droplet [ssh-port]
 ```
 
-This cross-compiles `gl-serv` to a fully static musl binary, uploads it to the droplet, and restarts the `gl-serv` systemd service.
+This cross-compiles `gl-serv` to a fully static musl binary, uploads it to the droplet, restarts the `gl-serv` systemd service, and verifies the service came back up.
+
+This is the manual path, used for production. The dev droplet is deployed automatically by [`.github/workflows/backend-deploy.yml`](.github/workflows/backend-deploy.yml) on every merge to `trunk` — both share `deploy/push-binary.sh` for the remote half, so they cannot drift apart.
