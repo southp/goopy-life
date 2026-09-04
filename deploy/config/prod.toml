@@ -1,0 +1,76 @@
+# Deployed configuration — production.
+#
+# ┌───────────────────────────────────────────────────────────────────────────┐
+# │ PLACEHOLDER. This is a verbatim copy of the dev droplet's configuration,   │
+# │ taken so the file exists and parses. There is no production host yet, and  │
+# │ the lines marked `REVIEW` below still name dev-only values.                │
+# │                                                                            │
+# │ Work through every REVIEW marker before the first production deploy.       │
+# └───────────────────────────────────────────────────────────────────────────┘
+#
+# This file IS what the production host runs: deploy/push-binary.sh installs it
+# at /opt/goopy-life/config.toml. Edit it here, not there.
+#
+# No secrets belong in this file: it is tracked in git and world-readable on the
+# host. Credentials go in a root-owned EnvironmentFile referenced from
+# deploy/gl-serv.service instead.
+
+# Base directory for goopy working directories.
+base_dir = "/opt/goopy-life/data"
+
+# REVIEW: production serves goopy.life, per deploy/nginx.api.goopy.life.
+# Public domain — instances are served at {slug}.{domain}.
+domain = "southp.dev"
+
+# REVIEW: production instances are likely to want a different lifetime.
+# How long each goopy lives (days).
+life_in_days = 1
+
+# Port range for goopy instances (inclusive).
+port_range_start = 40000
+port_range_end = 49999
+
+# Dev mode skips systemd, nginx and ZFS in favour of plain dirs and background
+# processes. Never true here.
+dev_mode = false
+
+# REVIEW: must match the production frontend origin, not the dev one.
+# Allowed CORS origin: the Vercel frontend.
+cors_origin = "https://southp.dev"
+
+# Address and port for gl-serv to bind; also used by nginx auth_request
+# subrequests. Note that 0.0.0.0 exposes gl-serv directly alongside nginx; see
+# the note in docs/DEPLOYMENT.md before narrowing it to 127.0.0.1.
+bind_address = "0.0.0.0:3000"
+
+# How often to sweep expired instances (seconds; 86400 = 24h).
+sweep_interval_secs = 86400
+
+# REVIEW: size these against the production droplet's RAM and disk, which need
+# not match the dev box.
+# Instance caps (#106). max_active is RAM-bound: ~200 MB per Ghost process on a
+# 2 GB droplet leaves room for about 10. max_provisioned is disk-bound and is
+# kept equal to max_active until scale-to-zero (#96) lands, which means the RAM
+# cap is unreachable and a full server answers `server_full`, never
+# `server_busy`. Both must be > 0, and max_active <= max_provisioned.
+max_active = 10
+max_provisioned = 10
+
+[registry]
+# Registry database path.
+path = "/opt/goopy-life/goopy.db"
+
+[allocator]
+# "PlainDir" (plain filesystem) or "Zfs" (ZFS datasets).
+kind = "Zfs"
+# REVIEW: the production pool name and a quota sized for real Ghost installs —
+# 32 MB is a dev-sized placeholder.
+# Storage pool name (Zfs only).
+pool = "zpool_ghost"
+# Disk quota per instance in MB (Zfs only).
+quota_mb = 32
+
+[provisioner]
+# REVIEW: production should serve real Ghost instances once #18 lands.
+# "Hello" (no-op dev provisioner) or "Ghost" (real Ghost install, #18).
+kind = "Hello"

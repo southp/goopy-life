@@ -1,0 +1,66 @@
+# Deployed configuration — dev droplet (api.southp.dev).
+#
+# This file IS what the droplet runs: deploy/push-binary.sh installs it at
+# /opt/goopy-life/config.toml on every deploy. Edit it here, not there — a
+# hand-edit on the droplet is silently overwritten by the next deploy.
+#
+# No secrets belong in this file: it is tracked in git and world-readable on the
+# droplet. When gl-serv eventually needs a credential, put it in a root-owned
+# EnvironmentFile referenced from deploy/gl-serv.service instead.
+#
+# Every field here is parsed by gl_core::Config. A field the binary requires but
+# this file omits is a startup crash, which is why tests/deploy_configs.rs parses
+# this file on every CI run.
+
+# Base directory for goopy working directories.
+base_dir = "/opt/goopy-life/data"
+
+# Public domain — instances are served at {slug}.{domain}.
+domain = "southp.dev"
+
+# How long each goopy lives (days).
+life_in_days = 1
+
+# Port range for goopy instances (inclusive).
+port_range_start = 40000
+port_range_end = 49999
+
+# Dev mode skips systemd, nginx and ZFS in favour of plain dirs and background
+# processes. The dev *droplet* is a real deployment, so this stays false — it is
+# about how instances are provisioned, not about which environment this is.
+dev_mode = false
+
+# Allowed CORS origin: the Vercel frontend.
+cors_origin = "https://southp.dev"
+
+# Address and port for gl-serv to bind; also used by nginx auth_request
+# subrequests. Note that 0.0.0.0 exposes gl-serv directly alongside nginx; see
+# the note in docs/DEPLOYMENT.md before narrowing it to 127.0.0.1.
+bind_address = "0.0.0.0:3000"
+
+# How often to sweep expired instances (seconds; 86400 = 24h).
+sweep_interval_secs = 86400
+
+# Instance caps (#106). max_active is RAM-bound: ~200 MB per Ghost process on a
+# 2 GB droplet leaves room for about 10. max_provisioned is disk-bound and is
+# kept equal to max_active until scale-to-zero (#96) lands, which means the RAM
+# cap is unreachable and a full server answers `server_full`, never
+# `server_busy`. Both must be > 0, and max_active <= max_provisioned.
+max_active = 10
+max_provisioned = 10
+
+[registry]
+# Registry database path.
+path = "/opt/goopy-life/goopy.db"
+
+[allocator]
+# "PlainDir" (plain filesystem) or "Zfs" (ZFS datasets).
+kind = "Zfs"
+# Storage pool name (Zfs only).
+pool = "zpool_ghost"
+# Disk quota per instance in MB (Zfs only).
+quota_mb = 32
+
+[provisioner]
+# "Hello" (no-op dev provisioner) or "Ghost" (real Ghost install, #18).
+kind = "Hello"
