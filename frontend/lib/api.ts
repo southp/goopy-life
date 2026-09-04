@@ -7,25 +7,44 @@
 // Presence of NEXT_PUBLIC_GL_API_URL is enforced at build time in next.config.ts, so
 // by the time this runs in the browser the value is always the baked-in literal.
 
-import type { ApiError, GoopyResponse } from "./types";
+import type { ApiError, CapacityResponse, GoopyResponse } from "./types";
 
 export function apiBase(): string {
 	return process.env.NEXT_PUBLIC_GL_API_URL ?? "";
 }
 
-export async function extractError(res: Response): Promise<string> {
+/**
+ * An error carrying the API's machine-readable `code` alongside its message.
+ *
+ * The code is what lets the UI tell an expected condition (`server_full`,
+ * `server_busy`, `too_many_requests`) apart from a genuine fault, which decides
+ * whether we invite the user to file a GitHub issue. `code` is null when the
+ * response body was not the API's JSON error shape at all (e.g. a proxy error
+ * page), i.e. when there is nothing trustworthy to branch on.
+ */
+export class ApiRequestError extends Error {
+	readonly code: string | null;
+
+	constructor(message: string, code: string | null) {
+		super(message);
+		this.name = "ApiRequestError";
+		this.code = code;
+	}
+}
+
+export async function toApiError(res: Response): Promise<ApiRequestError> {
 	try {
 		const json: ApiError = await res.json();
-		return json.error ?? `HTTP ${res.status}`;
+		return new ApiRequestError(json.error ?? `HTTP ${res.status}`, json.code ?? null);
 	} catch {
-		return `HTTP ${res.status}`;
+		return new ApiRequestError(`HTTP ${res.status}`, null);
 	}
 }
 
 export async function spawnGoopy(): Promise<{ slug: string }> {
 	const res = await fetch(`${apiBase()}/goopies`, { method: "POST" });
 	if (!res.ok) {
-		throw new Error(await extractError(res));
+		throw await toApiError(res);
 	}
 	return res.json();
 }
@@ -36,10 +55,22 @@ export async function getGoopy(
 ): Promise<GoopyResponse> {
 	const res = await fetch(`${apiBase()}/goopies/${slug}`, { signal });
 	if (res.status === 404) {
-		throw new Error("not_found");
+		throw new ApiRequestError("not_found", "not_found");
 	}
 	if (!res.ok) {
-		throw new Error(await extractError(res));
+		throw await toApiError(res);
+	}
+	return res.json();
+}
+
+// Live capacity. Cheap read, polled from the browser — unlike GET /config, which is
+// fetched once at build time and so cannot carry anything that changes at runtime.
+export async function getCapacity(
+	signal?: AbortSignal,
+): Promise<CapacityResponse> {
+	const res = await fetch(`${apiBase()}/capacity`, { signal });
+	if (!res.ok) {
+		throw await toApiError(res);
 	}
 	return res.json();
 }

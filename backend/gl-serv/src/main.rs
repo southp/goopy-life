@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
@@ -39,6 +40,7 @@ trait ManagerService: Send + Sync {
     fn spawn(&self) -> Result<String, gl_core::Error>;
     fn get(&self, slug: &str) -> Result<Option<gl_core::Goopy>, gl_core::Error>;
     fn sweep(&self) -> Result<(u32, Vec<gl_core::Error>), gl_core::Error>;
+    fn capacity(&self) -> Result<gl_core::Capacity, gl_core::Error>;
 }
 
 impl<R, P> ManagerService for GoopyManager<R, P>
@@ -56,6 +58,10 @@ where
 
     fn sweep(&self) -> Result<(u32, Vec<gl_core::Error>), gl_core::Error> {
         GoopyManager::sweep(self)
+    }
+
+    fn capacity(&self) -> Result<gl_core::Capacity, gl_core::Error> {
+        GoopyManager::capacity(self)
     }
 }
 
@@ -93,6 +99,34 @@ struct ConfigResponse {
     life_in_days: i32,
     storage_quota_mb: u64,
     domain: String,
+}
+
+/// Body of `GET /capacity`.
+///
+/// Deliberately separate from [`ConfigResponse`]: the frontend fetches
+/// `/config` once at build time (`force-static`), which would freeze these
+/// numbers at deploy. Capacity is dynamic, so it gets its own endpoint that the
+/// browser polls.
+#[derive(serde::Serialize)]
+struct CapacityResponse {
+    /// The pair to display: usage of the cap that would refuse the next spawn.
+    /// Resolved server-side (see [`gl_core::Capacity::binding`]) so a client
+    /// never has to know that a `Failed` row holds a slot without holding RAM,
+    /// and never shows a number that contradicts `is_full`.
+    used: u32,
+    total: u32,
+    /// Whether either cap is currently met. Precomputed so the frontend does
+    /// not have to re-derive the "which caps count as full" rule and drift from
+    /// the server's own definition.
+    is_full: bool,
+    /// The raw per-cap counts, kept for operators and debugging. Clients should
+    /// prefer `used`/`total`; these two pairs disagree whenever a `Failed` row
+    /// is holding a slot, which is exactly the confusion `used` exists to
+    /// prevent.
+    active: u32,
+    max_active: u32,
+    provisioned: u32,
+    max_provisioned: u32,
 }
 
 #[derive(serde::Serialize)]
@@ -289,6 +323,34 @@ async fn alive_check(
     }
 }
 
+/// `GET /capacity` — current usage of both instance caps.
+///
+/// Advisory only: it is read without a lock and can go stale between the poll
+/// and a click, and two clients can race for the last slot. The 503 from
+/// `POST /goopies` stays the authority; this endpoint exists so the UI can warn
+/// *before* the click rather than only after it.
+async fn get_capacity(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
+    let capacity = tokio::task::spawn_blocking({
+        let state = Arc::clone(&state);
+        move || state.manager.capacity()
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("task join error: {e}")))?
+    .map_err(|e| AppError::from_core(e, state.cfg.sweep_interval_secs))?;
+
+    let (used, total) = capacity.binding();
+
+    Ok(Json(CapacityResponse {
+        used,
+        total,
+        is_full: capacity.is_full(),
+        active: capacity.active,
+        max_active: capacity.max_active,
+        provisioned: capacity.provisioned,
+        max_provisioned: capacity.max_provisioned,
+    }))
+}
+
 async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(ConfigResponse {
         life_in_days: state.cfg.life_in_days,
@@ -470,6 +532,7 @@ fn build_router(
         .route("/goopies/{slug}", get(get_goopy))
         .route("/goopies/{slug}/alive", get(alive_check))
         .route("/config", get(get_config))
+        .route("/capacity", get(get_capacity))
         .layer(read_layer)
         .with_state(Arc::clone(&state));
 
@@ -478,6 +541,27 @@ fn build_router(
         .merge(read_routes)
         .layer(cors)
         .layer(TraceLayer::new_for_http())
+}
+
+/// Serve `app` on `listener`.
+///
+/// The router is wrapped in `into_make_service_with_connect_info` so every
+/// request carries its TCP peer address. `SmartIpKeyExtractor` needs that as
+/// its last-resort fallback: without it, a request that carries neither
+/// `X-Real-IP` nor `X-Forwarded-For` has no key at all, and the rate-limit
+/// layer fails the request with a 500 instead of limiting it. nginx always sets
+/// `X-Real-IP` in production, but anything talking to gl-serv directly — a
+/// local frontend during development, a health check — would otherwise get a
+/// 500 from every read endpoint.
+///
+/// Shared with the tests so they exercise the same wiring rather than a
+/// look-alike of it.
+async fn serve(listener: tokio::net::TcpListener, app: Router) -> std::io::Result<()> {
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -578,7 +662,7 @@ async fn main() {
         });
 
     tracing::info!("listening on {bind_address}");
-    axum::serve(listener, app).await.unwrap_or_else(|e| {
+    serve(listener, app).await.unwrap_or_else(|e| {
         tracing::error!("server error: {e}");
         std::process::exit(1);
     });
@@ -1138,6 +1222,169 @@ mod tests {
         assert_eq!(body["domain"], "goopy.life");
         assert_eq!(body["life_in_days"], 7);
         assert_eq!(body["storage_quota_mb"], 0); // PlainDir has no quota
+    }
+
+    // ── get_capacity ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_capacity_returns_zero_usage_and_configured_caps() {
+        let app = make_router_with_caps(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+            3,
+            5,
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
+                    .uri("/capacity")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp.into_body()).await;
+        assert_eq!(body["active"], 0);
+        assert_eq!(body["max_active"], 3);
+        assert_eq!(body["provisioned"], 0);
+        assert_eq!(body["max_provisioned"], 5);
+        assert_eq!(body["is_full"], false);
+        // The active cap has less headroom (3 vs 5), so it is the one shown.
+        assert_eq!(body["used"], 0);
+        assert_eq!(body["total"], 3);
+    }
+
+    #[tokio::test]
+    async fn get_capacity_counts_failed_as_provisioned_but_not_active() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_goopy(&registry, "cap-done", 7, 0, 9401, Status::Done);
+        seed_goopy(&registry, "cap-failed", 7, 0, 9402, Status::Failed);
+        let app = make_router_with_caps("goopy.life", registry, 10, 10);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
+                    .uri("/capacity")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp.into_body()).await;
+        // The Failed row still holds a registry slot but no longer holds RAM.
+        assert_eq!(body["active"], 1);
+        assert_eq!(body["provisioned"], 2);
+        assert_eq!(body["is_full"], false);
+        // Equal caps, so the provisioned pair binds — the one a visitor is
+        // actually blocked by.
+        assert_eq!(body["used"], 2);
+        assert_eq!(body["total"], 10);
+    }
+
+    #[tokio::test]
+    async fn get_capacity_reports_is_full_when_only_one_cap_is_met() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        // A Failed row meets a provisioned cap of 1 while leaving active
+        // headroom — is_full must still be true, matching what spawn enforces.
+        seed_goopy(&registry, "cap-failed", 7, 0, 9403, Status::Failed);
+        let app = make_router_with_caps("goopy.life", registry, 10, 1);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
+                    .uri("/capacity")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp.into_body()).await;
+        assert_eq!(body["active"], 0);
+        assert_eq!(body["provisioned"], 1);
+        assert_eq!(body["is_full"], true);
+        // The displayed pair must show a full server, not the active count's
+        // misleading "0 / 10".
+        assert_eq!(body["used"], 1);
+        assert_eq!(body["total"], 1);
+    }
+
+    /// `/capacity` is polled by every visitor, so it must sit on the loose read
+    /// limiter, not the tight provisioning one. With `provision_burst = 1`, a
+    /// run of reads that would exhaust the provisioning budget must all pass.
+    #[tokio::test]
+    async fn get_capacity_uses_the_loose_read_rate_limit() {
+        let rl = gl_core::config::RateLimitConfig {
+            provision_burst: 1,
+            provision_period_secs: 60,
+            read_burst: 100,
+            read_period_secs: 1,
+        };
+        let app = make_router_with_rl(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+            rl,
+        );
+
+        for attempt in 0..5 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .header("x-real-ip", "203.0.113.9")
+                        .uri("/capacity")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "read #{attempt} must not be throttled by the provisioning limit",
+            );
+        }
+    }
+
+    /// A request with no `X-Real-IP` (and no `X-Forwarded-For`) must still be
+    /// served: the rate limiter falls back to the TCP peer address, which is
+    /// only present because [`serve`] attaches connect info. Exercised over a
+    /// real socket, since `oneshot` bypasses the make-service entirely — the
+    /// one layer this is testing.
+    #[tokio::test]
+    async fn read_without_forwarding_headers_falls_back_to_the_peer_address() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let app = make_router(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { serve(listener, app).await });
+
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /config HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+
+        let status_line = response.lines().next().unwrap_or_default();
+        assert!(
+            status_line.starts_with("HTTP/1.1 200"),
+            "unheadered read should be rate-limited by peer IP, not rejected; got: {response}",
+        );
     }
 
     // ── CORS ──────────────────────────────────────────────────────────────

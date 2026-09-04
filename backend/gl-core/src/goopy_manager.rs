@@ -20,6 +20,62 @@ pub struct GoopyManagerConfig {
     pub max_provisioned: u32,
 }
 
+/// A point-in-time reading of both instance caps and how much of each is used.
+///
+/// Reported by [`GoopyManager::capacity`] and surfaced by gl-serv so the
+/// frontend can show headroom *before* a user clicks spawn, instead of only
+/// discovering a full server from a 503. The counts are a snapshot with no
+/// lock held: by the time a caller acts on them another spawn may have taken
+/// the last slot, so this is advisory only — [`GoopyRegistry::save_within_caps`]
+/// remains the authority that actually enforces the caps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Capacity {
+    /// Instances currently consuming RAM. See [`GoopyRegistry::count_active`].
+    pub active: u32,
+    /// The RAM-bound cap `active` is measured against.
+    pub max_active: u32,
+    /// Total instances occupying a registry slot. See
+    /// [`GoopyRegistry::count_provisioned`].
+    pub provisioned: u32,
+    /// The disk-bound cap `provisioned` is measured against.
+    pub max_provisioned: u32,
+}
+
+impl Capacity {
+    /// The cap that will actually refuse the next spawn — the one with less
+    /// headroom — as `(used, total)`.
+    ///
+    /// This is the only pair worth showing a visitor, who cares about one
+    /// thing: is there a free slot. Reporting `active` unconditionally makes
+    /// the UI contradict itself — "0 / 2 in use" beside "the server is full" —
+    /// because a `Failed` row holds a slot without holding RAM, and the sweep
+    /// may not reap it for a full `sweep_interval_secs`.
+    ///
+    /// Ties go to the provisioned cap: it is the one `save_within_caps` checks
+    /// first, so it is the one that names the refusal.
+    pub fn binding(&self) -> (u32, u32) {
+        let provisioned_headroom = self.max_provisioned.saturating_sub(self.provisioned);
+        let active_headroom = self.max_active.saturating_sub(self.active);
+        if active_headroom < provisioned_headroom {
+            (self.active, self.max_active)
+        } else {
+            (self.provisioned, self.max_provisioned)
+        }
+    }
+
+    /// Whether either cap is met, i.e. a spawn attempted right now would be
+    /// refused with [`Error::CapacityFull`].
+    ///
+    /// Derived from [`binding`] so "which number is shown" and "is it full"
+    /// can never disagree.
+    ///
+    /// [`binding`]: Capacity::binding
+    pub fn is_full(&self) -> bool {
+        let (used, total) = self.binding();
+        used >= total
+    }
+}
+
 pub struct GoopyManager<
     Registry: GoopyRegistry + Send + Sync + 'static,
     Provisioner: GoopyProvisioner + Send + Sync + 'static,
@@ -220,6 +276,21 @@ where
 
     pub fn list(&self) -> Result<Vec<Goopy>, Error> {
         self.registry.list()
+    }
+
+    /// Read the current usage of both caps.
+    ///
+    /// The two counts are read independently, so they are not a consistent
+    /// snapshot of each other; that is acceptable because the result is
+    /// advisory (see [`Capacity`]) and both counts move in the same direction
+    /// during a spawn.
+    pub fn capacity(&self) -> Result<Capacity, Error> {
+        Ok(Capacity {
+            active: self.registry.count_active()?,
+            max_active: self.max_active,
+            provisioned: self.registry.count_provisioned()?,
+            max_provisioned: self.max_provisioned,
+        })
     }
 
     /// Despawn all expired goopy instances and reap all `Failed` instances.
@@ -852,6 +923,101 @@ mod tests {
             registry,
             NoopProvisioner,
         )
+    }
+
+    #[test]
+    fn capacity_reports_zero_usage_against_configured_caps() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let gm = manager_with_caps(registry, 10, 20);
+
+        let cap = gm.capacity().unwrap();
+
+        assert_eq!(
+            cap,
+            Capacity {
+                active: 0,
+                max_active: 10,
+                provisioned: 0,
+                max_provisioned: 20,
+            }
+        );
+        assert!(!cap.is_full(), "an empty registry is not full");
+    }
+
+    #[test]
+    fn capacity_counts_failed_as_provisioned_but_not_active() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_row(&registry, "done-one", 9030, Status::Done);
+        seed_row(&registry, "failed-one", 9031, Status::Failed);
+        let gm = manager_with_caps(registry, 10, 20);
+
+        let cap = gm.capacity().unwrap();
+
+        // Both rows hold a registry slot, but the Failed one holds no RAM —
+        // the same asymmetry the caps themselves enforce.
+        assert_eq!(cap.active, 1, "only the Done row is resident");
+        assert_eq!(cap.provisioned, 2, "both rows occupy a slot");
+    }
+
+    #[test]
+    fn capacity_binding_pair_is_the_cap_with_less_headroom() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_row(&registry, "done-one", 9050, Status::Done);
+        seed_row(&registry, "failed-one", 9051, Status::Failed);
+        // active = 1/10 (9 free), provisioned = 2/4 (2 free) → provisioned binds.
+        let gm = manager_with_caps(registry, 10, 4);
+
+        assert_eq!(gm.capacity().unwrap().binding(), (2, 4));
+    }
+
+    #[test]
+    fn capacity_binding_pair_follows_the_active_cap_when_it_is_tighter() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_row(&registry, "done-one", 9060, Status::Done);
+        seed_row(&registry, "done-two", 9061, Status::Done);
+        // active = 2/3 (1 free), provisioned = 2/10 (8 free) → active binds.
+        let gm = manager_with_caps(registry, 3, 10);
+
+        assert_eq!(gm.capacity().unwrap().binding(), (2, 3));
+    }
+
+    #[test]
+    fn capacity_binding_pair_never_contradicts_is_full() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        // Two Failed rows meet a provisioned cap of 2 while holding no RAM: the
+        // active count is 0, so reporting it would read "0 / 10" on a server
+        // that refuses every spawn.
+        seed_row(&registry, "failed-one", 9070, Status::Failed);
+        seed_row(&registry, "failed-two", 9071, Status::Failed);
+        let gm = manager_with_caps(registry, 10, 2);
+
+        let cap = gm.capacity().unwrap();
+        let (used, total) = cap.binding();
+
+        assert_eq!(cap.active, 0, "Failed rows hold no RAM");
+        assert_eq!((used, total), (2, 2));
+        assert!(cap.is_full());
+        assert_eq!(
+            used >= total,
+            cap.is_full(),
+            "the displayed pair must agree with is_full: {cap:?}"
+        );
+    }
+
+    #[test]
+    fn capacity_is_full_when_either_cap_is_met() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_row(&registry, "failed-one", 9040, Status::Failed);
+        // Provisioned cap of 1 is met by the Failed row; the active cap is not.
+        let gm = manager_with_caps(registry, 10, 1);
+
+        let cap = gm.capacity().unwrap();
+
+        assert!(cap.active < cap.max_active, "active cap has headroom");
+        assert!(
+            cap.is_full(),
+            "hitting only the provisioned cap must still read as full: {cap:?}"
+        );
     }
 
     #[test]
