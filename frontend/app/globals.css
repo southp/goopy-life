@@ -185,13 +185,80 @@ body {
 
 /* ── Capacity indicator ─────────────────────────────────────────────────── */
 
+/*
+ * The idle CTA: the button, with the capacity readout hung off its bottom edge
+ * rather than stacked under it. Exists to be that readout's containing block.
+ */
+.cta-idle {
+	position: relative;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+}
+
+/*
+ * The readout's berth — out of flow, and clipped to the button's bottom edge.
+ *
+ * Out of flow because the readout arrives late: /capacity answers well after
+ * the first paint, and an in-flow line would grow the vertically centred
+ * .cta-area and shove the button up under the visitor's cursor. Hanging it here
+ * means nothing above it can move, however many lines it turns out to need.
+ *
+ * Clipped because top: 100% puts this box's top edge exactly on the button's
+ * bottom edge, so anything above that line is cut away. The readout starts up
+ * there, out of sight, and slides down into place — it reads as sliding out
+ * from behind the button.
+ */
+.capacity-slot {
+	position: absolute;
+	top: 100%;
+	left: 50%;
+	transform: translateX(-50%);
+	overflow: hidden;
+	width: max-content;
+	max-width: 22rem;
+}
+
 .capacity-block {
 	display: flex;
 	flex-direction: column;
 	align-items: center;
 	gap: 0.25rem;
 	text-align: center;
-	max-width: 22rem;
+	/*
+	 * The resting gap under the button. An absolutely positioned box establishes
+	 * a block formatting context, so this margin stays inside .capacity-slot
+	 * rather than collapsing out through its top edge.
+	 */
+	margin-top: 0.5rem;
+	animation: capacity-slide-out 460ms cubic-bezier(0.33, 1, 0.68, 1) both;
+}
+
+/*
+ * From fully behind the button — its own height plus the resting gap, all of it
+ * above the clip line — down to rest. The offset is a percentage of the block,
+ * so the taller at-capacity variant tucks away just as completely. Opacity is
+ * done by 35%, roughly when the first pixels clear the clip: enough to soften
+ * their arrival, not so much that the line crawls down looking washed out.
+ */
+@keyframes capacity-slide-out {
+	from {
+		transform: translateY(calc(-100% - 0.5rem));
+		opacity: 0;
+	}
+	35% {
+		opacity: 1;
+	}
+	to {
+		transform: translateY(0);
+		opacity: 1;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.capacity-block {
+		animation: none;
+	}
 }
 
 .capacity-indicator {
