@@ -1,0 +1,132 @@
+name: Deploy backend to dev
+
+# The dev droplet tracks trunk automatically; production is deployed by hand
+# with deploy/deploy.sh. Host, user and port live in the `dev` GitHub
+# Environment, so pointing this at a different box is a settings change rather
+# than a code change — see docs/DEPLOYMENT.md.
+on:
+  push:
+    branches: ['trunk']
+    paths:
+      - 'backend/**'
+      - 'deploy/push-binary.sh'
+      # The dev config is shipped by the deploy, so editing it is a deploy.
+      - 'deploy/config/dev.toml'
+      - '.github/workflows/backend-deploy.yml'
+  # Lets a maintainer re-run a deploy without an empty commit, e.g. after
+  # rotating the deploy key or rebuilding the droplet.
+  workflow_dispatch:
+
+# Two merges in quick succession would otherwise race to install over each
+# other. Queue instead of cancelling: a cancelled run could be killed between
+# `install` and `systemctl restart`, leaving a new binary on an old process.
+concurrency:
+  group: backend-deploy-dev
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: dev
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check deploy target is configured
+        # Without this the run gets as far as ssh and fails with an opaque
+        # "Could not resolve hostname" on an empty host.
+        env:
+          DEV_DEPLOY_HOST: ${{ vars.DEV_DEPLOY_HOST }}
+          DEV_DEPLOY_USER: ${{ vars.DEV_DEPLOY_USER }}
+        run: |
+          missing=()
+          [[ -n "$DEV_DEPLOY_HOST" ]] || missing+=(DEV_DEPLOY_HOST)
+          [[ -n "$DEV_DEPLOY_USER" ]] || missing+=(DEV_DEPLOY_USER)
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "::error::Unset variables in the 'dev' environment: ${missing[*]}."
+            echo "::error::See docs/DEPLOYMENT.md for the required secrets and variables."
+            exit 1
+          fi
+
+      - name: Install musl cross-compilation toolchain
+        # The droplet gets a fully static musl binary, matching what
+        # deploy/deploy.sh produces locally via cargo-zigbuild. musl-tools
+        # supplies musl-gcc, which rusqlite's bundled SQLite needs to compile.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Run tests
+        # The ZFS-backed tests are #[ignore]d and stay that way here — they need
+        # a loopback zpool and root, and the PR-time "Backend build" workflow
+        # already runs them with --ignored before anything reaches trunk.
+        run: cargo test --verbose
+
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build release binary
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --target x86_64-unknown-linux-musl -p gl-serv
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.DEV_SSH_KNOWN_HOSTS }}
+        run: |
+          if [[ -z "$SSH_PRIVATE_KEY" || -z "$SSH_KNOWN_HOSTS" ]]; then
+            echo "::error::DEV_SSH_PRIVATE_KEY and DEV_SSH_KNOWN_HOSTS must both be set in the 'dev' environment."
+            echo "::error::See docs/DEPLOYMENT.md for how to generate them."
+            exit 1
+          fi
+          # Set before anything is written: `printf > file` creates under the
+          # runner's default umask (022 -> mode 644), so a private key would be
+          # briefly world-readable between creation and a later chmod. umask
+          # closes that window by making 600 the mode it is created with.
+          umask 077
+          mkdir -p ~/.ssh
+          # umask cannot fix a directory the runner image pre-created loosely.
+          chmod 700 ~/.ssh
+          # known_hosts is pinned rather than StrictHostKeyChecking=no: the
+          # binary is installed with sudo on the far end, so accepting an
+          # unverified host key would hand root on the droplet to anyone who can
+          # win a DNS or BGP race against the runner.
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_deploy
+          printf 'IdentityFile ~/.ssh/id_deploy\nIdentitiesOnly yes\nStrictHostKeyChecking yes\n' > ~/.ssh/config
+
+      - name: Deploy to the dev droplet
+        # Same script the manual production deploy uses, so the two paths cannot
+        # drift apart. dev.toml is named explicitly here rather than defaulted
+        # inside the script: this workflow is the only thing that may deploy the
+        # dev environment, and nothing should be able to reach prod.toml by
+        # omitting an argument. Variables are passed through the environment
+        # rather than interpolated into the shell to keep `${{ }}` out of the
+        # script body.
+        env:
+          DEV_DEPLOY_HOST: ${{ vars.DEV_DEPLOY_HOST }}
+          DEV_DEPLOY_USER: ${{ vars.DEV_DEPLOY_USER }}
+          DEV_SSH_PORT: ${{ vars.DEV_SSH_PORT }}
+        run: |
+          "$GITHUB_WORKSPACE/deploy/push-binary.sh" \
+            "$DEV_DEPLOY_USER@$DEV_DEPLOY_HOST" \
+            target/x86_64-unknown-linux-musl/release/gl-serv \
+            "$GITHUB_WORKSPACE/deploy/config/dev.toml" \
+            "${DEV_SSH_PORT:-22}"
+
+      - name: Summarise
+        if: always()
+        env:
+          DEV_DEPLOY_HOST: ${{ vars.DEV_DEPLOY_HOST }}
+        run: |
+          echo "\`gl-serv\` @ ${GITHUB_SHA::7} → \`$DEV_DEPLOY_HOST\` — ${{ job.status }}." \
+            >> "$GITHUB_STEP_SUMMARY"

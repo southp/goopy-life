@@ -126,7 +126,10 @@ Next.js application deployed on Vercel.
 
 ## Configuration
 
-Configuration is TOML-based. See `config.toml.example` for all available settings.
+Configuration is TOML-based. See `backend/gl-cli/config.toml.example` for a local
+development template, and [`deploy/config/`](../deploy/config/) for the files the
+droplets actually run — those are version-controlled and installed by the deploy,
+not edited on the host. See [DEPLOYMENT.md](DEPLOYMENT.md#configuration).
 
 Key settings:
 
@@ -148,9 +151,11 @@ Key settings:
 ## Deployment
 
 - **Infrastructure:** DigitalOcean droplet with ZFS.
-- **Backend:** The droplet runs gl-serv. Deployment is currently manual (cross-compile + scp).
-- **Frontend:** Deployed on Vercel. The droplet serves only gl-serv and local static pages (e.g. `/expired`).
+- **Backend:** The droplet runs gl-serv. The dev droplet is deployed automatically on every merge to `trunk`; production is a manual cross-compile + scp.
+- **Frontend:** Deployed on Vercel via its GitHub integration. The droplet serves only gl-serv and local static pages (e.g. `/expired`).
 - **API domain:** `api.goopy.life`.
+
+Full details, including the one-time GitHub setup: [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Roadmap
 
