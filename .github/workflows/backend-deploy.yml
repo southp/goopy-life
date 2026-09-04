@@ -88,7 +88,13 @@ jobs:
             echo "::error::See docs/DEPLOYMENT.md for how to generate them."
             exit 1
           fi
+          # Set before anything is written: `printf > file` creates under the
+          # runner's default umask (022 -> mode 644), so a private key would be
+          # briefly world-readable between creation and a later chmod. umask
+          # closes that window by making 600 the mode it is created with.
+          umask 077
           mkdir -p ~/.ssh
+          # umask cannot fix a directory the runner image pre-created loosely.
           chmod 700 ~/.ssh
           # known_hosts is pinned rather than StrictHostKeyChecking=no: the
           # binary is installed with sudo on the far end, so accepting an
@@ -96,9 +102,7 @@ jobs:
           # win a DNS or BGP race against the runner.
           printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_deploy
-          chmod 600 ~/.ssh/known_hosts ~/.ssh/id_deploy
           printf 'IdentityFile ~/.ssh/id_deploy\nIdentitiesOnly yes\nStrictHostKeyChecking yes\n' > ~/.ssh/config
-          chmod 600 ~/.ssh/config
 
       - name: Deploy to the dev droplet
         # Same script the manual production deploy uses, so the two paths cannot
