@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
@@ -480,6 +481,27 @@ fn build_router(
         .layer(TraceLayer::new_for_http())
 }
 
+/// Serve `app` on `listener`.
+///
+/// The router is wrapped in `into_make_service_with_connect_info` so every
+/// request carries its TCP peer address. `SmartIpKeyExtractor` needs that as
+/// its last-resort fallback: without it, a request that carries neither
+/// `X-Real-IP` nor `X-Forwarded-For` has no key at all, and the rate-limit
+/// layer fails the request with a 500 instead of limiting it. nginx always sets
+/// `X-Real-IP` in production, but anything talking to gl-serv directly — a
+/// local frontend during development, a health check — would otherwise get a
+/// 500 from every read endpoint.
+///
+/// Shared with the tests so they exercise the same wiring rather than a
+/// look-alike of it.
+async fn serve(listener: tokio::net::TcpListener, app: Router) -> std::io::Result<()> {
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -578,7 +600,7 @@ async fn main() {
         });
 
     tracing::info!("listening on {bind_address}");
-    axum::serve(listener, app).await.unwrap_or_else(|e| {
+    serve(listener, app).await.unwrap_or_else(|e| {
         tracing::error!("server error: {e}");
         std::process::exit(1);
     });
@@ -1138,6 +1160,38 @@ mod tests {
         assert_eq!(body["domain"], "goopy.life");
         assert_eq!(body["life_in_days"], 7);
         assert_eq!(body["storage_quota_mb"], 0); // PlainDir has no quota
+    }
+
+    /// A request with no `X-Real-IP` (and no `X-Forwarded-For`) must still be
+    /// served: the rate limiter falls back to the TCP peer address, which is
+    /// only present because [`serve`] attaches connect info. Exercised over a
+    /// real socket, since `oneshot` bypasses the make-service entirely — the
+    /// one layer this is testing.
+    #[tokio::test]
+    async fn read_without_forwarding_headers_falls_back_to_the_peer_address() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let app = make_router(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { serve(listener, app).await });
+
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /config HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+
+        let status_line = response.lines().next().unwrap_or_default();
+        assert!(
+            status_line.starts_with("HTTP/1.1 200"),
+            "unheadered read should be rate-limited by peer IP, not rejected; got: {response}",
+        );
     }
 
     // ── CORS ──────────────────────────────────────────────────────────────
