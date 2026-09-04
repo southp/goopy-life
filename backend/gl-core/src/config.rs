@@ -221,6 +221,22 @@ impl Config {
                 ));
             }
         }
+        // A zero cap turns every spawn into a 503 with no startup error at all,
+        // which is an easy typo to make and near-impossible to diagnose from
+        // outside the service.
+        if cfg.max_active == 0 {
+            return Err(Error::Config("max_active must be > 0".into()));
+        }
+        if cfg.max_provisioned == 0 {
+            return Err(Error::Config("max_provisioned must be > 0".into()));
+        }
+        // Active instances are a subset of provisioned ones, so a larger
+        // max_active is silently inert rather than merely generous.
+        if cfg.max_active > cfg.max_provisioned {
+            return Err(Error::Config(
+                "max_active must be <= max_provisioned".into(),
+            ));
+        }
         // A zero burst or period cannot be turned into a rate limiter, so reject
         // it here rather than letting gl-serv panic while building its router.
         if cfg.ratelimit.provision_burst == 0 {
@@ -250,6 +266,13 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    /// Splice top-level `keys` into `base` ahead of its first table header.
+    /// Appending them instead would land them inside the trailing
+    /// `[provisioner]` table, where they are silently ignored.
+    fn with_caps(base: &str, keys: &str) -> String {
+        base.replace("[registry]", &format!("{keys}\n[registry]"))
+    }
 
     fn write_config(toml: &str) -> Result<Config, Error> {
         let mut f = NamedTempFile::new().unwrap();
@@ -355,6 +378,64 @@ quota_mb = 0
         );
         let err = write_config(&toml).unwrap_err();
         assert!(matches!(err, Error::Config(ref s) if s.contains("quota_mb")));
+    }
+
+    #[test]
+    fn zero_max_active_rejected() {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            with_caps(VALID_BASE, "max_active = 0")
+        );
+        let err = write_config(&toml).unwrap_err();
+        assert!(matches!(err, Error::Config(ref s) if s.contains("max_active")));
+    }
+
+    #[test]
+    fn zero_max_provisioned_rejected() {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            with_caps(VALID_BASE, "max_provisioned = 0")
+        );
+        let err = write_config(&toml).unwrap_err();
+        assert!(matches!(err, Error::Config(ref s) if s.contains("max_provisioned")));
+    }
+
+    #[test]
+    fn max_active_above_max_provisioned_rejected() {
+        // An active cap above the provisioned cap can never be reached, since
+        // active instances are a subset of provisioned ones.
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            with_caps(VALID_BASE, "max_active = 20\nmax_provisioned = 10")
+        );
+        let err = write_config(&toml).unwrap_err();
+        assert!(
+            matches!(err, Error::Config(ref s) if s.contains("max_active must be <= max_provisioned")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn max_active_below_max_provisioned_accepted() {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            with_caps(VALID_BASE, "max_active = 10\nmax_provisioned = 20")
+        );
+        let cfg = write_config(&toml).expect("diverged caps are valid");
+        assert_eq!(cfg.max_active, 10);
+        assert_eq!(cfg.max_provisioned, 20);
     }
 
     #[test]
