@@ -16,7 +16,7 @@ Neither host is hardcoded in the repo. Both are settings you can change without
 a code change:
 
 - **Backend dev droplet** — the `dev` [GitHub Environment](https://github.com/southp/goopy-life/settings/environments).
-- **Frontend** — the Vercel project's Git integration (project `goopy-life-frontend`).
+- **Frontend** — the Vercel project's Git integration (project `goopy-life-frontend-dev`).
 
 ## Backend — automated dev deploys
 
@@ -93,19 +93,42 @@ curl -sS https://<dev-api-host>/config | head
 The frontend deploys through Vercel's native GitHub integration, not a workflow:
 Vercel builds `trunk` to production and every PR to a preview URL.
 
+A project created by `vercel deploy` from a laptop has no Git integration —
+*Connect Git* on the project overview adds it. Until that is done nothing here
+applies, `vercel.json` is inert, and `trunk` does not deploy itself.
+
 Project settings that matter:
 
-- **Root Directory:** `frontend`
-- **Production Branch:** `trunk`
+- **Root Directory:** `frontend` — required, and load-bearing beyond the build:
+  see the `ignoreCommand` note below.
+- **Production Branch:** `trunk` — Vercel assumes `main`, so this needs setting
+  explicitly even though `trunk` is the repository default.
 - **Environment Variables:** `NEXT_PUBLIC_GL_API_URL` and `GL_CONFIG_API_URL`
-  (see `frontend/.env.local.example`). `GL_CONFIG_API_URL` is read at build time
-  to fetch `GET /config`, so changing it needs a redeploy, not just a restart.
+  (see `frontend/.env.local.example`), both scoped to Production —
+  `https://api.southp.dev` for the dev environment. `GL_CONFIG_API_URL` is read
+  at build time to fetch `GET /config`, so changing it needs a redeploy, not
+  just a restart; `frontend/lib/config.ts` throws when it is unset, so a missing
+  value fails the build rather than shipping a broken page.
 
-`frontend/vercel.json` carries the repo-side half of that configuration. Its
-`ignoreCommand` skips the build when a push changed nothing under `frontend/`,
-so backend-only merges don't burn a Vercel build. The command exits non-zero —
-i.e. builds — if it cannot determine the diff (i.e. a clone too shallow for
-`HEAD^`), which is the safe direction to fail.
+`frontend/vercel.json` carries the repo-side half of that configuration:
+
+```json
+"ignoreCommand": "git diff --quiet HEAD^ HEAD -- ."
+```
+
+It skips the build when a push changed nothing under `frontend/`, so backend-only
+merges don't burn a Vercel build.
+
+**The `.` is relative to the Root Directory**, which is what makes it mean
+`frontend/`. With Root Directory unset, `.` is the repository root, every commit
+looks like a change, and the command silently never skips anything — no error,
+just the build cost it was meant to avoid. If skipping appears not to work, check
+that setting first.
+
+The command exits non-zero — i.e. builds — if it cannot determine the diff (e.g.
+a clone too shallow for `HEAD^`), which is the safe direction to fail. The first
+build after connecting Git always runs, since there is no previous Git deployment
+to diff against.
 
 ## Manual production deploy
 
