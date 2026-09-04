@@ -20,6 +20,35 @@ pub struct GoopyManagerConfig {
     pub max_provisioned: u32,
 }
 
+/// A point-in-time reading of both instance caps and how much of each is used.
+///
+/// Reported by [`GoopyManager::capacity`] and surfaced by gl-serv so the
+/// frontend can show headroom *before* a user clicks spawn, instead of only
+/// discovering a full server from a 503. The counts are a snapshot with no
+/// lock held: by the time a caller acts on them another spawn may have taken
+/// the last slot, so this is advisory only — [`GoopyRegistry::save_within_caps`]
+/// remains the authority that actually enforces the caps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Capacity {
+    /// Instances currently consuming RAM. See [`GoopyRegistry::count_active`].
+    pub active: u32,
+    /// The RAM-bound cap `active` is measured against.
+    pub max_active: u32,
+    /// Total instances occupying a registry slot. See
+    /// [`GoopyRegistry::count_provisioned`].
+    pub provisioned: u32,
+    /// The disk-bound cap `provisioned` is measured against.
+    pub max_provisioned: u32,
+}
+
+impl Capacity {
+    /// Whether either cap is met, i.e. a spawn attempted right now would be
+    /// refused with [`Error::CapacityFull`].
+    pub fn is_full(&self) -> bool {
+        self.active >= self.max_active || self.provisioned >= self.max_provisioned
+    }
+}
+
 pub struct GoopyManager<
     Registry: GoopyRegistry + Send + Sync + 'static,
     Provisioner: GoopyProvisioner + Send + Sync + 'static,
@@ -220,6 +249,21 @@ where
 
     pub fn list(&self) -> Result<Vec<Goopy>, Error> {
         self.registry.list()
+    }
+
+    /// Read the current usage of both caps.
+    ///
+    /// The two counts are read independently, so they are not a consistent
+    /// snapshot of each other; that is acceptable because the result is
+    /// advisory (see [`Capacity`]) and both counts move in the same direction
+    /// during a spawn.
+    pub fn capacity(&self) -> Result<Capacity, Error> {
+        Ok(Capacity {
+            active: self.registry.count_active()?,
+            max_active: self.max_active,
+            provisioned: self.registry.count_provisioned()?,
+            max_provisioned: self.max_provisioned,
+        })
     }
 
     /// Despawn all expired goopy instances and reap all `Failed` instances.
@@ -852,6 +896,56 @@ mod tests {
             registry,
             NoopProvisioner,
         )
+    }
+
+    #[test]
+    fn capacity_reports_zero_usage_against_configured_caps() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let gm = manager_with_caps(registry, 10, 20);
+
+        let cap = gm.capacity().unwrap();
+
+        assert_eq!(
+            cap,
+            Capacity {
+                active: 0,
+                max_active: 10,
+                provisioned: 0,
+                max_provisioned: 20,
+            }
+        );
+        assert!(!cap.is_full(), "an empty registry is not full");
+    }
+
+    #[test]
+    fn capacity_counts_failed_as_provisioned_but_not_active() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_row(&registry, "done-one", 9030, Status::Done);
+        seed_row(&registry, "failed-one", 9031, Status::Failed);
+        let gm = manager_with_caps(registry, 10, 20);
+
+        let cap = gm.capacity().unwrap();
+
+        // Both rows hold a registry slot, but the Failed one holds no RAM —
+        // the same asymmetry the caps themselves enforce.
+        assert_eq!(cap.active, 1, "only the Done row is resident");
+        assert_eq!(cap.provisioned, 2, "both rows occupy a slot");
+    }
+
+    #[test]
+    fn capacity_is_full_when_either_cap_is_met() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_row(&registry, "failed-one", 9040, Status::Failed);
+        // Provisioned cap of 1 is met by the Failed row; the active cap is not.
+        let gm = manager_with_caps(registry, 10, 1);
+
+        let cap = gm.capacity().unwrap();
+
+        assert!(cap.active < cap.max_active, "active cap has headroom");
+        assert!(
+            cap.is_full(),
+            "hitting only the provisioned cap must still read as full: {cap:?}"
+        );
     }
 
     #[test]

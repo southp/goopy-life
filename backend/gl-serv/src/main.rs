@@ -40,6 +40,7 @@ trait ManagerService: Send + Sync {
     fn spawn(&self) -> Result<String, gl_core::Error>;
     fn get(&self, slug: &str) -> Result<Option<gl_core::Goopy>, gl_core::Error>;
     fn sweep(&self) -> Result<(u32, Vec<gl_core::Error>), gl_core::Error>;
+    fn capacity(&self) -> Result<gl_core::Capacity, gl_core::Error>;
 }
 
 impl<R, P> ManagerService for GoopyManager<R, P>
@@ -57,6 +58,10 @@ where
 
     fn sweep(&self) -> Result<(u32, Vec<gl_core::Error>), gl_core::Error> {
         GoopyManager::sweep(self)
+    }
+
+    fn capacity(&self) -> Result<gl_core::Capacity, gl_core::Error> {
+        GoopyManager::capacity(self)
     }
 }
 
@@ -94,6 +99,24 @@ struct ConfigResponse {
     life_in_days: i32,
     storage_quota_mb: u64,
     domain: String,
+}
+
+/// Body of `GET /capacity`.
+///
+/// Deliberately separate from [`ConfigResponse`]: the frontend fetches
+/// `/config` once at build time (`force-static`), which would freeze these
+/// numbers at deploy. Capacity is dynamic, so it gets its own endpoint that the
+/// browser polls.
+#[derive(serde::Serialize)]
+struct CapacityResponse {
+    active: u32,
+    max_active: u32,
+    provisioned: u32,
+    max_provisioned: u32,
+    /// Whether either cap is currently met. Precomputed so the frontend does
+    /// not have to re-derive the "which caps count as full" rule and drift from
+    /// the server's own definition.
+    is_full: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -290,6 +313,30 @@ async fn alive_check(
     }
 }
 
+/// `GET /capacity` — current usage of both instance caps.
+///
+/// Advisory only: it is read without a lock and can go stale between the poll
+/// and a click, and two clients can race for the last slot. The 503 from
+/// `POST /goopies` stays the authority; this endpoint exists so the UI can warn
+/// *before* the click rather than only after it.
+async fn get_capacity(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
+    let capacity = tokio::task::spawn_blocking({
+        let state = Arc::clone(&state);
+        move || state.manager.capacity()
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("task join error: {e}")))?
+    .map_err(|e| AppError::from_core(e, state.cfg.sweep_interval_secs))?;
+
+    Ok(Json(CapacityResponse {
+        active: capacity.active,
+        max_active: capacity.max_active,
+        provisioned: capacity.provisioned,
+        max_provisioned: capacity.max_provisioned,
+        is_full: capacity.is_full(),
+    }))
+}
+
 async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(ConfigResponse {
         life_in_days: state.cfg.life_in_days,
@@ -471,6 +518,7 @@ fn build_router(
         .route("/goopies/{slug}", get(get_goopy))
         .route("/goopies/{slug}/alive", get(alive_check))
         .route("/config", get(get_config))
+        .route("/capacity", get(get_capacity))
         .layer(read_layer)
         .with_state(Arc::clone(&state));
 
@@ -1160,6 +1208,126 @@ mod tests {
         assert_eq!(body["domain"], "goopy.life");
         assert_eq!(body["life_in_days"], 7);
         assert_eq!(body["storage_quota_mb"], 0); // PlainDir has no quota
+    }
+
+    // ── get_capacity ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_capacity_returns_zero_usage_and_configured_caps() {
+        let app = make_router_with_caps(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+            3,
+            5,
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
+                    .uri("/capacity")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp.into_body()).await;
+        assert_eq!(body["active"], 0);
+        assert_eq!(body["max_active"], 3);
+        assert_eq!(body["provisioned"], 0);
+        assert_eq!(body["max_provisioned"], 5);
+        assert_eq!(body["is_full"], false);
+    }
+
+    #[tokio::test]
+    async fn get_capacity_counts_failed_as_provisioned_but_not_active() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_goopy(&registry, "cap-done", 7, 0, 9401, Status::Done);
+        seed_goopy(&registry, "cap-failed", 7, 0, 9402, Status::Failed);
+        let app = make_router_with_caps("goopy.life", registry, 10, 10);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
+                    .uri("/capacity")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp.into_body()).await;
+        // The Failed row still holds a registry slot but no longer holds RAM.
+        assert_eq!(body["active"], 1);
+        assert_eq!(body["provisioned"], 2);
+        assert_eq!(body["is_full"], false);
+    }
+
+    #[tokio::test]
+    async fn get_capacity_reports_is_full_when_only_one_cap_is_met() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        // A Failed row meets a provisioned cap of 1 while leaving active
+        // headroom — is_full must still be true, matching what spawn enforces.
+        seed_goopy(&registry, "cap-failed", 7, 0, 9403, Status::Failed);
+        let app = make_router_with_caps("goopy.life", registry, 10, 1);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
+                    .uri("/capacity")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp.into_body()).await;
+        assert_eq!(body["active"], 0);
+        assert_eq!(body["provisioned"], 1);
+        assert_eq!(body["is_full"], true);
+    }
+
+    /// `/capacity` is polled by every visitor, so it must sit on the loose read
+    /// limiter, not the tight provisioning one. With `provision_burst = 1`, a
+    /// run of reads that would exhaust the provisioning budget must all pass.
+    #[tokio::test]
+    async fn get_capacity_uses_the_loose_read_rate_limit() {
+        let rl = gl_core::config::RateLimitConfig {
+            provision_burst: 1,
+            provision_period_secs: 60,
+            read_burst: 100,
+            read_period_secs: 1,
+        };
+        let app = make_router_with_rl(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+            rl,
+        );
+
+        for attempt in 0..5 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .header("x-real-ip", "203.0.113.9")
+                        .uri("/capacity")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "read #{attempt} must not be throttled by the provisioning limit",
+            );
+        }
     }
 
     /// A request with no `X-Real-IP` (and no `X-Forwarded-For`) must still be

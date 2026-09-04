@@ -84,7 +84,8 @@ kind = "Hello"
 provision_burst      = 2
 provision_period_secs = 60
 #
-# Read limit — applies to GET /goopies/:slug, /goopies/:slug/alive, /config.
+# Read limit — applies to GET /goopies/:slug, /goopies/:slug/alive, /config,
+# /capacity.
 # Default: burst of 30, replenishing 1 token every 2s per IP (comfortable for
 # a frontend that polls the alive endpoint every couple of seconds).
 read_burst      = 30
