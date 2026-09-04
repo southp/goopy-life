@@ -1,0 +1,63 @@
+# Local development configuration — ready to run, no copying required.
+#
+#   cd backend
+#   cargo run -p gl-serv -- --config config.local.toml
+#   cargo run -p gl-cli  -- --config config.local.toml list
+#
+# Paths below are relative to the working directory, so run these from
+# `backend/`. Everything the run creates lands in `backend/.local/`, which is
+# gitignored — delete that directory to reset to a clean slate.
+#
+# This file is committed on purpose. It is parsed by
+# `gl-core/tests/committed_configs.rs` on every CI run, so it cannot rot the way
+# an uncommitted copy of an example silently does. Edit it freely for a local
+# experiment; commit the edit only if it improves the default for everyone.
+#
+# It is deliberately NOT in `deploy/config/`: that directory is the set of
+# configurations `deploy.sh` can ship to a host, and `dev_mode = true` on a real
+# droplet would skip systemd, nginx and ZFS.
+
+# Working directories for instances.
+base_dir = "./.local/data"
+
+# Instances are served at {slug}.{domain}; localhost keeps that resolvable.
+domain = "localhost"
+
+# How long each goopy lives (days).
+life_in_days = 7
+
+# Port range for goopy instances (inclusive). High and unprivileged, so it does
+# not collide with anything a dev machine is likely to be running.
+port_range_start = 50000
+port_range_end = 51000
+
+# Dev mode: plain directories and background processes instead of systemd,
+# nginx and ZFS. Required locally — the alternative needs root and a ZFS pool.
+dev_mode = true
+
+# The Next.js dev server's origin (`yarn dev` in frontend/).
+cors_origin = "http://localhost:3000"
+
+# Matches the API URL in frontend/.env.local.example, so the frontend and
+# backend work together with no edits on either side.
+bind_address = "127.0.0.1:3001"
+
+# Five minutes rather than the 24h default: locally you want to actually see a
+# sweep happen. Note the first sweep runs one interval after startup (#117).
+sweep_interval_secs = 300
+
+# Instance caps, matching the shipped defaults. Drop these to 1 to exercise the
+# `server_full` 503 path by hand.
+max_active = 10
+max_provisioned = 10
+
+[registry]
+path = "./.local/registry.db"
+
+[allocator]
+# Plain filesystem directories — the ZFS allocator needs a pool and root.
+kind = "PlainDir"
+
+[provisioner]
+# "Hello" (no-op dev provisioner) or "Ghost" (real Ghost install, #18).
+kind = "Hello"
