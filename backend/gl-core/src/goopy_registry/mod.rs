@@ -25,10 +25,17 @@ pub trait GoopyRegistry {
     /// the sweep task reaps them.
     fn count_provisioned(&self) -> Result<u32, Error>;
 
-    /// Count instances that are actively consuming RAM: `Spawning` and `Done`.
+    /// Count instances that are consuming RAM: `Spawning`, `Done`, and
+    /// `Despawning`.
     ///
-    /// Used to enforce `max_active` (RAM-bound cap).
-    /// `Failed` and `Despawning` instances are excluded.
-    /// Once #96 (scale-to-zero) lands, `Suspended` will also be excluded here.
+    /// Used to enforce `max_active` (RAM-bound cap). `Despawning` is counted
+    /// because `despawn` flips the status synchronously and then tears the
+    /// instance down on a background thread — the process stays resident for
+    /// the whole teardown. That over-counts briefly, which is the safe
+    /// direction for a RAM cap.
+    ///
+    /// `Failed` is not counted: its process is gone. A future `Suspended`
+    /// status (#96, scale-to-zero) will be handled the same way — by simply not
+    /// being added to the `IN` list.
     fn count_active(&self) -> Result<u32, Error>;
 }

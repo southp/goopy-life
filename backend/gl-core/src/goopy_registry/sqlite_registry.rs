@@ -588,12 +588,12 @@ impl GoopyRegistry for SqliteRegistry {
             source: e.into(),
         })?;
 
-        // Active = Spawning + Done (resident, consuming RAM).
-        // Failed and Despawning are excluded.
-        // When #96 (scale-to-zero) lands, add Suspended to the exclusion list.
+        // Resident = Spawning + Done + Despawning. See the trait doc for why a
+        // Despawning instance still counts; Failed is the only status whose
+        // process is reliably gone.
         let count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM goopies WHERE status IN ('Spawning', 'Done')",
+                "SELECT COUNT(*) FROM goopies WHERE status IN ('Spawning', 'Done', 'Despawning')",
                 [],
                 |row| row.get(0),
             )
@@ -687,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn count_active_counts_only_spawning_and_done() {
+    fn count_active_counts_resident_statuses_only() {
         let r = registry();
         for (slug, status) in [
             ("a-spawning", Status::Spawning),
@@ -699,8 +699,10 @@ mod tests {
             gp.status = status;
             r.save(&gp).unwrap();
         }
-        // Only Spawning + Done are resident (RAM-consuming).
-        assert_eq!(r.count_active().unwrap(), 2);
+        // Spawning, Done and Despawning are all resident: a Despawning
+        // instance's process stays up until the teardown thread finishes.
+        // Only Failed has no process left.
+        assert_eq!(r.count_active().unwrap(), 3);
     }
 
     #[test]
