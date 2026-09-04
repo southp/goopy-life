@@ -38,8 +38,14 @@ cors_origin = "https://southp.dev"
 # the note in docs/DEPLOYMENT.md before narrowing it to 127.0.0.1.
 bind_address = "0.0.0.0:3000"
 
-# How often to sweep expired instances (seconds; 86400 = 24h).
-sweep_interval_secs = 86400
+# How often to sweep expired and Failed instances (seconds; 3600 = 1h).
+#
+# Not the 86400 default: the first sweep runs one full interval after startup
+# and every restart resets that clock (#117), so a longer interval leaves
+# reclaimable capacity wedged for up to a day — and with automated deploys,
+# potentially forever. An idle sweep over an empty registry is nearly free.
+# Revisit once #117 makes the schedule restart-proof.
+sweep_interval_secs = 3600
 
 # Instance caps (#106). max_active is RAM-bound: ~200 MB per Ghost process on a
 # 2 GB droplet leaves room for about 10. max_provisioned is disk-bound and is
