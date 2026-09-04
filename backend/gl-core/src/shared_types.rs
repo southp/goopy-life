@@ -240,11 +240,33 @@ pub enum Error {
         field: &'static str,
         value: String,
     },
-    /// A capacity limit was hit; `reason` names which cap was exceeded
-    /// (e.g. `"max_provisioned"` or `"max_active"`).
+    /// A capacity limit was hit; `kind` names which cap was exceeded.
     CapacityFull {
-        reason: &'static str,
+        kind: CapacityKind,
     },
+}
+
+/// Which of the two instance caps a spawn ran into.
+///
+/// Modelled as an enum rather than a string so every consumer that branches on
+/// it — notably gl-serv, which maps each variant onto a distinct public error
+/// code — is checked exhaustively by the compiler. A renamed config field then
+/// breaks the build instead of silently changing the API response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapacityKind {
+    /// The disk-bound `max_provisioned` cap: total rows in the registry.
+    Provisioned,
+    /// The RAM-bound `max_active` cap: resident instances.
+    Active,
+}
+
+impl std::fmt::Display for CapacityKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CapacityKind::Provisioned => write!(f, "max_provisioned"),
+            CapacityKind::Active => write!(f, "max_active"),
+        }
+    }
 }
 
 impl std::error::Error for Error {
@@ -283,7 +305,7 @@ impl std::fmt::Display for Error {
                     "corrupt row (slug={slug}, field={field}, value={value:?})"
                 )
             }
-            Error::CapacityFull { reason } => write!(f, "capacity full: {reason}"),
+            Error::CapacityFull { kind } => write!(f, "capacity full: {kind}"),
         }
     }
 }

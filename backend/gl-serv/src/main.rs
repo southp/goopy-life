@@ -10,7 +10,7 @@ use axum::{Json, Router};
 use chrono::{Duration, Utc};
 use clap::Parser;
 use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
-use gl_core::{GoopyManager, RealSysRunner};
+use gl_core::{CapacityKind, GoopyManager, RealSysRunner};
 use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::key_extractor::SmartIpKeyExtractor;
@@ -169,23 +169,23 @@ impl From<gl_core::Error> for AppError {
             gl_core::Error::PortExhausted => {
                 AppError::ServiceUnavailable("port range exhausted".into())
             }
-            gl_core::Error::CapacityFull { reason } => {
+            gl_core::Error::CapacityFull { kind } => {
                 // Distinguish disk-bound (server full) from RAM-bound (busy).
-                let (message, code) = match reason {
-                    "max_provisioned" => (
-                        "server is full; no capacity for new instances".to_string(),
-                        "server_full".to_string(),
+                // Matching the enum keeps this exhaustive: a new cap cannot be
+                // added in gl-core without the compiler demanding a code here.
+                let (message, code) = match kind {
+                    CapacityKind::Provisioned => (
+                        "server is full; no capacity for new instances",
+                        "server_full",
                     ),
-                    "max_active" => (
-                        "server is busy; too many running instances".to_string(),
-                        "server_busy".to_string(),
-                    ),
-                    other => (
-                        format!("capacity full: {other}"),
-                        "capacity_full".to_string(),
-                    ),
+                    CapacityKind::Active => {
+                        ("server is busy; too many running instances", "server_busy")
+                    }
                 };
-                AppError::CapacityFull { message, code }
+                AppError::CapacityFull {
+                    message: message.to_string(),
+                    code: code.to_string(),
+                }
             }
             other => AppError::Internal(other.to_string()),
         }

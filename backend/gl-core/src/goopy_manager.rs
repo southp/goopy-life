@@ -70,7 +70,7 @@ where
                 "spawn refused: max_provisioned cap reached"
             );
             return Err(Error::CapacityFull {
-                reason: "max_provisioned",
+                kind: CapacityKind::Provisioned,
             });
         }
 
@@ -82,7 +82,7 @@ where
                 "spawn refused: max_active cap reached"
             );
             return Err(Error::CapacityFull {
-                reason: "max_active",
+                kind: CapacityKind::Active,
             });
         }
 
@@ -874,7 +874,12 @@ mod tests {
 
         let err = gm.spawn().unwrap_err();
         assert!(
-            matches!(err, Error::CapacityFull { reason } if reason == "max_provisioned"),
+            matches!(
+                err,
+                Error::CapacityFull {
+                    kind: CapacityKind::Provisioned
+                }
+            ),
             "expected CapacityFull(max_provisioned), got {err:?}"
         );
     }
@@ -888,7 +893,12 @@ mod tests {
 
         let err = gm.spawn().unwrap_err();
         assert!(
-            matches!(err, Error::CapacityFull { reason } if reason == "max_active"),
+            matches!(
+                err,
+                Error::CapacityFull {
+                    kind: CapacityKind::Active
+                }
+            ),
             "expected CapacityFull(max_active), got {err:?}"
         );
     }
