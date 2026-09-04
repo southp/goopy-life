@@ -1,3 +1,4 @@
+import { NO_FREE_SLOT_MESSAGE } from "@/lib/constants";
 import type { CapacityResponse } from "@/lib/types";
 
 interface CapacityIndicatorProps {
@@ -5,26 +6,16 @@ interface CapacityIndicatorProps {
 }
 
 /**
- * Why a spawn cannot be served right now, phrased for a visitor.
+ * The `x / y` slot readout under the CTA, plus one line when nothing is free.
  *
- * Mirrors the two server-side caps, and checks the disk-bound one first: it is
- * the harder wall (a slot only frees when an instance expires and the sweep
- * reaps it), whereas a busy server clears as instances finish.
- */
-function fullReason(capacity: CapacityResponse): string {
-	if (capacity.provisioned >= capacity.max_provisioned) {
-		return "The server is full — every slot is taken. One frees up when an instance expires.";
-	}
-	return "Too many instances are running right now. Try again in a few minutes.";
-}
-
-/**
- * The `x / y` headroom readout shown under the CTA, plus the reason when the
- * server is full.
+ * Shows only `used` / `total` — the pair the server says is binding. The
+ * distinction between a running instance and one that failed and still holds a
+ * slot is ours, not the visitor's; they need one fact, which is whether they
+ * can get a slot.
  *
- * Renders nothing while capacity is unknown (the first poll has not landed, or
- * `/capacity` is unreachable) rather than showing a fabricated `-- / --`: the
- * button is still clickable in that state, so an indicator would only mislead.
+ * Renders nothing while capacity is unknown (first poll not back, or
+ * `/capacity` unreachable) rather than a fabricated `-- / --`: the button stays
+ * clickable in that state, so an indicator would only mislead.
  */
 export default function CapacityIndicator({
 	capacity,
@@ -39,15 +30,15 @@ export default function CapacityIndicator({
 				className={`capacity-indicator${capacity.is_full ? " full" : ""}`}
 				// Chatty enough to be noise if announced on every poll, so it is
 				// exposed as a labelled status a screen reader can query instead.
-				aria-label={`${capacity.active} of ${capacity.max_active} instances live`}
+				aria-label={`${capacity.used} of ${capacity.total} slots in use`}
 			>
 				<span className="capacity-count">
-					{capacity.active} / {capacity.max_active}
+					{capacity.used} / {capacity.total}
 				</span>{" "}
-				instances live
+				slots in use
 			</p>
 			{capacity.is_full && (
-				<p className="capacity-full-reason">{fullReason(capacity)}</p>
+				<p className="capacity-full-reason">{NO_FREE_SLOT_MESSAGE}</p>
 			)}
 		</div>
 	);

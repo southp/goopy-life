@@ -109,14 +109,24 @@ struct ConfigResponse {
 /// browser polls.
 #[derive(serde::Serialize)]
 struct CapacityResponse {
-    active: u32,
-    max_active: u32,
-    provisioned: u32,
-    max_provisioned: u32,
+    /// The pair to display: usage of the cap that would refuse the next spawn.
+    /// Resolved server-side (see [`gl_core::Capacity::binding`]) so a client
+    /// never has to know that a `Failed` row holds a slot without holding RAM,
+    /// and never shows a number that contradicts `is_full`.
+    used: u32,
+    total: u32,
     /// Whether either cap is currently met. Precomputed so the frontend does
     /// not have to re-derive the "which caps count as full" rule and drift from
     /// the server's own definition.
     is_full: bool,
+    /// The raw per-cap counts, kept for operators and debugging. Clients should
+    /// prefer `used`/`total`; these two pairs disagree whenever a `Failed` row
+    /// is holding a slot, which is exactly the confusion `used` exists to
+    /// prevent.
+    active: u32,
+    max_active: u32,
+    provisioned: u32,
+    max_provisioned: u32,
 }
 
 #[derive(serde::Serialize)]
@@ -328,12 +338,16 @@ async fn get_capacity(State(state): State<Arc<AppState>>) -> Result<impl IntoRes
     .map_err(|e| AppError::Internal(format!("task join error: {e}")))?
     .map_err(|e| AppError::from_core(e, state.cfg.sweep_interval_secs))?;
 
+    let (used, total) = capacity.binding();
+
     Ok(Json(CapacityResponse {
+        used,
+        total,
+        is_full: capacity.is_full(),
         active: capacity.active,
         max_active: capacity.max_active,
         provisioned: capacity.provisioned,
         max_provisioned: capacity.max_provisioned,
-        is_full: capacity.is_full(),
     }))
 }
 
@@ -1239,6 +1253,9 @@ mod tests {
         assert_eq!(body["provisioned"], 0);
         assert_eq!(body["max_provisioned"], 5);
         assert_eq!(body["is_full"], false);
+        // The active cap has less headroom (3 vs 5), so it is the one shown.
+        assert_eq!(body["used"], 0);
+        assert_eq!(body["total"], 3);
     }
 
     #[tokio::test]
@@ -1265,6 +1282,10 @@ mod tests {
         assert_eq!(body["active"], 1);
         assert_eq!(body["provisioned"], 2);
         assert_eq!(body["is_full"], false);
+        // Equal caps, so the provisioned pair binds — the one a visitor is
+        // actually blocked by.
+        assert_eq!(body["used"], 2);
+        assert_eq!(body["total"], 10);
     }
 
     #[tokio::test]
@@ -1291,6 +1312,10 @@ mod tests {
         assert_eq!(body["active"], 0);
         assert_eq!(body["provisioned"], 1);
         assert_eq!(body["is_full"], true);
+        // The displayed pair must show a full server, not the active count's
+        // misleading "0 / 10".
+        assert_eq!(body["used"], 1);
+        assert_eq!(body["total"], 1);
     }
 
     /// `/capacity` is polled by every visitor, so it must sit on the loose read

@@ -35,13 +35,19 @@ export interface ConfigResponse {
 // interval: the caps are static, but how much of them is used is not, and the
 // build-time config fetch would freeze that at deploy.
 export interface CapacityResponse {
+	// Usage of the cap that would refuse the next spawn. The server picks which
+	// of its two caps that is, so the UI never has to explain — or even know —
+	// why a slot is held. Always consistent with is_full.
+	used: number;
+	total: number;
+	// Whether either cap is met. Computed server-side so the UI cannot drift from
+	// the server's own definition of "full".
+	is_full: boolean;
+	// Raw per-cap counts. Present for operators; deliberately unused by the UI.
 	active: number;
 	max_active: number;
 	provisioned: number;
 	max_provisioned: number;
-	// Whether either cap is met. Computed server-side so the UI cannot drift from
-	// the server's own definition of "full".
-	is_full: boolean;
 }
 
 // State machine for the interactive "Ghost now!" CTA.
