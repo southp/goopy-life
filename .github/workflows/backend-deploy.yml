@@ -9,6 +9,10 @@ on:
     branches: ['trunk']
     paths:
       - 'backend/**'
+      # Local-only development config: it is never shipped anywhere, so editing
+      # it should not rebuild and redeploy the droplet. Backend build still
+      # runs on it — that is what parses it.
+      - '!backend/config.local.toml'
       - 'deploy/push-binary.sh'
       # The dev config is shipped by the deploy, so editing it is a deploy.
       - 'deploy/config/dev.toml'
