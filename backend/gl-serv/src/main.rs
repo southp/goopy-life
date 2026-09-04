@@ -105,10 +105,6 @@ struct ErrorResponse {
 // Error handling
 // ---------------------------------------------------------------------------
 
-/// How long (seconds) clients should wait before retrying a capacity-full
-/// spawn. Sent verbatim in the `Retry-After` header on 503 responses.
-const CAPACITY_RETRY_AFTER_SECS: &str = "30";
-
 enum AppError {
     NotFound(String),
     Invalid(String),
@@ -118,6 +114,7 @@ enum AppError {
     CapacityFull {
         message: String,
         code: String,
+        retry_after_secs: u64,
     },
     Internal(String),
 }
@@ -125,7 +122,12 @@ enum AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         // CapacityFull needs an extra Retry-After header, so handle it up front.
-        if let AppError::CapacityFull { message, code } = self {
+        if let AppError::CapacityFull {
+            message,
+            code,
+            retry_after_secs,
+        } = self
+        {
             let mut response = (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(ErrorResponse {
@@ -136,7 +138,7 @@ impl IntoResponse for AppError {
                 .into_response();
             response.headers_mut().insert(
                 axum::http::header::RETRY_AFTER,
-                HeaderValue::from_static(CAPACITY_RETRY_AFTER_SECS),
+                HeaderValue::from(retry_after_secs),
             );
             return response;
         }
@@ -161,8 +163,19 @@ impl IntoResponse for AppError {
     }
 }
 
-impl From<gl_core::Error> for AppError {
-    fn from(e: gl_core::Error) -> Self {
+impl AppError {
+    /// Map a gl-core error onto its HTTP-facing form.
+    ///
+    /// `capacity_retry_after_secs` becomes the `Retry-After` header on the 503 a
+    /// capacity cap produces. Callers pass [`Config::sweep_interval_secs`],
+    /// because the sweep is the only thing that frees a slot: the API exposes no
+    /// despawn endpoint, so capacity is reclaimed when an instance ages past
+    /// `life_in_days` *and* the sweeper next runs. Deriving the hint from config
+    /// rather than a constant also means it follows the operator if they shorten
+    /// the interval.
+    ///
+    /// [`Config::sweep_interval_secs`]: gl_core::Config::sweep_interval_secs
+    fn from_core(e: gl_core::Error, capacity_retry_after_secs: u64) -> Self {
         match e {
             gl_core::Error::NotFound => AppError::NotFound("not found".into()),
             gl_core::Error::Invalid => AppError::Invalid("invalid".into()),
@@ -185,6 +198,7 @@ impl From<gl_core::Error> for AppError {
                 AppError::CapacityFull {
                     message: message.to_string(),
                     code: code.to_string(),
+                    retry_after_secs: capacity_retry_after_secs,
                 }
             }
             other => AppError::Internal(other.to_string()),
@@ -202,7 +216,8 @@ async fn spawn_goopy(State(state): State<Arc<AppState>>) -> Result<impl IntoResp
         move || state.manager.spawn()
     })
     .await
-    .map_err(|e| AppError::Internal(format!("task join error: {e}")))??;
+    .map_err(|e| AppError::Internal(format!("task join error: {e}")))?
+    .map_err(|e| AppError::from_core(e, state.cfg.sweep_interval_secs))?;
 
     Ok((
         StatusCode::CREATED,
@@ -224,7 +239,8 @@ async fn get_goopy(
         move || state.manager.get(&slug)
     })
     .await
-    .map_err(|e| AppError::Internal(format!("task join error: {e}")))??;
+    .map_err(|e| AppError::Internal(format!("task join error: {e}")))?
+    .map_err(|e| AppError::from_core(e, state.cfg.sweep_interval_secs))?;
 
     let goopy = goopy.ok_or_else(|| AppError::NotFound("not found".into()))?;
 
@@ -256,7 +272,8 @@ async fn alive_check(
         move || state.manager.get(&slug)
     })
     .await
-    .map_err(|e| AppError::Internal(format!("task join error: {e}")))??;
+    .map_err(|e| AppError::Internal(format!("task join error: {e}")))?
+    .map_err(|e| AppError::from_core(e, state.cfg.sweep_interval_secs))?;
 
     let Some(goopy) = goopy else {
         return Ok(StatusCode::GONE.into_response());
@@ -701,6 +718,13 @@ mod tests {
         build_router(state, cors, &rl)
     }
 
+    /// The `Retry-After` a capacity 503 should carry: the sweep interval, since
+    /// the sweep is the only thing that frees a slot. Read back off the same
+    /// config the router is built from so the two cannot drift.
+    fn expected_retry_after(domain: &str) -> String {
+        test_cfg(domain).sweep_interval_secs.to_string()
+    }
+
     async fn body_json(body: Body) -> Value {
         let bytes = body.collect().await.unwrap().to_bytes();
         serde_json::from_slice(&bytes).unwrap()
@@ -823,8 +847,9 @@ mod tests {
             resp.headers()
                 .get(axum::http::header::RETRY_AFTER)
                 .and_then(|v| v.to_str().ok()),
-            Some("30"),
-            "capacity-full 503 must carry a Retry-After header"
+            Some(expected_retry_after("goopy.life").as_str()),
+            "capacity-full 503 must advertise the sweep interval, the cadence at \
+             which a slot can actually free up"
         );
         let body = body_json(resp.into_body()).await;
         assert_eq!(body["code"], "server_full");
@@ -854,7 +879,7 @@ mod tests {
             resp.headers()
                 .get(axum::http::header::RETRY_AFTER)
                 .and_then(|v| v.to_str().ok()),
-            Some("30")
+            Some(expected_retry_after("goopy.life").as_str())
         );
         let body = body_json(resp.into_body()).await;
         assert_eq!(body["code"], "server_busy");
