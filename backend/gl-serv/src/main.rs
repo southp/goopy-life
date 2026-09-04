@@ -10,7 +10,7 @@ use axum::{Json, Router};
 use chrono::{Duration, Utc};
 use clap::Parser;
 use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
-use gl_core::{GoopyManager, RealSysRunner};
+use gl_core::{CapacityKind, GoopyManager, RealSysRunner};
 use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::key_extractor::SmartIpKeyExtractor;
@@ -109,17 +109,47 @@ enum AppError {
     NotFound(String),
     Invalid(String),
     ServiceUnavailable(String),
+    /// A cap was hit. Renders 503 with a `Retry-After` header and a body that
+    /// names which limit was exceeded (server-full vs. busy).
+    CapacityFull {
+        message: String,
+        code: String,
+        retry_after_secs: u64,
+    },
     Internal(String),
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        // CapacityFull needs an extra Retry-After header, so handle it up front.
+        if let AppError::CapacityFull {
+            message,
+            code,
+            retry_after_secs,
+        } = self
+        {
+            let mut response = (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: message,
+                    code,
+                }),
+            )
+                .into_response();
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                HeaderValue::from(retry_after_secs),
+            );
+            return response;
+        }
+
         let (status, message, code) = match self {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg, "not_found"),
             AppError::Invalid(msg) => (StatusCode::BAD_REQUEST, msg, "invalid"),
             AppError::ServiceUnavailable(msg) => {
                 (StatusCode::SERVICE_UNAVAILABLE, msg, "service_unavailable")
             }
+            AppError::CapacityFull { .. } => unreachable!("handled above"),
             AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg, "internal_error"),
         };
         (
@@ -133,13 +163,43 @@ impl IntoResponse for AppError {
     }
 }
 
-impl From<gl_core::Error> for AppError {
-    fn from(e: gl_core::Error) -> Self {
+impl AppError {
+    /// Map a gl-core error onto its HTTP-facing form.
+    ///
+    /// `capacity_retry_after_secs` becomes the `Retry-After` header on the 503 a
+    /// capacity cap produces. Callers pass [`Config::sweep_interval_secs`],
+    /// because the sweep is the only thing that frees a slot: the API exposes no
+    /// despawn endpoint, so capacity is reclaimed when an instance ages past
+    /// `life_in_days` *and* the sweeper next runs. Deriving the hint from config
+    /// rather than a constant also means it follows the operator if they shorten
+    /// the interval.
+    ///
+    /// [`Config::sweep_interval_secs`]: gl_core::Config::sweep_interval_secs
+    fn from_core(e: gl_core::Error, capacity_retry_after_secs: u64) -> Self {
         match e {
             gl_core::Error::NotFound => AppError::NotFound("not found".into()),
             gl_core::Error::Invalid => AppError::Invalid("invalid".into()),
             gl_core::Error::PortExhausted => {
                 AppError::ServiceUnavailable("port range exhausted".into())
+            }
+            gl_core::Error::CapacityFull { kind } => {
+                // Distinguish disk-bound (server full) from RAM-bound (busy).
+                // Matching the enum keeps this exhaustive: a new cap cannot be
+                // added in gl-core without the compiler demanding a code here.
+                let (message, code) = match kind {
+                    CapacityKind::Provisioned => (
+                        "server is full; no capacity for new instances",
+                        "server_full",
+                    ),
+                    CapacityKind::Active => {
+                        ("server is busy; too many running instances", "server_busy")
+                    }
+                };
+                AppError::CapacityFull {
+                    message: message.to_string(),
+                    code: code.to_string(),
+                    retry_after_secs: capacity_retry_after_secs,
+                }
             }
             other => AppError::Internal(other.to_string()),
         }
@@ -156,7 +216,8 @@ async fn spawn_goopy(State(state): State<Arc<AppState>>) -> Result<impl IntoResp
         move || state.manager.spawn()
     })
     .await
-    .map_err(|e| AppError::Internal(format!("task join error: {e}")))??;
+    .map_err(|e| AppError::Internal(format!("task join error: {e}")))?
+    .map_err(|e| AppError::from_core(e, state.cfg.sweep_interval_secs))?;
 
     Ok((
         StatusCode::CREATED,
@@ -178,7 +239,8 @@ async fn get_goopy(
         move || state.manager.get(&slug)
     })
     .await
-    .map_err(|e| AppError::Internal(format!("task join error: {e}")))??;
+    .map_err(|e| AppError::Internal(format!("task join error: {e}")))?
+    .map_err(|e| AppError::from_core(e, state.cfg.sweep_interval_secs))?;
 
     let goopy = goopy.ok_or_else(|| AppError::NotFound("not found".into()))?;
 
@@ -210,7 +272,8 @@ async fn alive_check(
         move || state.manager.get(&slug)
     })
     .await
-    .map_err(|e| AppError::Internal(format!("task join error: {e}")))??;
+    .map_err(|e| AppError::Internal(format!("task join error: {e}")))?
+    .map_err(|e| AppError::from_core(e, state.cfg.sweep_interval_secs))?;
 
     let Some(goopy) = goopy else {
         return Ok(StatusCode::GONE.into_response());
@@ -570,6 +633,8 @@ mod tests {
             cors_origin: "https://example.com".to_string(),
             bind_address: "127.0.0.1:0".to_string(),
             sweep_interval_secs: 86400,
+            max_active: 100,
+            max_provisioned: 100,
             registry: gl_core::config::RegistryConfig {
                 path: PathBuf::from(":memory:"),
             },
@@ -588,10 +653,12 @@ mod tests {
     /// Build a test router using the given registry (pass pre-seeded registries
     /// for tests that need existing goopies).
     fn make_router(domain: &str, registry: SqliteRegistry) -> Router {
-        make_router_with_rl(
+        make_router_with(
             domain,
             registry,
             gl_core::config::RateLimitConfig::default(),
+            100,
+            100,
         )
     }
 
@@ -601,6 +668,33 @@ mod tests {
         registry: SqliteRegistry,
         rl: gl_core::config::RateLimitConfig,
     ) -> Router {
+        make_router_with(domain, registry, rl, 100, 100)
+    }
+
+    /// Like [`make_router`] but with explicit capacity caps, for cap tests.
+    fn make_router_with_caps(
+        domain: &str,
+        registry: SqliteRegistry,
+        max_active: u32,
+        max_provisioned: u32,
+    ) -> Router {
+        make_router_with(
+            domain,
+            registry,
+            gl_core::config::RateLimitConfig::default(),
+            max_active,
+            max_provisioned,
+        )
+    }
+
+    /// Shared builder behind the three helpers above.
+    fn make_router_with(
+        domain: &str,
+        registry: SqliteRegistry,
+        rl: gl_core::config::RateLimitConfig,
+        max_active: u32,
+        max_provisioned: u32,
+    ) -> Router {
         let cfg = test_cfg(domain);
         let manager: Arc<dyn ManagerService> = Arc::new(GoopyManager::new(
             GoopyManagerConfig {
@@ -609,6 +703,8 @@ mod tests {
                 life_in_days: cfg.life_in_days,
                 port_range_start: cfg.port_range_start,
                 port_range_end: cfg.port_range_end,
+                max_active,
+                max_provisioned,
             },
             registry,
             NoopProvisioner,
@@ -620,6 +716,13 @@ mod tests {
             .allow_headers(tower_http::cors::Any);
         let state = Arc::new(AppState { manager, cfg });
         build_router(state, cors, &rl)
+    }
+
+    /// The `Retry-After` a capacity 503 should carry: the sweep interval, since
+    /// the sweep is the only thing that frees a slot. Read back off the same
+    /// config the router is built from so the two cannot drift.
+    fn expected_retry_after(domain: &str) -> String {
+        test_cfg(domain).sweep_interval_secs.to_string()
     }
 
     async fn body_json(body: Body) -> Value {
@@ -691,6 +794,8 @@ mod tests {
                 life_in_days: cfg.life_in_days,
                 port_range_start: cfg.port_range_start,
                 port_range_end: cfg.port_range_end,
+                max_active: 100,
+                max_provisioned: 100,
             },
             SqliteRegistry::new(Path::new(":memory:")).unwrap(),
             NoopProvisioner,
@@ -716,6 +821,68 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = body_json(resp.into_body()).await;
         assert_eq!(body["code"], "service_unavailable");
+    }
+
+    #[tokio::test]
+    async fn spawn_returns_503_with_retry_after_when_provisioned_cap_hit() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        // One Failed goopy fills the (provisioned = 1) cap; Failed still counts.
+        seed_goopy(&registry, "full-server-slug", 7, 0, 9050, Status::Failed);
+        let app = make_router_with_caps("goopy.life", registry, 100, 1);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
+                    .method("POST")
+                    .uri("/goopies")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some(expected_retry_after("goopy.life").as_str()),
+            "capacity-full 503 must advertise the sweep interval, the cadence at \
+             which a slot can actually free up"
+        );
+        let body = body_json(resp.into_body()).await;
+        assert_eq!(body["code"], "server_full");
+    }
+
+    #[tokio::test]
+    async fn spawn_returns_503_server_busy_when_active_cap_hit() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        // One resident (Done) goopy fills the (active = 1) cap.
+        seed_goopy(&registry, "busy-server-slug", 7, 0, 9051, Status::Done);
+        let app = make_router_with_caps("goopy.life", registry, 1, 100);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
+                    .method("POST")
+                    .uri("/goopies")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some(expected_retry_after("goopy.life").as_str())
+        );
+        let body = body_json(resp.into_body()).await;
+        assert_eq!(body["code"], "server_busy");
     }
 
     // ── get_goopy ─────────────────────────────────────────────────────────
@@ -1046,6 +1213,8 @@ mod tests {
                 life_in_days: cfg.life_in_days,
                 port_range_start: cfg.port_range_start,
                 port_range_end: cfg.port_range_end,
+                max_active: 100,
+                max_provisioned: 100,
             },
             SqliteRegistry::new(Path::new(":memory:")).unwrap(),
             NoopProvisioner,
@@ -1074,6 +1243,8 @@ mod tests {
                 life_in_days: cfg.life_in_days,
                 port_range_start: cfg.port_range_start,
                 port_range_end: cfg.port_range_end,
+                max_active: 100,
+                max_provisioned: 100,
             },
             registry,
             NoopProvisioner,

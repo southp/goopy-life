@@ -12,6 +12,14 @@ dev_mode        = true        # ignored by CLI; use --prod flag to switch
 cors_origin     = "http://localhost:3000"
 bind_address    = "127.0.0.1:8080"
 
+# Instance caps. max_active: RAM-bound resident cap (default 10).
+# max_provisioned: disk-bound total cap (default 10; kept equal to max_active
+# until scale-to-zero #96 lands, which means the RAM cap is unreachable under
+# these defaults). Both must be > 0, and max_active <= max_provisioned.
+# See config.toml.example for the full rationale.
+max_active       = 10
+max_provisioned  = 10
+
 [registry]
 path = "./registry.db"
 

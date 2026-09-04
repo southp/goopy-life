@@ -273,6 +273,85 @@ fn parse_row(
 }
 
 // ---------------------------------------------------------------------------
+// Statement helpers
+// ---------------------------------------------------------------------------
+//
+// These take a bare `&Connection` so the same SQL serves both the autocommit
+// methods and the `save_within_caps` transaction. Keeping one copy of each
+// statement is what guarantees the cap enforced under the write lock is the
+// same one `count_*` reports.
+
+/// Statuses that mean an instance is resident in RAM. See
+/// [`GoopyRegistry::count_active`] for why `Despawning` is one of them.
+const ACTIVE_STATUSES: &str = "('Spawning', 'Done', 'Despawning')";
+
+/// Count every row in `goopies`, regardless of status.
+fn count_provisioned_in(conn: &Connection) -> Result<u32, Error> {
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM goopies", [], |row| row.get(0))
+        .map_err(|e| Error::Registry {
+            context: "count provisioned",
+            source: e.into(),
+        })?;
+
+    Ok(count as u32)
+}
+
+/// Count rows whose status is in [`ACTIVE_STATUSES`].
+fn count_active_in(conn: &Connection) -> Result<u32, Error> {
+    let sql = format!("SELECT COUNT(*) FROM goopies WHERE status IN {ACTIVE_STATUSES}");
+    let count: i64 = conn
+        .query_row(&sql, [], |row| row.get(0))
+        .map_err(|e| Error::Registry {
+            context: "count active",
+            source: e.into(),
+        })?;
+
+    Ok(count as u32)
+}
+
+/// Insert `gp`, mapping a UNIQUE violation on `slug` to [`Error::AlreadyExists`]
+/// so callers can retry with a fresh slug.
+fn insert_goopy(conn: &Connection, gp: &Goopy) -> Result<(), Error> {
+    let result = conn.execute(
+        "INSERT OR FAIL INTO goopies
+         (slug, life_in_days, created_at, status, working_dir, port,
+          provisioner_kind, service_version)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            gp.slug,
+            gp.life_in_days as i64,
+            gp.created_at.to_rfc3339(),
+            gp.status.to_string(),
+            gp.working_dir.to_string_lossy().as_ref(),
+            gp.port as i64,
+            gp.provisioner_kind.to_string(),
+            gp.service_version,
+        ],
+    );
+
+    match result {
+        Ok(_) => {
+            tracing::debug!(slug = %gp.slug, "saved goopy");
+            Ok(())
+        }
+        Err(rusqlite::Error::SqliteFailure(err, _))
+            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            tracing::warn!(slug = %gp.slug, "save failed: already exists");
+            Err(Error::AlreadyExists)
+        }
+        Err(e) => {
+            tracing::error!(slug = %gp.slug, "save failed: {e}");
+            Err(Error::Registry {
+                context: "save",
+                source: e.into(),
+            })
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GoopyRegistry impl
 // ---------------------------------------------------------------------------
 impl GoopyRegistry for SqliteRegistry {
@@ -283,42 +362,7 @@ impl GoopyRegistry for SqliteRegistry {
             source: e.into(),
         })?;
 
-        let result = conn.execute(
-            "INSERT OR FAIL INTO goopies
-             (slug, life_in_days, created_at, status, working_dir, port,
-              provisioner_kind, service_version)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                gp.slug,
-                gp.life_in_days as i64,
-                gp.created_at.to_rfc3339(),
-                gp.status.to_string(),
-                gp.working_dir.to_string_lossy().as_ref(),
-                gp.port as i64,
-                gp.provisioner_kind.to_string(),
-                gp.service_version,
-            ],
-        );
-
-        match result {
-            Ok(_) => {
-                tracing::debug!(slug = %gp.slug, "saved goopy");
-                Ok(())
-            }
-            Err(rusqlite::Error::SqliteFailure(err, _))
-                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
-            {
-                tracing::warn!(slug = %gp.slug, "save failed: already exists");
-                Err(Error::AlreadyExists)
-            }
-            Err(e) => {
-                tracing::error!(slug = %gp.slug, "save failed: {e}");
-                Err(Error::Registry {
-                    context: "save",
-                    source: e.into(),
-                })
-            }
-        }
+        insert_goopy(&conn, gp)
     }
 
     #[tracing::instrument(skip(self))]
@@ -563,6 +607,84 @@ impl GoopyRegistry for SqliteRegistry {
         tracing::debug!(port = port, "released port");
         Ok(())
     }
+
+    #[tracing::instrument(skip(self))]
+    fn count_provisioned(&self) -> Result<u32, Error> {
+        let conn = self.pool.get().map_err(|e| Error::Registry {
+            context: "pool get",
+            source: e.into(),
+        })?;
+
+        count_provisioned_in(&conn)
+    }
+
+    #[tracing::instrument(skip(self))]
+    fn count_active(&self) -> Result<u32, Error> {
+        let conn = self.pool.get().map_err(|e| Error::Registry {
+            context: "pool get",
+            source: e.into(),
+        })?;
+
+        count_active_in(&conn)
+    }
+
+    #[tracing::instrument(skip(self))]
+    fn save_within_caps(
+        &self,
+        gp: &Goopy,
+        max_provisioned: u32,
+        max_active: u32,
+    ) -> Result<(), Error> {
+        let mut conn = self.pool.get().map_err(|e| Error::Registry {
+            context: "pool get",
+            source: e.into(),
+        })?;
+
+        // `Immediate` takes the write lock before the first read, so the counts
+        // below and the insert that follows see one consistent snapshot. With a
+        // deferred transaction two spawners could both read the same free slot
+        // and only collide on write — exactly the overshoot this exists to
+        // prevent. Contention waits out the pool's `busy_timeout`.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| Error::Registry {
+                context: "begin save_within_caps transaction",
+                source: e.into(),
+            })?;
+
+        let provisioned = count_provisioned_in(&tx)?;
+        if provisioned >= max_provisioned {
+            tracing::warn!(
+                provisioned,
+                max_provisioned,
+                slug = %gp.slug,
+                "spawn refused: max_provisioned cap reached"
+            );
+            return Err(Error::CapacityFull {
+                kind: CapacityKind::Provisioned,
+            });
+        }
+
+        let active = count_active_in(&tx)?;
+        if active >= max_active {
+            tracing::warn!(
+                active,
+                max_active,
+                slug = %gp.slug,
+                "spawn refused: max_active cap reached"
+            );
+            return Err(Error::CapacityFull {
+                kind: CapacityKind::Active,
+            });
+        }
+
+        insert_goopy(&tx, gp)?;
+
+        tx.commit().map_err(|e| Error::Registry {
+            context: "commit save_within_caps transaction",
+            source: e.into(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -626,6 +748,125 @@ mod tests {
         r.update_status("status-slug", Status::Done).unwrap();
         let loaded = r.load("status-slug").unwrap().unwrap();
         assert_eq!(loaded.status, Status::Done);
+    }
+
+    #[test]
+    fn count_provisioned_counts_all_rows_including_failed() {
+        let r = registry();
+        for (slug, status) in [
+            ("c-spawning", Status::Spawning),
+            ("c-done", Status::Done),
+            ("c-failed", Status::Failed),
+            ("c-despawning", Status::Despawning),
+        ] {
+            let mut gp = make_goopy(slug);
+            gp.status = status;
+            r.save(&gp).unwrap();
+        }
+        // All four rows count toward the disk-bound provisioned cap.
+        assert_eq!(r.count_provisioned().unwrap(), 4);
+    }
+
+    #[test]
+    fn count_active_counts_resident_statuses_only() {
+        let r = registry();
+        for (slug, status) in [
+            ("a-spawning", Status::Spawning),
+            ("a-done", Status::Done),
+            ("a-failed", Status::Failed),
+            ("a-despawning", Status::Despawning),
+        ] {
+            let mut gp = make_goopy(slug);
+            gp.status = status;
+            r.save(&gp).unwrap();
+        }
+        // Spawning, Done and Despawning are all resident: a Despawning
+        // instance's process stays up until the teardown thread finishes.
+        // Only Failed has no process left.
+        assert_eq!(r.count_active().unwrap(), 3);
+    }
+
+    #[test]
+    fn save_within_caps_inserts_when_both_caps_have_room() {
+        let r = registry();
+        r.save_within_caps(&make_goopy("roomy-slug"), 10, 10)
+            .unwrap();
+        assert!(r.load("roomy-slug").unwrap().is_some());
+        assert_eq!(r.count_provisioned().unwrap(), 1);
+    }
+
+    #[test]
+    fn save_within_caps_rejects_when_provisioned_cap_met() {
+        let r = registry();
+        // A Failed row occupies a provisioned slot but no active one, so this
+        // can only be the provisioned cap tripping.
+        let mut occupant = make_goopy("failed-occupant");
+        occupant.status = Status::Failed;
+        r.save(&occupant).unwrap();
+
+        let err = r
+            .save_within_caps(&make_goopy("rejected-slug"), 1, 10)
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                Error::CapacityFull {
+                    kind: CapacityKind::Provisioned
+                }
+            ),
+            "expected CapacityFull(Provisioned), got {err:?}"
+        );
+        assert!(
+            r.load("rejected-slug").unwrap().is_none(),
+            "a refused insert must not leave a row behind"
+        );
+    }
+
+    #[test]
+    fn save_within_caps_rejects_when_active_cap_met() {
+        let r = registry();
+        let mut occupant = make_goopy("done-occupant");
+        occupant.status = Status::Done;
+        r.save(&occupant).unwrap();
+
+        // Provisioned has room (10); only the active cap of 1 is met.
+        let err = r
+            .save_within_caps(&make_goopy("rejected-slug"), 10, 1)
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                Error::CapacityFull {
+                    kind: CapacityKind::Active
+                }
+            ),
+            "expected CapacityFull(Active), got {err:?}"
+        );
+        assert!(r.load("rejected-slug").unwrap().is_none());
+    }
+
+    #[test]
+    fn save_within_caps_reports_slug_collision_not_capacity() {
+        let r = registry();
+        r.save(&make_goopy("taken-slug")).unwrap();
+
+        let err = r
+            .save_within_caps(&make_goopy("taken-slug"), 10, 10)
+            .unwrap_err();
+
+        assert!(
+            matches!(err, Error::AlreadyExists),
+            "a collision inside the cap transaction must still be retryable, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn counts_are_zero_on_empty_registry() {
+        let r = registry();
+        assert_eq!(r.count_provisioned().unwrap(), 0);
+        assert_eq!(r.count_active().unwrap(), 0);
     }
 
     #[test]

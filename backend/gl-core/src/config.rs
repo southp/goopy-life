@@ -118,6 +118,48 @@ pub struct Config {
     pub bind_address: String,
     #[serde(default = "default_sweep_interval_secs")]
     pub sweep_interval_secs: u64,
+    /// Maximum number of **resident** (running) instances allowed simultaneously.
+    ///
+    /// RAM-bound. Each Ghost process is roughly 150–250 MB. On a 2 GB droplet
+    /// minus OS/nginx/gl-serv overhead that leaves capacity for ~10 concurrent
+    /// instances (2 GB ÷ ~200 MB ≈ 10). Conservative default.
+    ///
+    /// Raise this cap once the machine is upgraded or profile data shows lower
+    /// per-instance RSS in practice.
+    ///
+    /// Must be `<= max_provisioned`, which `Config::from_file` enforces — a
+    /// larger value could never be reached. See [`Config::max_provisioned`] for
+    /// when this cap is reachable at all.
+    #[serde(default = "default_max_active")]
+    pub max_active: u32,
+    /// Maximum number of instances that may **exist on disk** at any time.
+    ///
+    /// Disk-bound. On a 50 GB droplet with a 512 MB per-instance quota the
+    /// theoretical ceiling is ~90 instances (50 GB ÷ 512 MB). The beta default
+    /// is kept equal to `max_active` because scale-to-zero (#96) has not landed
+    /// yet; once idle instances can suspend to ~0 RAM, raise this toward the
+    /// disk ceiling while `max_active` stays small.
+    ///
+    /// # Reachability of the two caps
+    ///
+    /// Active instances are a subset of provisioned ones, and this cap is
+    /// checked first, so while `max_active == max_provisioned` the RAM cap can
+    /// never trip and gl-serv can only ever answer `server_full`, never
+    /// `server_busy`. The `max_active` cap — and that error code — become
+    /// reachable once the two diverge, which is what #96 enables.
+    ///
+    /// # Why `Failed` instances count
+    ///
+    /// Not because they hold resources: a spawn that failed has already had its
+    /// port released (`GoopyManager::spawn`) and its working directory released
+    /// (`HelloProvisioner::provision`). It is counted because it is still a row
+    /// in the registry, and because a `Failed` row left by a failed *despawn*
+    /// does still hold both its port and its directory.
+    ///
+    /// The sweep reaps `Failed` rows unconditionally, so one occupies a slot for
+    /// at most `sweep_interval_secs`.
+    #[serde(default = "default_max_provisioned")]
+    pub max_provisioned: u32,
     pub registry: RegistryConfig,
     pub allocator: AllocatorConfig,
     pub provisioner: ProvisionerConfig,
@@ -127,6 +169,20 @@ pub struct Config {
 
 fn default_sweep_interval_secs() -> u64 {
     86400
+}
+
+/// Default RAM-bound resident-instance cap. See [`Config::max_active`].
+fn default_max_active() -> u32 {
+    10
+}
+
+/// Default disk-bound total-instance cap. See [`Config::max_provisioned`].
+///
+/// Kept equal to [`default_max_active`] until scale-to-zero (#96) ships, which
+/// means the RAM cap is unreachable under the shipped defaults — see the
+/// reachability note on [`Config::max_provisioned`].
+fn default_max_provisioned() -> u32 {
+    10
 }
 
 impl Config {
@@ -157,6 +213,8 @@ impl Config {
             life_in_days: self.life_in_days,
             port_range_start: self.port_range_start,
             port_range_end: self.port_range_end,
+            max_active: self.max_active,
+            max_provisioned: self.max_provisioned,
         }
     }
 
@@ -184,6 +242,22 @@ impl Config {
                     "allocator.quota_mb must be > 0 when kind = \"Zfs\"".into(),
                 ));
             }
+        }
+        // A zero cap turns every spawn into a 503 with no startup error at all,
+        // which is an easy typo to make and near-impossible to diagnose from
+        // outside the service.
+        if cfg.max_active == 0 {
+            return Err(Error::Config("max_active must be > 0".into()));
+        }
+        if cfg.max_provisioned == 0 {
+            return Err(Error::Config("max_provisioned must be > 0".into()));
+        }
+        // Active instances are a subset of provisioned ones, so a larger
+        // max_active is silently inert rather than merely generous.
+        if cfg.max_active > cfg.max_provisioned {
+            return Err(Error::Config(
+                "max_active must be <= max_provisioned".into(),
+            ));
         }
         // A zero burst or period cannot be turned into a rate limiter, so reject
         // it here rather than letting gl-serv panic while building its router.
@@ -214,6 +288,13 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    /// Splice top-level `keys` into `base` ahead of its first table header.
+    /// Appending them instead would land them inside the trailing
+    /// `[provisioner]` table, where they are silently ignored.
+    fn with_caps(base: &str, keys: &str) -> String {
+        base.replace("[registry]", &format!("{keys}\n[registry]"))
+    }
 
     fn write_config(toml: &str) -> Result<Config, Error> {
         let mut f = NamedTempFile::new().unwrap();
@@ -319,6 +400,64 @@ quota_mb = 0
         );
         let err = write_config(&toml).unwrap_err();
         assert!(matches!(err, Error::Config(ref s) if s.contains("quota_mb")));
+    }
+
+    #[test]
+    fn zero_max_active_rejected() {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            with_caps(VALID_BASE, "max_active = 0")
+        );
+        let err = write_config(&toml).unwrap_err();
+        assert!(matches!(err, Error::Config(ref s) if s.contains("max_active")));
+    }
+
+    #[test]
+    fn zero_max_provisioned_rejected() {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            with_caps(VALID_BASE, "max_provisioned = 0")
+        );
+        let err = write_config(&toml).unwrap_err();
+        assert!(matches!(err, Error::Config(ref s) if s.contains("max_provisioned")));
+    }
+
+    #[test]
+    fn max_active_above_max_provisioned_rejected() {
+        // An active cap above the provisioned cap can never be reached, since
+        // active instances are a subset of provisioned ones.
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            with_caps(VALID_BASE, "max_active = 20\nmax_provisioned = 10")
+        );
+        let err = write_config(&toml).unwrap_err();
+        assert!(
+            matches!(err, Error::Config(ref s) if s.contains("max_active must be <= max_provisioned")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn max_active_below_max_provisioned_accepted() {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            with_caps(VALID_BASE, "max_active = 10\nmax_provisioned = 20")
+        );
+        let cfg = write_config(&toml).expect("diverged caps are valid");
+        assert_eq!(cfg.max_active, 10);
+        assert_eq!(cfg.max_provisioned, 20);
     }
 
     #[test]

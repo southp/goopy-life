@@ -14,6 +14,10 @@ pub struct GoopyManagerConfig {
     pub life_in_days: i32,
     pub port_range_start: u32,
     pub port_range_end: u32,
+    /// RAM-bound cap on resident (Spawning + Done) instances. See [`Config::max_active`].
+    pub max_active: u32,
+    /// Disk-bound cap on total provisioned instances. See [`Config::max_provisioned`].
+    pub max_provisioned: u32,
 }
 
 pub struct GoopyManager<
@@ -25,6 +29,8 @@ pub struct GoopyManager<
     pub goopy_life_in_days: i32,
     pub port_range_start: u32,
     pub port_range_end: u32,
+    pub max_active: u32,
+    pub max_provisioned: u32,
 
     registry: Arc<Registry>,
     provisioner: Arc<Provisioner>,
@@ -42,6 +48,8 @@ where
             goopy_life_in_days: config.life_in_days,
             port_range_start: config.port_range_start,
             port_range_end: config.port_range_end,
+            max_active: config.max_active,
+            max_provisioned: config.max_provisioned,
             registry: Arc::new(registry),
             provisioner: Arc::new(provisioner),
         }
@@ -79,7 +87,15 @@ where
                 service_version: env!("CARGO_PKG_VERSION").to_string(),
             };
 
-            match self.registry.save(&candidate) {
+            // Capacity is enforced by the insert itself rather than by a
+            // preceding count: a separate check-then-insert lets concurrent
+            // spawns all observe the same free slot and overshoot the cap.
+            // `CapacityFull` falls through to the catch-all arm below, which
+            // releases the port just acquired and returns.
+            match self
+                .registry
+                .save_within_caps(&candidate, self.max_provisioned, self.max_active)
+            {
                 Ok(()) => {
                     new_goopy = Some(candidate);
                     break;
@@ -321,6 +337,17 @@ mod tests {
             *self.release_calls.lock().unwrap() += 1;
             Ok(())
         }
+        fn count_provisioned(&self) -> Result<u32, Error> {
+            Ok(0)
+        }
+        fn count_active(&self) -> Result<u32, Error> {
+            Ok(0)
+        }
+        /// Never capacity-limited; defers to `save` so the collision-then-retry
+        /// behaviour this double exists to exercise still applies.
+        fn save_within_caps(&self, gp: &Goopy, _: u32, _: u32) -> Result<(), Error> {
+            self.save(gp)
+        }
     }
 
     struct NoopProvisioner;
@@ -347,6 +374,8 @@ mod tests {
                 life_in_days: 7,
                 port_range_start: 9000,
                 port_range_end: 9100,
+                max_active: 100,
+                max_provisioned: 100,
             },
             registry,
             NoopProvisioner,
@@ -376,6 +405,8 @@ mod tests {
                     life_in_days: bad,
                     port_range_start: 9000,
                     port_range_end: 9100,
+                    max_active: 100,
+                    max_provisioned: 100,
                 },
                 SqliteRegistry::new(Path::new(":memory:")).unwrap(),
                 NoopProvisioner,
@@ -398,6 +429,8 @@ mod tests {
                 life_in_days: 7,
                 port_range_start: 8080,
                 port_range_end: 9080,
+                max_active: 100,
+                max_provisioned: 100,
             },
             CollideOnceRegistry {
                 save_calls: Mutex::new(0),
@@ -522,6 +555,15 @@ mod tests {
             fn release_port(&self, p: u32) -> Result<(), Error> {
                 self.0.release_port(p)
             }
+            fn count_provisioned(&self) -> Result<u32, Error> {
+                self.0.count_provisioned()
+            }
+            fn count_active(&self) -> Result<u32, Error> {
+                self.0.count_active()
+            }
+            fn save_within_caps(&self, gp: &Goopy, mp: u32, ma: u32) -> Result<(), Error> {
+                self.0.save_within_caps(gp, mp, ma)
+            }
         }
 
         let inner = SqliteRegistry::new(Path::new(":memory:")).unwrap();
@@ -536,6 +578,8 @@ mod tests {
                 life_in_days: 7,
                 port_range_start: 9000,
                 port_range_end: 9100,
+                max_active: 100,
+                max_provisioned: 100,
             },
             FailingUpdateRegistry(inner),
             NoopProvisioner,
@@ -688,6 +732,8 @@ mod tests {
                 life_in_days: 7,
                 port_range_start: 9050,
                 port_range_end: 9051,
+                max_active: 100,
+                max_provisioned: 100,
             },
             registry,
             DirCleaningProvisioner,
@@ -750,6 +796,8 @@ mod tests {
                 life_in_days: 7,
                 port_range_start: 9060,
                 port_range_end: 9062,
+                max_active: 100,
+                max_provisioned: 100,
             },
             registry,
             NoopProvisioner,
@@ -774,5 +822,185 @@ mod tests {
             gm.get("alive-one").unwrap().is_some(),
             "healthy Done instance should remain"
         );
+    }
+
+    // ── capacity caps ─────────────────────────────────────────────────────
+
+    /// Seed a row directly into the registry (bypassing spawn) so cap tests can
+    /// set up a precise mix of statuses without racing the spawn thread.
+    fn seed_row(registry: &SqliteRegistry, slug: &str, port: u32, status: Status) {
+        let goopy = make_goopy(slug, 0, port, status);
+        registry.save(&goopy).unwrap();
+        registry.acquire_port(slug, port, port + 1).unwrap();
+    }
+
+    fn manager_with_caps(
+        registry: SqliteRegistry,
+        max_active: u32,
+        max_provisioned: u32,
+    ) -> GoopyManager<SqliteRegistry, NoopProvisioner> {
+        GoopyManager::new(
+            GoopyManagerConfig {
+                base_dir: PathBuf::from("/tmp"),
+                domain: "test.example".into(),
+                life_in_days: 7,
+                port_range_start: 9000,
+                port_range_end: 9100,
+                max_active,
+                max_provisioned,
+            },
+            registry,
+            NoopProvisioner,
+        )
+    }
+
+    #[test]
+    fn spawn_refused_when_provisioned_cap_hit() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        // A single Failed row fills a provisioned=1 cap. Failed counts toward
+        // max_provisioned — it still occupies a registry slot until the sweep
+        // reaps it — but not toward max_active, since its process is gone.
+        seed_row(&registry, "failed-one", 9010, Status::Failed);
+        // Generous active cap so only the provisioned cap can trip.
+        let gm = manager_with_caps(registry, 100, 1);
+
+        let err = gm.spawn().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::CapacityFull {
+                    kind: CapacityKind::Provisioned
+                }
+            ),
+            "expected CapacityFull(max_provisioned), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn spawn_refused_when_active_cap_hit() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        // A single Done row fills an active=1 cap; provisioned cap is generous.
+        seed_row(&registry, "done-one", 9020, Status::Done);
+        let gm = manager_with_caps(registry, 1, 100);
+
+        let err = gm.spawn().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::CapacityFull {
+                    kind: CapacityKind::Active
+                }
+            ),
+            "expected CapacityFull(max_active), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn failed_counts_toward_provisioned_not_active() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_row(&registry, "failed-a", 9030, Status::Failed);
+        seed_row(&registry, "failed-b", 9032, Status::Failed);
+        assert_eq!(registry.count_provisioned().unwrap(), 2);
+        assert_eq!(registry.count_active().unwrap(), 0);
+    }
+
+    #[test]
+    fn despawn_frees_an_active_and_provisioned_slot() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        // caps of 1/1: exactly one instance may exist and be resident.
+        let gm = manager_with_caps(registry, 1, 1);
+
+        // First spawn succeeds and (via NoopProvisioner) reaches Done.
+        let (slug, _) = gm.spawn().expect("first spawn should succeed");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let g = gm.get(&slug).unwrap().unwrap();
+            if g.status == Status::Done {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "spawn timed out");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Second spawn must be refused — both caps are full.
+        let err = gm.spawn().unwrap_err();
+        assert!(
+            matches!(err, Error::CapacityFull { .. }),
+            "expected CapacityFull, got {err:?}"
+        );
+
+        // Despawn the first instance to free the slot.
+        gm.despawn(slug.clone()).expect("despawn should succeed");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while gm.get(&slug).unwrap().is_some() {
+            assert!(std::time::Instant::now() < deadline, "despawn timed out");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Now spawning succeeds again.
+        gm.spawn()
+            .expect("spawn should succeed after freeing a slot");
+    }
+
+    #[test]
+    fn concurrent_spawns_cannot_exceed_provisioned_cap() {
+        const THREADS: usize = 8;
+        // The window between a check and its insert is only microseconds wide,
+        // so one contended round catches a check-then-act implementation just
+        // over a tenth of the time. Repeating the whole scenario against a fresh
+        // database each round turns that into a near-certainty, while a correct
+        // implementation passes every round.
+        const ROUNDS: usize = 40;
+
+        for round in 0..ROUNDS {
+            // A file-backed DB, not `:memory:`: the pool is capped at one
+            // connection for in-memory databases, which would serialise the
+            // threads at the pool and hide the race entirely.
+            let dir = tempfile::tempdir().expect("tempdir");
+            let registry = SqliteRegistry::new(&dir.path().join("caps.db")).unwrap();
+
+            // One slot, contended by every thread at once.
+            let gm = Arc::new(manager_with_caps(registry, 100, 1));
+            let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+
+            let handles: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    let gm = Arc::clone(&gm);
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        gm.spawn()
+                    })
+                })
+                .collect();
+
+            let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+            let winners = results.iter().filter(|r| r.is_ok()).count();
+            assert_eq!(
+                winners, 1,
+                "round {round}: exactly one spawn may win the single slot, got {winners}"
+            );
+            for err in results.iter().filter_map(|r| r.as_ref().err()) {
+                assert!(
+                    matches!(
+                        err,
+                        Error::CapacityFull {
+                            kind: CapacityKind::Provisioned
+                        }
+                    ),
+                    "round {round}: losers must be refused on capacity, got {err:?}"
+                );
+            }
+
+            // The cap is on rows, so the registry is the authority: a
+            // check-then-insert leaves several rows here even when the return
+            // values look right.
+            assert_eq!(
+                gm.registry.count_provisioned().unwrap(),
+                1,
+                "round {round}: the cap must hold at the row level"
+            );
+        }
     }
 }
