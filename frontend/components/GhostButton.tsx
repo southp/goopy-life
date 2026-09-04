@@ -1,12 +1,23 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { getGoopy, spawnGoopy } from '@/lib/api';
+import { ApiRequestError, getGoopy, spawnGoopy } from '@/lib/api';
 import { LOCALSTORAGE_KEY, POLL_INTERVAL_MS } from '@/lib/constants';
+import { useCapacity } from '@/lib/useCapacity';
 import type { AppState } from '@/lib/types';
+import CapacityIndicator from '@/components/CapacityIndicator';
 import ErrorMessage from '@/components/ErrorMessage';
 import IssueLink from '@/components/IssueLink';
 import Spinner from '@/components/Spinner';
+
+/** Turn a thrown request failure into the error state, preserving the API code. */
+function errorState(err: unknown): AppState {
+	if (err instanceof ApiRequestError) {
+		return { kind: "error", message: err.message, code: err.code };
+	}
+	const message = err instanceof Error ? err.message : "Unexpected error";
+	return { kind: "error", message, code: null };
+}
 
 // The sole interactive element on the page: the "Ghost now!" CTA and its state
 // machine (spawn → poll → done/failed, plus resume-from-localStorage and the
@@ -14,6 +25,14 @@ import Spinner from '@/components/Spinner';
 export default function GhostButton() {
 	const [state, setState] = useState<AppState>({ kind: "idle" });
 	const [pollSlug, setPollSlug] = useState<string | null>(null);
+
+	// Only poll capacity while the button is actually offered. In every other
+	// state the number is not on screen, and a spawning or finished visitor has
+	// no use for it.
+	const capacity = useCapacity(state.kind === "idle");
+	// Unknown capacity (first poll not back, or /capacity unreachable) must not
+	// disable the button: the 503 is the real guard, so we fail open.
+	const isFull = capacity?.is_full ?? false;
 
 	// Resolve the initial state from browser-only sources (the ?expired query param and
 	// localStorage) after mount. This must run in an effect rather than a lazy useState
@@ -62,8 +81,7 @@ export default function GhostButton() {
 					return;
 				}
 				localStorage.removeItem(LOCALSTORAGE_KEY);
-				const message = err instanceof Error ? err.message : "Unexpected error";
-				setState({ kind: "error", message });
+				setState(errorState(err));
 				setPollSlug(null);
 				return;
 			}
@@ -128,7 +146,7 @@ export default function GhostButton() {
 				setState({ kind: "idle" });
 			} else {
 				localStorage.removeItem(LOCALSTORAGE_KEY);
-				setState({ kind: "error", message: err.message });
+				setState(errorState(err));
 			}
 		});
 
@@ -143,17 +161,27 @@ export default function GhostButton() {
 			localStorage.setItem(LOCALSTORAGE_KEY, slug);
 			setPollSlug(slug);
 		} catch (err: unknown) {
-			const message = err instanceof Error ? err.message : "Unexpected error";
-			setState({ kind: "error", message });
+			// A capacity refusal needs no special handling here: the message from
+			// the server is shown as-is, and "Try again" re-enters the idle state,
+			// which re-reads /capacity immediately — so a genuinely full server
+			// comes back with the button already disabled.
+			setState(errorState(err));
 		}
 	}
 
 	switch (state.kind) {
 		case "idle":
 			return (
-				<button className="go-button idle" onClick={handleGhostNow}>
-					Ghost now!
-				</button>
+				<>
+					<button
+						className={`go-button ${isFull ? "disabled" : "idle"}`}
+						onClick={handleGhostNow}
+						disabled={isFull}
+					>
+						Ghost now!
+					</button>
+					<CapacityIndicator capacity={capacity} />
+				</>
 			);
 
 		case "resuming":
@@ -204,6 +232,12 @@ export default function GhostButton() {
 			);
 
 		case "error":
-			return <ErrorMessage message={state.message} onReset={handleReset} />;
+			return (
+				<ErrorMessage
+					message={state.message}
+					code={state.code}
+					onReset={handleReset}
+				/>
+			);
 	}
 }

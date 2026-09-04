@@ -30,6 +30,20 @@ export interface ConfigResponse {
 	storage_quota_mb: number | null;
 }
 
+// Live capacity served by gl-serv at `GET /capacity`.
+// Kept separate from ConfigResponse because it is fetched from the browser on an
+// interval: the caps are static, but how much of them is used is not, and the
+// build-time config fetch would freeze that at deploy.
+export interface CapacityResponse {
+	active: number;
+	max_active: number;
+	provisioned: number;
+	max_provisioned: number;
+	// Whether either cap is met. Computed server-side so the UI cannot drift from
+	// the server's own definition of "full".
+	is_full: boolean;
+}
+
 // State machine for the interactive "Ghost now!" CTA.
 export type AppState =
 	| { kind: "idle" }
@@ -38,4 +52,6 @@ export type AppState =
 	| { kind: "done"; slug: string; url: string }
 	| { kind: "expired"; slug: string }
 	| { kind: "failed"; slug: string }
-	| { kind: "error"; message: string };
+	// `code` is the API's error code (or null when the response carried none); it
+	// distinguishes expected conditions, such as a full server, from real faults.
+	| { kind: "error"; message: string; code: string | null };
