@@ -36,7 +36,14 @@ run() {
 
 # scp spells the port -P, ssh spells it -p.
 run scp -P "$PORT" "$BINARY" "$TARGET:/tmp/gl-serv"
-run ssh -p "$PORT" "$TARGET" "sudo install -m 755 /tmp/gl-serv /opt/goopy-life/bin/gl-serv; rm /tmp/gl-serv"
+
+# The two remote statements are joined with && rather than ';' on purpose: the
+# exit status of a ';' sequence is the LAST command's, so a failed install would
+# be reported as rm's success. set -e would not fire, and the deploy would go on
+# to restart a service whose binary it never replaced -- green run, stale API.
+# A sudo denial (the usual cause: /etc/sudoers.d/goopy missing, or the deploy
+# running as an account the drop-in does not name) has to stop the deploy here.
+run ssh -p "$PORT" "$TARGET" "sudo install -m 755 /tmp/gl-serv /opt/goopy-life/bin/gl-serv && rm /tmp/gl-serv"
 run ssh -p "$PORT" "$TARGET" sudo systemctl restart gl-serv
 
 # Restart is fire-and-forget: systemd reports success as soon as the process is

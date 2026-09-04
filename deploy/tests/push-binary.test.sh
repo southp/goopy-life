@@ -42,6 +42,40 @@ assert_fails() {
     fi
 }
 
+# Extracts the remote install command the script would issue and runs it locally
+# against a stub sudo that denies it, asserting the failure reaches the caller.
+# This checks behaviour rather than a chosen operator, so it keeps holding if the
+# command is rewritten some other way.
+assert_install_failure_propagates() {
+    local name=$1 binary=$2
+    CASES=$((CASES + 1))
+    local remote stub status
+    remote=$(DRY_RUN=1 "$SCRIPT_UNDER_TEST" goopy@dev.example.com "$binary" \
+        | grep -F 'sudo install -m 755' \
+        | sed 's|^ssh -p [0-9]* [^ ]* ||')
+    if [[ -z "$remote" ]]; then
+        echo "FAIL — $name (no install command found in the dry run)"
+        FAILURES=$((FAILURES + 1))
+        return
+    fi
+
+    stub=$(mktemp -d)
+    printf '#!/bin/sh\nexit 1\n' >"$stub/sudo"  # the install is denied
+    printf '#!/bin/sh\nexit 0\n' >"$stub/rm"    # the cleanup would succeed
+    chmod +x "$stub/sudo" "$stub/rm"
+    PATH="$stub:$PATH" bash -c "$remote" >/dev/null 2>&1
+    status=$?
+    /bin/rm -rf "$stub"
+
+    if [[ "$status" -ne 0 ]]; then
+        echo "ok   — $name"
+    else
+        echo "FAIL — $name (a denied install exited 0)"
+        echo "       remote command: $remote"
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
 BIN=target/x86_64-unknown-linux-musl/release/gl-serv
 
 echo "== push-binary.sh =="
@@ -62,8 +96,12 @@ assert_emits push_binary_honours_custom_ssh_port_for_ssh \
 # This exact string is whitelisted in deploy/sudoers.goopy — any drift here
 # (a different mode, path, or argument order) becomes a sudo denial on deploy.
 assert_emits push_binary_pins_the_sudoers_install_command \
-    "ssh -p 22 goopy@dev.example.com sudo install -m 755 /tmp/gl-serv /opt/goopy-life/bin/gl-serv; rm /tmp/gl-serv" \
+    "ssh -p 22 goopy@dev.example.com sudo install -m 755 /tmp/gl-serv /opt/goopy-life/bin/gl-serv && rm /tmp/gl-serv" \
     goopy@dev.example.com "$BIN"
+
+# A ';' here would report rm's exit status instead of install's, so a sudo
+# denial would leave the deploy green while the old binary kept running.
+assert_install_failure_propagates push_binary_propagates_a_failed_install "$BIN"
 
 # A deploy that does not verify the restart reports success while the API is down.
 assert_emits push_binary_verifies_the_service_is_active_after_restart \
