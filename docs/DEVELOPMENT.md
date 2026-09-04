@@ -126,7 +126,10 @@ Next.js application deployed on Vercel.
 
 ## Configuration
 
-Configuration is TOML-based. See `config.toml.example` for all available settings.
+Configuration is TOML-based. See `backend/gl-cli/config.toml.example` for a local
+development template, and [`deploy/config/`](../deploy/config/) for the files the
+droplets actually run — those are version-controlled and installed by the deploy,
+not edited on the host. See [DEPLOYMENT.md](DEPLOYMENT.md#configuration).
 
 Key settings:
 

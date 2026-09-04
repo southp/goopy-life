@@ -25,8 +25,8 @@ a code change:
 it to `deploy/push-binary.sh` — the same script the manual production deploy
 uses, so the two paths cannot drift apart.
 
-The workflow only ships the **binary**. `config.toml`, the systemd unit, the
-nginx configs and the ZFS pool are still one-time manual setup (see the
+The workflow ships the **binary and the config**. The systemd unit, the nginx
+configs and the ZFS pool are still one-time manual setup (see the
 [droplet setup](../README.md#droplet-setup-one-time) steps); change one of those
 and you still have to apply it by hand.
 
@@ -78,8 +78,8 @@ deploy key or rebuilding the droplet, and avoids an empty commit.
 ### Verifying a deploy
 
 `push-binary.sh` does not trust `systemctl restart` on its own: restart reports
-success as soon as the process is spawned, so a binary that panics at startup
-would leave the run green while the API is down. It waits past
+success as soon as the process is spawned, so a binary that panics at startup —
+or a config it cannot parse — would leave the run green while the API is down. It waits past
 `RestartSec=5` and asserts `systemctl is-active gl-serv`, failing the job
 otherwise. To check by hand:
 
@@ -110,12 +110,58 @@ i.e. builds — if it cannot determine the diff (i.e. a clone too shallow for
 ## Manual production deploy
 
 ```bash
-./deploy/deploy.sh user@droplet [ssh-port]
+./deploy/deploy.sh goopy@droplet prod [ssh-port]
 ```
 
 Cross-compiles `gl-serv` to a static musl binary with `cargo-zigbuild`, uploads
-it, and restarts the service. Requires the one-time local toolchain setup in the
+it with `deploy/config/prod.toml`, and restarts the service. Requires the
+one-time local toolchain setup in the
 [README](../README.md#cross-compilation-setup-one-time-on-macos).
+
+The environment argument is required. It has no default because the config
+reaches the host: a default would let an omitted argument reconfigure one
+environment with another's settings.
+
+## Configuration
+
+Each environment's configuration is version-controlled in
+[`deploy/config/`](../deploy/config/) and installed at
+`/opt/goopy-life/config.toml` by the deploy. **The deploy is the only writer of
+that file** — a hand-edit on the droplet is overwritten by the next run, so
+changes go through a commit like any other.
+
+| | |
+|---|---|
+| `deploy/config/dev.toml` | shipped automatically on every merge to `trunk` |
+| `deploy/config/prod.toml` | shipped by the manual production deploy |
+
+This exists because the file used to live only on the droplet. It drifted:
+#63 replaced the flat `provisioner_kind` key with a `[provisioner]` table, the
+droplet's copy kept the old spelling, and the next deploy to read it crash-looped
+gl-serv with `missing field provisioner` while nginx served 502.
+
+Two rules keep it that way:
+
+- **No secrets in these files.** They are tracked in git and world-readable on
+  the host. When gl-serv needs a credential, add it to a root-owned
+  `EnvironmentFile` referenced from `deploy/gl-serv.service`.
+- **The schema is checked in CI.** `backend/gl-core/tests/deploy_configs.rs`
+  parses every file in `deploy/config/` with `Config::from_file` on each run, so
+  a newly required field fails the PR that introduces it rather than the deploy
+  that follows. Adding an environment means adding a file; the test picks it up
+  with no edit.
+
+To roll a config change back, revert the commit and deploy again.
+
+`prod.toml` is currently a placeholder copied from the dev values — there is no
+production host yet. Every line that still names a dev-only value is marked
+`REVIEW`; work through them before the first production deploy.
+
+A note on `bind_address`: it is `0.0.0.0:3000`, which exposes gl-serv directly
+alongside nginx. A caller reaching it that way bypasses TLS and can set the
+`X-Real-IP` header the rate limiter keys on. `127.0.0.1:3000` satisfies both
+nginx's `proxy_pass` and its `auth_request` subrequests; the value is left as-is
+here only because changing it is a behaviour change, not a cleanup.
 
 ## Testing the deploy scripts
 
