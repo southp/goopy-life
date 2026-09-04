@@ -858,7 +858,8 @@ mod tests {
     fn spawn_refused_when_provisioned_cap_hit() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         // A single Failed row fills a provisioned=1 cap. Failed counts toward
-        // max_provisioned (holds a port/dir) but not toward max_active.
+        // max_provisioned — it still occupies a registry slot until the sweep
+        // reaps it — but not toward max_active, since its process is gone.
         seed_row(&registry, "failed-one", 9010, Status::Failed);
         // Generous active cap so only the provisioned cap can trip.
         let gm = manager_with_caps(registry, 100, 1);

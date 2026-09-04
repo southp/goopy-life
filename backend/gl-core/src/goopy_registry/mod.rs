@@ -20,19 +20,19 @@ pub trait GoopyRegistry {
 
     /// Count all rows in the registry regardless of status.
     ///
-    /// Used to enforce `max_provisioned` (disk-bound cap). `Failed` instances
-    /// are included: they still occupy a registry slot until the sweep reaps
-    /// them, and one left behind by a failed *despawn* also still holds its
-    /// port and working directory.
+    /// Used to report `max_provisioned` headroom (disk-bound cap). `Failed`
+    /// instances are included: they still occupy a registry slot until the
+    /// sweep reaps them, and one left behind by a failed *despawn* also still
+    /// holds its port and working directory.
     fn count_provisioned(&self) -> Result<u32, Error>;
 
     /// Count instances that are consuming RAM: `Spawning`, `Done`, and
     /// `Despawning`.
     ///
-    /// Used to enforce `max_active` (RAM-bound cap). `Despawning` is counted
-    /// because `despawn` flips the status synchronously and then tears the
-    /// instance down on a background thread — the process stays resident for
-    /// the whole teardown. That over-counts briefly, which is the safe
+    /// Used to report `max_active` headroom (RAM-bound cap). `Despawning` is
+    /// counted because `despawn` flips the status synchronously and then tears
+    /// the instance down on a background thread — the process stays resident
+    /// for the whole teardown. That over-counts briefly, which is the safe
     /// direction for a RAM cap.
     ///
     /// `Failed` is not counted: its process is gone. A future `Suspended`

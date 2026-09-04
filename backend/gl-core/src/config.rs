@@ -126,18 +126,38 @@ pub struct Config {
     ///
     /// Raise this cap once the machine is upgraded or profile data shows lower
     /// per-instance RSS in practice.
+    ///
+    /// Must be `<= max_provisioned`, which `Config::from_file` enforces — a
+    /// larger value could never be reached. See [`Config::max_provisioned`] for
+    /// when this cap is reachable at all.
     #[serde(default = "default_max_active")]
     pub max_active: u32,
     /// Maximum number of instances that may **exist on disk** at any time.
     ///
     /// Disk-bound. On a 50 GB droplet with a 512 MB per-instance quota the
     /// theoretical ceiling is ~90 instances (50 GB ÷ 512 MB). The beta default
-    /// is kept close to `max_active` because scale-to-zero (#96) has not landed
+    /// is kept equal to `max_active` because scale-to-zero (#96) has not landed
     /// yet; once idle instances can suspend to ~0 RAM, raise this toward the
     /// disk ceiling while `max_active` stays small.
     ///
-    /// `Failed` instances count toward this cap (they still hold a port/dir
-    /// until the sweep task reaps them).
+    /// # Reachability of the two caps
+    ///
+    /// Active instances are a subset of provisioned ones, and this cap is
+    /// checked first, so while `max_active == max_provisioned` the RAM cap can
+    /// never trip and gl-serv can only ever answer `server_full`, never
+    /// `server_busy`. The `max_active` cap — and that error code — become
+    /// reachable once the two diverge, which is what #96 enables.
+    ///
+    /// # Why `Failed` instances count
+    ///
+    /// Not because they hold resources: a spawn that failed has already had its
+    /// port released (`GoopyManager::spawn`) and its working directory released
+    /// (`HelloProvisioner::provision`). It is counted because it is still a row
+    /// in the registry, and because a `Failed` row left by a failed *despawn*
+    /// does still hold both its port and its directory.
+    ///
+    /// The sweep reaps `Failed` rows unconditionally, so one occupies a slot for
+    /// at most `sweep_interval_secs`.
     #[serde(default = "default_max_provisioned")]
     pub max_provisioned: u32,
     pub registry: RegistryConfig,
@@ -158,7 +178,9 @@ fn default_max_active() -> u32 {
 
 /// Default disk-bound total-instance cap. See [`Config::max_provisioned`].
 ///
-/// Kept equal to [`default_max_active`] until scale-to-zero (#96) ships.
+/// Kept equal to [`default_max_active`] until scale-to-zero (#96) ships, which
+/// means the RAM cap is unreachable under the shipped defaults — see the
+/// reachability note on [`Config::max_provisioned`].
 fn default_max_provisioned() -> u32 {
     10
 }
