@@ -185,13 +185,46 @@ body {
 
 /* ── Capacity indicator ─────────────────────────────────────────────────── */
 
+/*
+ * The idle CTA: the button, with the capacity readout hung off its bottom edge
+ * rather than stacked under it. Exists to be that readout's containing block.
+ */
+.cta-idle {
+	position: relative;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+}
+
+/*
+ * The readout's berth, hung off the button's bottom edge and out of flow.
+ *
+ * Out of flow because the readout arrives late: /capacity answers well after
+ * the first paint, and an in-flow line would grow the vertically centred
+ * .cta-area and shove the button up under the visitor's cursor. Hanging it here
+ * means nothing above it can move, however many lines it turns out to need.
+ */
+.capacity-slot {
+	position: absolute;
+	top: 100%;
+	left: 50%;
+	transform: translateX(-50%);
+	width: max-content;
+	max-width: 22rem;
+}
+
 .capacity-block {
 	display: flex;
 	flex-direction: column;
 	align-items: center;
 	gap: 0.25rem;
 	text-align: center;
-	max-width: 22rem;
+	/*
+	 * The resting gap under the button. An absolutely positioned box establishes
+	 * a block formatting context, so this margin stays inside .capacity-slot
+	 * rather than collapsing out through its top edge.
+	 */
+	margin-top: 0.5rem;
 }
 
 .capacity-indicator {

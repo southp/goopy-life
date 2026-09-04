@@ -171,8 +171,11 @@ export default function GhostButton() {
 
 	switch (state.kind) {
 		case "idle":
+			// The wrapper is not cosmetic: it is the positioning context the
+			// capacity readout hangs off, which is what keeps the button still
+			// when /capacity finally answers.
 			return (
-				<>
+				<div className="cta-idle">
 					<button
 						className={`go-button ${isFull ? "disabled" : "idle"}`}
 						onClick={handleGhostNow}
@@ -181,7 +184,7 @@ export default function GhostButton() {
 						Ghost now!
 					</button>
 					<CapacityIndicator capacity={capacity} />
-				</>
+				</div>
 			);
 
 		case "resuming":

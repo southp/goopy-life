@@ -16,6 +16,11 @@ interface CapacityIndicatorProps {
  * Renders nothing while capacity is unknown (first poll not back, or
  * `/capacity` unreachable) rather than a fabricated `-- / --`: the button stays
  * clickable in that state, so an indicator would only mislead.
+ *
+ * The extra `.capacity-slot` wrapper is what lets the readout arrive late
+ * without disturbing anything — it hangs the block off the button's bottom edge
+ * and out of the flow, so nothing above it moves when the number lands. See the
+ * CSS for the mechanics.
  */
 export default function CapacityIndicator({
 	capacity,
@@ -25,21 +30,23 @@ export default function CapacityIndicator({
 	}
 
 	return (
-		<div className="capacity-block">
-			<p
-				className={`capacity-indicator${capacity.is_full ? " full" : ""}`}
-				// Chatty enough to be noise if announced on every poll, so it is
-				// exposed as a labelled status a screen reader can query instead.
-				aria-label={`${capacity.used} of ${capacity.total} slots in use`}
-			>
-				<span className="capacity-count">
-					{capacity.used} / {capacity.total}
-				</span>{" "}
-				slots in use
-			</p>
-			{capacity.is_full && (
-				<p className="capacity-full-reason">{NO_FREE_SLOT_MESSAGE}</p>
-			)}
+		<div className="capacity-slot">
+			<div className="capacity-block">
+				<p
+					className={`capacity-indicator${capacity.is_full ? " full" : ""}`}
+					// Chatty enough to be noise if announced on every poll, so it is
+					// exposed as a labelled status a screen reader can query instead.
+					aria-label={`${capacity.used} of ${capacity.total} slots in use`}
+				>
+					<span className="capacity-count">
+						{capacity.used} / {capacity.total}
+					</span>{" "}
+					slots in use
+				</p>
+				{capacity.is_full && (
+					<p className="capacity-full-reason">{NO_FREE_SLOT_MESSAGE}</p>
+				)}
+			</div>
 		</div>
 	);
 }
