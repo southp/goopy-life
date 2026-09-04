@@ -22,7 +22,13 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Install ZFS utilities
-      run: sudo apt-get install -y zfsutils-linux
+      # The runner image ships a stale apt index, so `install` resolves a
+      # package version that Ubuntu may already have rotated out of the pool —
+      # which fails the whole job with a 404 rather than a build error. Refresh
+      # the index first so the request always names a version still published.
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y zfsutils-linux
     - name: Load ZFS kernel module
       run: sudo modprobe zfs
     - name: Create loopback-based test pool
