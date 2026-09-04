@@ -20,9 +20,10 @@ pub trait GoopyRegistry {
 
     /// Count all rows in the registry regardless of status.
     ///
-    /// Used to enforce `max_provisioned` (disk-bound cap).
-    /// Includes `Failed` instances, which still hold a port/directory until
-    /// the sweep task reaps them.
+    /// Used to enforce `max_provisioned` (disk-bound cap). `Failed` instances
+    /// are included: they still occupy a registry slot until the sweep reaps
+    /// them, and one left behind by a failed *despawn* also still holds its
+    /// port and working directory.
     fn count_provisioned(&self) -> Result<u32, Error>;
 
     /// Count instances that are consuming RAM: `Spawning`, `Done`, and
@@ -38,4 +39,22 @@ pub trait GoopyRegistry {
     /// status (#96, scale-to-zero) will be handled the same way — by simply not
     /// being added to the `IN` list.
     fn count_active(&self) -> Result<u32, Error>;
+
+    /// Insert `gp`, but only if both caps still have room.
+    ///
+    /// The counts and the insert happen inside one write transaction, so
+    /// concurrent spawns cannot all observe the same free slot and overshoot.
+    /// Callers must use this rather than counting and then calling [`save`],
+    /// which is a check-then-act race.
+    ///
+    /// Returns [`Error::CapacityFull`] naming the cap that was already met, or
+    /// [`Error::AlreadyExists`] if the slug collides.
+    ///
+    /// [`save`]: GoopyRegistry::save
+    fn save_within_caps(
+        &self,
+        gp: &Goopy,
+        max_provisioned: u32,
+        max_active: u32,
+    ) -> Result<(), Error>;
 }

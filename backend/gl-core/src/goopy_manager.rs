@@ -61,31 +61,6 @@ where
             return Err(Error::Invalid);
         }
 
-        // --- Capacity checks (before touching the port/row tables) ---
-        let provisioned = self.registry.count_provisioned()?;
-        if provisioned >= self.max_provisioned {
-            tracing::warn!(
-                provisioned,
-                max_provisioned = self.max_provisioned,
-                "spawn refused: max_provisioned cap reached"
-            );
-            return Err(Error::CapacityFull {
-                kind: CapacityKind::Provisioned,
-            });
-        }
-
-        let active = self.registry.count_active()?;
-        if active >= self.max_active {
-            tracing::warn!(
-                active,
-                max_active = self.max_active,
-                "spawn refused: max_active cap reached"
-            );
-            return Err(Error::CapacityFull {
-                kind: CapacityKind::Active,
-            });
-        }
-
         const MAX_RETRIES: usize = 10;
 
         // Port is acquired inside the retry loop so the DB record links the
@@ -112,7 +87,15 @@ where
                 service_version: env!("CARGO_PKG_VERSION").to_string(),
             };
 
-            match self.registry.save(&candidate) {
+            // Capacity is enforced by the insert itself rather than by a
+            // preceding count: a separate check-then-insert lets concurrent
+            // spawns all observe the same free slot and overshoot the cap.
+            // `CapacityFull` falls through to the catch-all arm below, which
+            // releases the port just acquired and returns.
+            match self
+                .registry
+                .save_within_caps(&candidate, self.max_provisioned, self.max_active)
+            {
                 Ok(()) => {
                     new_goopy = Some(candidate);
                     break;
@@ -360,6 +343,11 @@ mod tests {
         fn count_active(&self) -> Result<u32, Error> {
             Ok(0)
         }
+        /// Never capacity-limited; defers to `save` so the collision-then-retry
+        /// behaviour this double exists to exercise still applies.
+        fn save_within_caps(&self, gp: &Goopy, _: u32, _: u32) -> Result<(), Error> {
+            self.save(gp)
+        }
     }
 
     struct NoopProvisioner;
@@ -572,6 +560,9 @@ mod tests {
             }
             fn count_active(&self) -> Result<u32, Error> {
                 self.0.count_active()
+            }
+            fn save_within_caps(&self, gp: &Goopy, mp: u32, ma: u32) -> Result<(), Error> {
+                self.0.save_within_caps(gp, mp, ma)
             }
         }
 
@@ -948,5 +939,67 @@ mod tests {
         // Now spawning succeeds again.
         gm.spawn()
             .expect("spawn should succeed after freeing a slot");
+    }
+
+    #[test]
+    fn concurrent_spawns_cannot_exceed_provisioned_cap() {
+        const THREADS: usize = 8;
+        // The window between a check and its insert is only microseconds wide,
+        // so one contended round catches a check-then-act implementation just
+        // over a tenth of the time. Repeating the whole scenario against a fresh
+        // database each round turns that into a near-certainty, while a correct
+        // implementation passes every round.
+        const ROUNDS: usize = 40;
+
+        for round in 0..ROUNDS {
+            // A file-backed DB, not `:memory:`: the pool is capped at one
+            // connection for in-memory databases, which would serialise the
+            // threads at the pool and hide the race entirely.
+            let dir = tempfile::tempdir().expect("tempdir");
+            let registry = SqliteRegistry::new(&dir.path().join("caps.db")).unwrap();
+
+            // One slot, contended by every thread at once.
+            let gm = Arc::new(manager_with_caps(registry, 100, 1));
+            let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+
+            let handles: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    let gm = Arc::clone(&gm);
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        gm.spawn()
+                    })
+                })
+                .collect();
+
+            let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+            let winners = results.iter().filter(|r| r.is_ok()).count();
+            assert_eq!(
+                winners, 1,
+                "round {round}: exactly one spawn may win the single slot, got {winners}"
+            );
+            for err in results.iter().filter_map(|r| r.as_ref().err()) {
+                assert!(
+                    matches!(
+                        err,
+                        Error::CapacityFull {
+                            kind: CapacityKind::Provisioned
+                        }
+                    ),
+                    "round {round}: losers must be refused on capacity, got {err:?}"
+                );
+            }
+
+            // The cap is on rows, so the registry is the authority: a
+            // check-then-insert leaves several rows here even when the return
+            // values look right.
+            assert_eq!(
+                gm.registry.count_provisioned().unwrap(),
+                1,
+                "round {round}: the cap must hold at the row level"
+            );
+        }
     }
 }
