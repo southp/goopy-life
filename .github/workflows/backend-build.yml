@@ -3,9 +3,11 @@ name: Backend build
 on:
   push:
     branches: ['trunk']
-    paths: ['backend/**']
+    paths: ['backend/**', 'deploy/config/**']
   pull_request:
-    paths: ['backend/**']
+    # deploy/config/** is in scope because tests/deploy_configs.rs parses those
+    # files: a config edit can fail the build just as a code edit can.
+    paths: ['backend/**', 'deploy/config/**']
 
 env:
   CARGO_TERM_COLOR: always
