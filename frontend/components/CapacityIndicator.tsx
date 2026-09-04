@@ -19,8 +19,8 @@ interface CapacityIndicatorProps {
  *
  * The extra `.capacity-slot` wrapper is what lets the readout arrive late
  * without disturbing anything — it hangs the block off the button's bottom edge
- * and out of the flow, so nothing above it moves when the number lands. See the
- * CSS for the mechanics.
+ * and clips it there, so the line slides out from behind the button instead of
+ * popping into the layout. See the CSS for the mechanics.
  */
 export default function CapacityIndicator({
 	capacity,
