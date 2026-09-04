@@ -10,6 +10,8 @@ on:
     paths:
       - 'backend/**'
       - 'deploy/push-binary.sh'
+      # The dev config is shipped by the deploy, so editing it is a deploy.
+      - 'deploy/config/dev.toml'
       - '.github/workflows/backend-deploy.yml'
   # Lets a maintainer re-run a deploy without an empty commit, e.g. after
   # rotating the deploy key or rebuilding the droplet.
@@ -100,8 +102,12 @@ jobs:
 
       - name: Deploy to the dev droplet
         # Same script the manual production deploy uses, so the two paths cannot
-        # drift apart. Variables are passed through the environment rather than
-        # interpolated into the shell to keep `${{ }}` out of the script body.
+        # drift apart. dev.toml is named explicitly here rather than defaulted
+        # inside the script: this workflow is the only thing that may deploy the
+        # dev environment, and nothing should be able to reach prod.toml by
+        # omitting an argument. Variables are passed through the environment
+        # rather than interpolated into the shell to keep `${{ }}` out of the
+        # script body.
         env:
           DEV_DEPLOY_HOST: ${{ vars.DEV_DEPLOY_HOST }}
           DEV_DEPLOY_USER: ${{ vars.DEV_DEPLOY_USER }}
@@ -110,6 +116,7 @@ jobs:
           "$GITHUB_WORKSPACE/deploy/push-binary.sh" \
             "$DEV_DEPLOY_USER@$DEV_DEPLOY_HOST" \
             target/x86_64-unknown-linux-musl/release/gl-serv \
+            "$GITHUB_WORKSPACE/deploy/config/dev.toml" \
             "${DEV_SSH_PORT:-22}"
 
       - name: Summarise
