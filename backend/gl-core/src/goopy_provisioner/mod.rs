@@ -34,4 +34,8 @@ impl GoopyProvisioner for Box<dyn GoopyProvisioner + Send + Sync> {
     fn kind(&self) -> ProvisionerKind {
         (**self).kind()
     }
+
+    fn service_version(&self) -> &str {
+        (**self).service_version()
+    }
 }
