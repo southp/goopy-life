@@ -519,6 +519,7 @@ dependencies = [
  "rand 0.9.4",
  "rusqlite",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "toml",
