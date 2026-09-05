@@ -8,10 +8,6 @@ instance.
 This document covers the two things an operator has to do: **prepare the base
 install**, and **upgrade it**.
 
-> **Status:** the `kind = "Ghost"` config section is not wired up yet — it
-> lands with the last PR of #18. Until then this guide is a preparation
-> reference; `config.toml` still takes `kind = "Hello"`.
-
 ---
 
 ## Why a shared base install
