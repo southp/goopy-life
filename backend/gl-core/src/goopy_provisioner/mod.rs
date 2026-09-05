@@ -1,3 +1,4 @@
+mod dev_process;
 pub mod hello_provisioner;
 
 use crate::Goopy;
