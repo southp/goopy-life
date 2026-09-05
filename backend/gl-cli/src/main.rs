@@ -104,7 +104,7 @@ fn main() {
         base_dir = cfg.base_dir.display(),
         domain = cfg.domain,
         life_in_days = cfg.life_in_days,
-        provisioner = cfg.provisioner.kind,
+        provisioner = cfg.provisioner.kind(),
         port_start = cfg.port_range_start,
         port_end = cfg.port_range_end,
         alloc_kind = cfg.allocator.kind,
@@ -140,15 +140,7 @@ fn main() {
             }
         }
         cmd => {
-            // Spawn, Despawn, List — all require HelloProvisioner/GoopyManager.
-            if cfg.provisioner.kind != ProvisionerKind::Hello {
-                tracing::error!(
-                    provisioner_kind = %cfg.provisioner.kind,
-                    "unsupported provisioner_kind; only 'Hello' is supported in this binary"
-                );
-                std::process::exit(1);
-            }
-
+            // Spawn, Despawn, List — all require a provisioner/GoopyManager.
             let provisioner = cfg.build_provisioner(dev_mode, sys);
 
             let registry = SqliteRegistry::new(&cfg.registry.path).unwrap_or_else(|e| {
