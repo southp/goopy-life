@@ -1,10 +1,9 @@
-use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use tracing::{debug, info, instrument};
+use tracing::{info, instrument};
 
-use super::GoopyProvisioner;
+use super::{GoopyProvisioner, dev_process};
 use crate::Goopy;
 use crate::shared_types::*;
 use crate::storage_allocator::StorageAllocator;
@@ -198,44 +197,6 @@ server {{
         self.reload_nginx()
     }
 
-    // ── Dev-mode helpers ────────────────────────────────────────────────
-
-    fn spawn_dev_server(&self, working_dir: &Path) -> Result<(), Error> {
-        info!(working_dir = %working_dir.display(), "spawning dev server");
-        let log_path = working_dir.join("server.log");
-        let pid = spawn_detached("python3", &["server.py"], working_dir, &log_path)?;
-        let pid_path = working_dir.join("server.pid");
-        info!(%pid, pid_path = %pid_path.display(), "writing PID file");
-        std::fs::write(&pid_path, pid.to_string()).map_err(Error::Io)
-    }
-
-    fn kill_dev_server(&self, working_dir: &Path) -> Result<(), Error> {
-        let pid_path = working_dir.join("server.pid");
-        let pid_str = match fs::read_to_string(&pid_path) {
-            Ok(s) => s,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                info!(pid_path = %pid_path.display(), "no PID file found, nothing to kill");
-                return Ok(());
-            }
-            Err(e) => return Err(Error::Io(e)),
-        };
-        let pid = pid_str.trim();
-
-        if pid.is_empty() {
-            return Err(Error::Invalid);
-        }
-
-        if !pid.chars().all(|c| c.is_ascii_digit()) {
-            return Err(Error::Subprocess(format!("invalid PID in file: {pid:?}")));
-        }
-
-        info!(%pid, "killing dev server");
-        kill_pid(pid)?;
-        std::fs::remove_file(&pid_path).map_err(Error::Io)
-    }
-
-    // ── Inner provision (post-allocate steps) ───────────────────────────
-
     fn provision_inner(&self, goopy: &Goopy) -> Result<(), Error> {
         let server_py = goopy.working_dir.join("server.py");
         info!(path = %server_py.display(), "writing server.py");
@@ -243,7 +204,14 @@ server {{
             .map_err(Error::Io)?;
 
         if self.dev_mode {
-            self.spawn_dev_server(&goopy.working_dir)?;
+            dev_process::spawn(
+                self.sys.as_ref(),
+                &goopy.working_dir,
+                "python3",
+                &["server.py"],
+                &[],
+                "server.log",
+            )?;
         } else {
             self.write_service_file(&goopy.slug, &goopy.working_dir)?;
             self.enable_service(&goopy.slug)?;
@@ -253,66 +221,6 @@ server {{
         }
         Ok(())
     }
-}
-
-// ── Dev-mode process helpers (hello_provisioner-specific) ───────────────────
-
-/// Spawn `program args` in `working_dir` as a detached background process,
-/// redirecting stderr to `log_path`. Waits ~200 ms and checks liveness;
-/// returns the PID on success or an error (with log contents) if the process
-/// exited immediately.
-fn spawn_detached(
-    program: &str,
-    args: &[&str],
-    working_dir: &Path,
-    log_path: &Path,
-) -> Result<u32, Error> {
-    let log_file = std::fs::File::create(log_path).map_err(Error::Io)?;
-
-    let mut cmd = std::process::Command::new(program);
-    cmd.args(args)
-        .current_dir(working_dir)
-        .stdout(std::process::Stdio::null())
-        .stderr(log_file);
-
-    let mut child = cmd.spawn().map_err(Error::Io)?;
-
-    // Give the process a moment to start up (or crash).
-    // 200 ms gives the process time to crash on import errors; well-behaved servers start in < 50 ms on this hardware.
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
-    // Check for an immediate exit — startup errors surface well within 200 ms.
-    match child.try_wait() {
-        Ok(Some(status)) => {
-            let log = std::fs::read_to_string(log_path).unwrap_or_default();
-            Err(Error::Subprocess(format!(
-                "{program} exited immediately (status {status})\n{log}"
-            )))
-        }
-        Ok(None) => {
-            let pid = child.id();
-            // Detach: forget the Child so that Drop does not wait on the process.
-            std::mem::forget(child);
-            Ok(pid)
-        }
-        Err(e) => Err(Error::Io(e)),
-    }
-}
-
-fn kill_pid(pid: &str) -> Result<(), Error> {
-    let out = std::process::Command::new("kill")
-        .args([pid.trim()])
-        .output()
-        .map_err(Error::Io)?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        if stderr.contains("No such process") {
-            debug!(%pid, "process already gone");
-        } else {
-            return Err(Error::Subprocess(format!("kill {pid}: {}", stderr.trim())));
-        }
-    }
-    Ok(())
 }
 
 impl GoopyProvisioner for HelloProvisioner {
@@ -338,7 +246,7 @@ impl GoopyProvisioner for HelloProvisioner {
     #[instrument(skip(self), fields(slug = %goopy.slug, dev_mode = self.dev_mode))]
     fn deprovision(&self, goopy: &Goopy) -> Result<(), Error> {
         let result = if self.dev_mode {
-            self.kill_dev_server(&goopy.working_dir)
+            dev_process::kill(self.sys.as_ref(), &goopy.working_dir)
         } else {
             self.stop_service(&goopy.slug)
                 .and_then(|_| self.remove_nginx_site(&goopy.slug))
@@ -357,6 +265,7 @@ mod tests {
     use super::*;
     use crate::storage_allocator::PlainDirAllocator;
     use crate::sys_utils::{MockCall, MockSysRunner, RealSysRunner};
+    use std::fs;
     use tempfile::tempdir;
 
     fn test_goopy(working_dir: &Path, port: u32) -> Goopy {
