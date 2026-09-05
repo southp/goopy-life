@@ -19,3 +19,19 @@ pub trait GoopyProvisioner {
     /// the configured version affects only instances created afterwards.
     fn service_version(&self) -> &str;
 }
+
+/// Forwarding impl so a provisioner chosen at runtime (`Config::build_provisioner`)
+/// still satisfies `GoopyManager`'s generic `Provisioner` bound.
+impl GoopyProvisioner for Box<dyn GoopyProvisioner + Send + Sync> {
+    fn provision(&self, goopy: &Goopy) -> Result<(), Error> {
+        (**self).provision(goopy)
+    }
+
+    fn deprovision(&self, goopy: &Goopy) -> Result<(), Error> {
+        (**self).deprovision(goopy)
+    }
+
+    fn kind(&self) -> ProvisionerKind {
+        (**self).kind()
+    }
+}
