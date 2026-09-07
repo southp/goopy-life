@@ -90,6 +90,73 @@ fn reload(sys: &dyn SysRunner) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sys_utils::MockSysRunner;
+
+    /// The symlink must be in place before `nginx -t`, and `nginx -t` must pass
+    /// before the reload — reloading first would push an unvalidated config to
+    /// the running server. The whole sequence is pinned rather than filtered so
+    /// that a reordering of [`reload`] fails here.
+    #[test]
+    fn install_site_validates_before_reloading() {
+        let sys = MockSysRunner::new();
+        install_site(
+            &sys,
+            "tasty-lucky-clover",
+            "goopy.life",
+            9876,
+            "127.0.0.1:3000",
+        )
+        .unwrap();
+
+        assert_eq!(
+            sys.sudo_write_paths(),
+            ["/etc/nginx/sites-available/goopy-tasty-lucky-clover"]
+        );
+        assert_eq!(
+            sys.sudo_run_args(),
+            [
+                "ln",
+                "-sf",
+                "/etc/nginx/sites-available/goopy-tasty-lucky-clover",
+                "/etc/nginx/sites-enabled/goopy-tasty-lucky-clover",
+                "nginx",
+                "-t",
+                "systemctl",
+                "reload",
+                "nginx",
+            ]
+        );
+    }
+
+    /// The symlink goes first: removing the config while `sites-enabled` still
+    /// points at it would leave a dangling link that fails the next `nginx -t`
+    /// for every other instance.
+    #[test]
+    fn remove_site_unlinks_before_removing_the_config() {
+        let sys = MockSysRunner::new();
+        remove_site(&sys, "tasty-lucky-clover").unwrap();
+
+        assert!(
+            sys.sudo_write_paths().is_empty(),
+            "removal must not write anything"
+        );
+        assert_eq!(
+            sys.sudo_run_args(),
+            [
+                "rm",
+                "-f",
+                "/etc/nginx/sites-enabled/goopy-tasty-lucky-clover",
+                "rm",
+                "-f",
+                "/etc/nginx/sites-available/goopy-tasty-lucky-clover",
+                "nginx",
+                "-t",
+                "systemctl",
+                "reload",
+                "nginx",
+            ]
+        );
+    }
 
     #[test]
     fn render_site_contains_slug_domain_port() {
