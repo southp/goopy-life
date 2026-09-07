@@ -434,7 +434,7 @@ mod tests {
             ProvisionerKind::Hello
         }
         fn service_version(&self) -> &str {
-            "0.1.0"
+            "9.9.9-mock"
         }
     }
 
@@ -689,6 +689,12 @@ mod tests {
             "status should be Spawning or Done, got {:?}",
             g.status
         );
+        // The sentinel is deliberately unlike any crate version, so this fails if
+        // spawn() ever goes back to stamping env!("CARGO_PKG_VERSION").
+        assert_eq!(
+            g.service_version, "9.9.9-mock",
+            "service_version must come from the provisioner, not the crate version"
+        );
     }
 
     #[test]
@@ -769,7 +775,7 @@ mod tests {
             ProvisionerKind::Hello
         }
         fn service_version(&self) -> &str {
-            "0.1.0"
+            "9.9.9-mock"
         }
     }
 

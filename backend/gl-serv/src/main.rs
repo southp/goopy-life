@@ -703,7 +703,7 @@ mod tests {
             ProvisionerKind::Hello
         }
         fn service_version(&self) -> &str {
-            "0.1.0"
+            "9.9.9-mock"
         }
     }
 
