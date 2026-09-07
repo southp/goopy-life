@@ -80,12 +80,15 @@ impl SysRunner for RealSysRunner {
 
 // ── MockSysRunner ─────────────────────────────────────────────────────────────
 
+/// Decides whether a recorded `sudo_run` should fail, from its arguments.
+#[cfg(any(test, feature = "test-utils"))]
+type SudoRunPredicate = Box<dyn Fn(&[&str]) -> bool + Send + Sync>;
+
 /// Records all calls so tests can assert on the exact sequence of commands.
 #[cfg(any(test, feature = "test-utils"))]
 pub struct MockSysRunner {
     calls: Mutex<Vec<MockCall>>,
-    #[allow(clippy::type_complexity)]
-    sudo_run_fails_when: Option<Box<dyn Fn(&[&str]) -> bool + Send + Sync>>,
+    sudo_run_fails_when: Option<SudoRunPredicate>,
 }
 
 /// A single recorded call to [`MockSysRunner`].
@@ -148,15 +151,11 @@ impl MockSysRunner {
             .collect()
     }
 
-    /// Content written to `path` by `sudo_write`, if any.
-    pub fn sudo_written_content(&self, path: &str) -> Option<String> {
-        self.calls.lock().unwrap().iter().find_map(|c| match c {
-            MockCall::SudoWrite { path: p, content } if p == path => Some(content.clone()),
-            _ => None,
-        })
-    }
-
     /// Returns all recorded calls in order.
+    ///
+    /// The escape hatch for assertions the flat projections above cannot
+    /// express — chiefly how `sudo_write` and `sudo_run` interleave, which they
+    /// deliberately flatten away.
     pub fn recorded_calls(&self) -> Vec<MockCall> {
         self.calls.lock().unwrap().clone()
     }

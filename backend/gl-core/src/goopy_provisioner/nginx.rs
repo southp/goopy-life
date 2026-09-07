@@ -13,7 +13,7 @@ use crate::sys_utils::SysRunner;
 ///
 /// `api_address` is where gl-serv listens; the `auth_request` subrequest is
 /// proxied there to ask whether the instance is still alive.
-pub(crate) fn render_site(slug: &str, domain: &str, port: u32, api_address: &str) -> String {
+fn render_site(slug: &str, domain: &str, port: u32, api_address: &str) -> String {
     format!(
         r#"server {{
     listen 80;
