@@ -702,6 +702,9 @@ mod tests {
         fn kind(&self) -> ProvisionerKind {
             ProvisionerKind::Hello
         }
+        fn service_version(&self) -> &str {
+            "9.9.9-mock"
+        }
     }
 
     // ── Test helpers ──────────────────────────────────────────────────────

@@ -140,7 +140,7 @@ where
                 port,
                 status: Status::Spawning,
                 provisioner_kind: self.provisioner.kind(),
-                service_version: env!("CARGO_PKG_VERSION").to_string(),
+                service_version: self.provisioner.service_version().to_string(),
             };
 
             // Capacity is enforced by the insert itself rather than by a
@@ -433,6 +433,9 @@ mod tests {
         fn kind(&self) -> ProvisionerKind {
             ProvisionerKind::Hello
         }
+        fn service_version(&self) -> &str {
+            "9.9.9-mock"
+        }
     }
 
     fn make_test_manager(
@@ -686,6 +689,12 @@ mod tests {
             "status should be Spawning or Done, got {:?}",
             g.status
         );
+        // The sentinel is deliberately unlike any crate version, so this fails if
+        // spawn() ever goes back to stamping env!("CARGO_PKG_VERSION").
+        assert_eq!(
+            g.service_version, "9.9.9-mock",
+            "service_version must come from the provisioner, not the crate version"
+        );
     }
 
     #[test]
@@ -764,6 +773,9 @@ mod tests {
 
         fn kind(&self) -> ProvisionerKind {
             ProvisionerKind::Hello
+        }
+        fn service_version(&self) -> &str {
+            "9.9.9-mock"
         }
     }
 

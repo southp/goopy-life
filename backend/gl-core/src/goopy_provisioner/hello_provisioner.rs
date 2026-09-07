@@ -320,6 +320,11 @@ impl GoopyProvisioner for HelloProvisioner {
         ProvisionerKind::Hello
     }
 
+    /// The Hello PoC ships with the crate, so its version *is* the crate version.
+    fn service_version(&self) -> &str {
+        env!("CARGO_PKG_VERSION")
+    }
+
     #[instrument(skip(self), fields(slug = %goopy.slug, dev_mode = self.dev_mode))]
     fn provision(&self, goopy: &Goopy) -> Result<(), Error> {
         // Step 1: allocate storage
