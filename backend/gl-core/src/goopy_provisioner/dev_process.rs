@@ -23,7 +23,6 @@ pub(crate) fn spawn(
     envs: &[(&str, &str)],
     log_name: &str,
 ) -> Result<(), Error> {
-    info!(working_dir = %working_dir.display(), program, "spawning dev server");
     let log_path = working_dir.join(log_name);
     let pid = sys.spawn_detached(program, args, working_dir, envs, &log_path)?;
 
@@ -60,7 +59,6 @@ pub(crate) fn kill(sys: &dyn SysRunner, working_dir: &Path) -> Result<(), Error>
         .parse()
         .map_err(|_| Error::Subprocess(format!("PID out of range: {pid:?}")))?;
 
-    info!(%pid, "killing dev server");
     sys.kill_pid(pid)?;
     std::fs::remove_file(&pid_path).map_err(Error::Io)
 }
