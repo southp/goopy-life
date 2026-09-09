@@ -101,6 +101,30 @@ mod tests {
         assert!(!pid_path.exists(), "the PID file must not be left behind");
     }
 
+    #[test]
+    fn kill_rejects_an_empty_pid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(PID_FILE), "").unwrap();
+        let sys = MockSysRunner::new();
+
+        let err = kill(&sys, dir.path()).expect_err("an empty PID file is not a PID");
+
+        assert!(matches!(err, Error::Invalid), "got {err:?}");
+        assert!(sys.recorded_calls().is_empty(), "nothing should be killed");
+    }
+
+    #[test]
+    fn kill_rejects_a_non_numeric_pid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(PID_FILE), "not-a-pid\n").unwrap();
+        let sys = MockSysRunner::new();
+
+        let err = kill(&sys, dir.path()).expect_err("a non-numeric PID must be rejected");
+
+        assert!(matches!(err, Error::Subprocess(_)), "got {err:?}");
+        assert!(sys.recorded_calls().is_empty(), "nothing should be killed");
+    }
+
     /// A `Failed` instance may never have got as far as spawning anything, and
     /// `sweep()` reaps those — so a missing PID file must not block cleanup.
     #[test]
