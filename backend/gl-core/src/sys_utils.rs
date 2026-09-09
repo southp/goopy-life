@@ -38,7 +38,11 @@ pub trait SysRunner: Send + Sync {
     ) -> Result<u32, Error>;
 
     /// Terminate the process with the given PID. Succeeds if it is already gone.
-    fn kill_pid(&self, pid: &str) -> Result<(), Error>;
+    ///
+    /// Takes the PID as a number so that callers reading one out of a file must
+    /// parse it before reaching this point, rather than each call site being
+    /// trusted to validate a string.
+    fn kill_pid(&self, pid: u32) -> Result<(), Error>;
 }
 
 // ── RealSysRunner ─────────────────────────────────────────────────────────────
@@ -143,10 +147,10 @@ impl SysRunner for RealSysRunner {
         }
     }
 
-    fn kill_pid(&self, pid: &str) -> Result<(), Error> {
+    fn kill_pid(&self, pid: u32) -> Result<(), Error> {
         info!(%pid, "killing process");
         let out = Command::new("kill")
-            .args([pid.trim()])
+            .args([pid.to_string()])
             .output()
             .map_err(Error::Io)?;
         if !out.status.success() {
@@ -197,7 +201,7 @@ pub enum MockCall {
         log_path: PathBuf,
     },
     KillPid {
-        pid: String,
+        pid: u32,
     },
 }
 
@@ -323,10 +327,8 @@ impl SysRunner for MockSysRunner {
         Ok(MOCK_SPAWNED_PID)
     }
 
-    fn kill_pid(&self, pid: &str) -> Result<(), Error> {
-        self.calls.lock().unwrap().push(MockCall::KillPid {
-            pid: pid.to_string(),
-        });
+    fn kill_pid(&self, pid: u32) -> Result<(), Error> {
+        self.calls.lock().unwrap().push(MockCall::KillPid { pid });
         Ok(())
     }
 }

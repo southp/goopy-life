@@ -56,6 +56,10 @@ pub(crate) fn kill(sys: &dyn SysRunner, working_dir: &Path) -> Result<(), Error>
         return Err(Error::Subprocess(format!("invalid PID in file: {pid:?}")));
     }
 
+    let pid: u32 = pid
+        .parse()
+        .map_err(|_| Error::Subprocess(format!("PID out of range: {pid:?}")))?;
+
     info!(%pid, "killing dev server");
     sys.kill_pid(pid)?;
     std::fs::remove_file(&pid_path).map_err(Error::Io)
@@ -92,7 +96,7 @@ mod tests {
 
         assert!(matches!(
             sys.recorded_calls().as_slice(),
-            [MockCall::KillPid { pid }] if pid == "4242"
+            [MockCall::KillPid { pid: 4242 }]
         ));
         assert!(!pid_path.exists(), "the PID file must not be left behind");
     }
