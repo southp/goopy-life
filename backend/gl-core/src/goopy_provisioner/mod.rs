@@ -1,4 +1,6 @@
 pub mod hello_provisioner;
+mod nginx;
+mod systemd;
 
 use crate::Goopy;
 use crate::shared_types::*;
