@@ -16,7 +16,7 @@ install**, and **upgrade it**.
 
 ## Why a shared base install
 
-A Ghost install is roughly 200 MB, almost all of it `node_modules`. Installing
+A Ghost install is around 540 MB, almost all of it `node_modules`. Installing
 one per sandbox would make provisioning slow and put a hard ceiling on how many
 instances fit on the droplet. Instead each instance directory is assembled from
 the shared install in two parts.
@@ -52,21 +52,22 @@ Do this once per Ghost version, as `root` on the droplet.
 
 ```bash
 # 1. Pick a version-stamped directory. Keeping the version in the path lets a
-#    new install be prepared while the current one is still serving instances.
+#    new install be prepared while the current one is still serving instances,
+#    and is what pins existing instances to the version they were created with.
 GHOST_VERSION=5.87.1
 INSTALL_DIR=/opt/goopy-life/ghost-${GHOST_VERSION}
 
 mkdir -p "${INSTALL_DIR}"
+
+# 2. Unpack the Ghost release into it. The published tarball is already a Ghost
+#    root, so this is the install directory — there is nothing to hoist.
+cd /tmp
+npm pack ghost@${GHOST_VERSION}
+tar xzf ghost-${GHOST_VERSION}.tgz --strip-components=1 -C "${INSTALL_DIR}"
+
+# 3. Install Ghost's dependencies, with yarn, from inside the install dir.
 cd "${INSTALL_DIR}"
-
-# 2. Install Ghost itself — NOT ghost-cli. We provision instances ourselves.
-npm install ghost@${GHOST_VERSION} --production
-
-# 3. Ghost lands under node_modules/ghost; hoist it so the install directory is
-#    a Ghost root with index.js, core/, node_modules/ and package.json at the top.
-mv node_modules/ghost/* .
-mv node_modules/ghost/.[!.]* . 2>/dev/null || true
-rmdir node_modules/ghost
+yarn install --production
 
 # 4. Confirm the layout the provisioner expects.
 ls index.js core node_modules package.json content/themes/casper
@@ -74,17 +75,24 @@ ls index.js core node_modules package.json content/themes/casper
 # 5. Make it read-only to the service account — instances only ever read it.
 chown -R root:root "${INSTALL_DIR}"
 chmod -R a+rX "${INSTALL_DIR}"
-
-# 6. Point the stable path at this version.
-ln -sfn "${INSTALL_DIR}" /opt/goopy-life/ghost
 ```
+
+> **Use `npm pack` + `yarn`, not `npm install ghost@<version>`.** Ghost declares
+> 67 of its dependencies as `file:components/*.tgz` — tarballs that live *inside*
+> the Ghost package. Installing Ghost as a dependency of an empty project cannot
+> work: npm resolves those paths against the project root, where `components/`
+> does not exist, and fails with `ENOENT`. Unpacking first and installing from
+> inside the package root is what makes them resolve. Ghost also ships a
+> `yarn.lock` and no `package-lock.json`; npm rejects the tree on a `bookshelf`/
+> `knex` peer conflict that yarn accepts, and `--legacy-peer-deps` only trades it
+> for npm trying to fetch the bundled components from the registry.
 
 Then set the provisioner section in `/opt/goopy-life/config.toml`:
 
 ```toml
 [provisioner]
 kind = "Ghost"
-source_dir = "/opt/goopy-life/ghost"
+source_dir = "/opt/goopy-life/ghost-5.87.1"
 version = "5.87.1"
 node_bin = "/usr/bin/node"
 service_user = "goopy"
@@ -99,8 +107,15 @@ sudo systemctl restart gl-serv
 ### Requirements
 
 - **Node.js** at `node_bin`. It must be an absolute path: systemd does not search
-  `PATH` for `ExecStart`. Use the major version Ghost supports for the version
-  you installed.
+  `PATH` for `ExecStart`. It must also satisfy Ghost's `engines` range — for
+  5.87.x that is `^18.12.1 || ^20.11.1`. yarn enforces this and refuses to
+  install on anything else, which is the earliest place a wrong Node shows up.
+- **yarn**, to prepare the base install (`npm i -g yarn`). It is not needed at
+  runtime — only the once-per-version preparation above uses it.
+- **`source_dir` must be the version-stamped directory**, never a symlink that
+  later moves. The provisioner stores the path as given, so a moving symlink
+  would silently pull running instances onto a different Ghost — see
+  [Upgrading Ghost](#upgrading-ghost).
 - **`service_user`** (`goopy` by default) must be able to read `source_dir`
   and write the instance working directories under `base_dir`. Instances run as
   this user, never as root.
@@ -140,29 +155,38 @@ they point at.
 
 ## Upgrading Ghost
 
-Instances are **pinned to the version they were created with**. `version`
-is recorded on every instance as `service_version` at spawn time, and the
-instance keeps running against the base install it was linked to. Beta runs a
-single Ghost version at a time; supporting several coexisting versions is a
-follow-up.
+Instances are **pinned to the version they were created with**, because their
+symlinks name the version-stamped install directory directly: an instance
+created against `ghost-5.87.1` keeps pointing there no matter what is prepared
+afterwards. `version` is recorded alongside on every instance as
+`service_version` at spawn time. Beta runs a single Ghost version at a time;
+supporting several coexisting versions is a follow-up.
 
 To upgrade:
 
 1. Prepare the new version in its own directory, following the steps above with
    a new `GHOST_VERSION` (e.g. `/opt/goopy-life/ghost-5.90.0`).
-2. Repoint the stable symlink:
-   ```bash
-   ln -sfn /opt/goopy-life/ghost-5.90.0 /opt/goopy-life/ghost
+2. Point the config at it — **both** keys, so they never disagree:
+   ```toml
+   [provisioner]
+   source_dir = "/opt/goopy-life/ghost-5.90.0"
+   version = "5.90.0"
    ```
-3. Bump `version` in `config.toml` to match, and restart `gl-serv`.
+3. Restart `gl-serv`.
 4. Instances spawned from now on use the new version. Existing instances keep
    running against the old one.
 
+> Do not introduce a stable `/opt/goopy-life/ghost` symlink and point
+> `source_dir` at it. The provisioner links each instance at
+> `{source_dir}/index.js` and friends as written, so repointing such a symlink
+> would redirect **every existing instance** the next time its Ghost process
+> restarts — including when #96 suspends and resumes it. Editing `source_dir` is
+> one line, and it is the line that makes pinning real.
+
 ### Retiring the old install
 
-Because the stable symlink is resolved at provision time, instances created
-before the switch hold links into the **old** directory. Do not delete it until
-every instance that references it is gone:
+Instances created before the switch hold links into the **old** directory. Do
+not delete it until every instance that references it is gone:
 
 ```bash
 # Which versions are still in use?
