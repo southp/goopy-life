@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::goopy_manager::GoopyManagerConfig;
+use crate::goopy_provisioner::GoopyProvisioner;
 use crate::goopy_provisioner::hello_provisioner::HelloProvisioner;
 use crate::shared_types::{AllocatorKind, Error, ProvisionerKind};
 use crate::storage_allocator::{PlainDirAllocator, StorageAllocator, ZfsAllocator};
@@ -38,13 +39,24 @@ impl AllocatorConfig {
 
 /// Configuration for the provisioner subsection (`[provisioner]` in TOML).
 ///
-/// Mirrors [`AllocatorConfig`]: a flat struct with a `kind` discriminant plus
-/// kind-specific fields that are silently ignored when the kind does not apply.
-/// Ghost-specific fields (e.g. `ghost_source_dir`) will be added here in #18
-/// without breaking the `Hello` case.
+/// Unlike [`AllocatorConfig`], which stays a flat struct because its extra
+/// fields are simply ignored under the other kind, a provisioner's settings are
+/// strictly kind-specific. Making this a tagged enum lets serde enforce that at
+/// parse time, so a kind that gains mandatory settings needs no hand-written
+/// validation in [`Config::from_file`].
 #[derive(Debug, serde::Deserialize)]
-pub struct ProvisionerConfig {
-    pub kind: ProvisionerKind,
+#[serde(tag = "kind")]
+pub enum ProvisionerConfig {
+    Hello,
+}
+
+impl ProvisionerConfig {
+    /// The kind discriminant, for logging and display.
+    pub fn kind(&self) -> ProvisionerKind {
+        match self {
+            ProvisionerConfig::Hello => ProvisionerKind::Hello,
+        }
+    }
 }
 
 /// Rate limiting configuration (`[ratelimit]` section in TOML).
@@ -186,23 +198,29 @@ fn default_max_provisioned() -> u32 {
 }
 
 impl Config {
-    /// Build a [`HelloProvisioner`] from the current configuration.
+    /// Build the provisioner named by the `[provisioner]` section.
     ///
     /// `dev_mode` is passed explicitly so callers can override the value from
     /// the config file (e.g. `gl-cli` forces dev mode unless `--prod` is given).
     ///
-    /// The provisioner kind is read from `self.provisioner.kind`; only
-    /// [`ProvisionerKind::Hello`] is supported today.
-    pub fn build_provisioner(&self, dev_mode: bool, sys: Arc<dyn SysRunner>) -> HelloProvisioner {
-        let _kind = &self.provisioner.kind; // consulted here; extended in #18 for Ghost
+    /// Returned boxed because the kind is only known at runtime; the forwarding
+    /// impl in `goopy_provisioner` keeps it usable as `GoopyManager`'s generic
+    /// provisioner parameter.
+    pub fn build_provisioner(
+        &self,
+        dev_mode: bool,
+        sys: Arc<dyn SysRunner>,
+    ) -> Box<dyn GoopyProvisioner + Send + Sync> {
         let storage = self.allocator.build();
-        HelloProvisioner::new(
-            self.domain.clone(),
-            dev_mode,
-            self.bind_address.clone(),
-            storage,
-            sys,
-        )
+        match &self.provisioner {
+            ProvisionerConfig::Hello => Box::new(HelloProvisioner::new(
+                self.domain.clone(),
+                dev_mode,
+                self.bind_address.clone(),
+                storage,
+                sys,
+            )),
+        }
     }
 
     /// Build a [`GoopyManagerConfig`] from the current configuration.
@@ -491,7 +509,7 @@ kind = "PlainDir"
             VALID_BASE
         );
         let cfg = write_config(&toml).expect("should parse");
-        assert_eq!(cfg.provisioner.kind, ProvisionerKind::Hello);
+        assert_eq!(cfg.provisioner.kind(), ProvisionerKind::Hello);
     }
 
     #[test]
