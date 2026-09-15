@@ -100,9 +100,6 @@ const CONTENT_DIRS: &[&str] = &[
     "data", "images", "logs", "settings", "adapters", "public", "files", "media", "themes",
 ];
 
-/// Stock theme shipped with Ghost. Read-only, so it is shared like the code.
-const STOCK_THEME: &str = "casper";
-
 impl GhostProvisioner {
     pub fn new(
         domain: String,
@@ -155,17 +152,21 @@ impl GhostProvisioner {
             fs::create_dir_all(content.join(dir)).map_err(Error::Io)?;
         }
 
-        // The stock theme is read-only; a user-uploaded theme lands in the
-        // instance's own (real) content/themes directory alongside this link.
-        Self::force_symlink(
-            &self
-                .ghost
-                .source_dir
-                .join("content")
-                .join("themes")
-                .join(STOCK_THEME),
-            &content.join("themes").join(STOCK_THEME),
-        )
+        // Stock themes are read-only, so they are shared like the code. Mirror
+        // whatever the base install ships rather than naming one: which themes
+        // Ghost bundles — and which one a fresh site activates — varies by
+        // release. A user-uploaded theme lands in the instance's own (real)
+        // content/themes directory alongside these links.
+        let source_themes = self.ghost.source_dir.join("content").join("themes");
+        for entry in fs::read_dir(&source_themes).map_err(Error::Io)? {
+            let entry = entry.map_err(Error::Io)?;
+            Self::force_symlink(
+                &entry.path(),
+                &content.join("themes").join(entry.file_name()),
+            )?;
+        }
+
+        Ok(())
     }
 
     // ── Template rendering ──────────────────────────────────────────────
@@ -344,8 +345,12 @@ mod tests {
     use crate::sys_utils::{MOCK_SPAWNED_PID, MockCall, MockSysRunner};
     use tempfile::{TempDir, tempdir};
 
+    /// Themes a stock Ghost 5.x install ships. A fresh site activates `source`,
+    /// so linking only `casper` leaves the instance without its active theme.
+    const FAKE_STOCK_THEMES: &[&str] = &["casper", "source"];
+
     /// Builds a stand-in for a prepared base Ghost install: the entries the
-    /// provisioner symlinks, and the stock theme.
+    /// provisioner symlinks, and the stock themes.
     fn fake_ghost_source() -> TempDir {
         let source = tempdir().unwrap();
         fs::write(source.path().join("index.js"), "// ghost entrypoint").unwrap();
@@ -356,14 +361,9 @@ mod tests {
         .unwrap();
         fs::create_dir_all(source.path().join("core")).unwrap();
         fs::create_dir_all(source.path().join("node_modules")).unwrap();
-        fs::create_dir_all(
-            source
-                .path()
-                .join("content")
-                .join("themes")
-                .join(STOCK_THEME),
-        )
-        .unwrap();
+        for theme in FAKE_STOCK_THEMES {
+            fs::create_dir_all(source.path().join("content").join("themes").join(theme)).unwrap();
+        }
         source
     }
 
@@ -446,10 +446,39 @@ mod tests {
             assert!(path.is_dir(), "content/{dir} should exist");
         }
 
-        let theme = working_dir.join("content").join("themes").join(STOCK_THEME);
-        assert!(
-            theme.symlink_metadata().unwrap().file_type().is_symlink(),
-            "the stock theme is read-only and should be shared"
+        for theme in FAKE_STOCK_THEMES {
+            let link = working_dir.join("content").join("themes").join(theme);
+            assert!(
+                link.symlink_metadata().unwrap().file_type().is_symlink(),
+                "stock theme {theme} is read-only and should be shared"
+            );
+            assert_eq!(
+                fs::read_link(&link).unwrap(),
+                source.path().join("content").join("themes").join(theme),
+                "stock theme {theme} should point at the base install"
+            );
+        }
+    }
+
+    #[test]
+    fn dev_provision_links_every_theme_the_base_install_ships() {
+        let source = fake_ghost_source();
+        // Not one of Ghost's current defaults: the provisioner mirrors the base
+        // install rather than a hardcoded list of theme names.
+        fs::create_dir_all(source.path().join("content").join("themes").join("edition")).unwrap();
+
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let p = provisioner(true, &source, Arc::new(MockSysRunner::new()));
+        p.provision(&test_goopy(&working_dir, 9876))
+            .expect("dev provision should succeed");
+
+        let link = working_dir.join("content").join("themes").join("edition");
+        assert_eq!(
+            fs::read_link(&link).unwrap(),
+            source.path().join("content").join("themes").join("edition"),
+            "every theme in the base install should be linked, not just the known defaults"
         );
     }
 

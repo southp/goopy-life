@@ -28,10 +28,10 @@ The rule is **symlink what Ghost reads, materialise what Ghost writes**.
 | Path in the instance dir | How it is created | Why |
 | --- | --- | --- |
 | `index.js`, `core/`, `node_modules/`, `package.json` | symlink → `source_dir` | Application code. Identical for every instance and never written to. |
-| `content/themes/casper` | symlink → `source_dir` | The stock theme ships with Ghost and is read-only. |
+| `content/themes/<each stock theme>` | symlink → `source_dir` | The themes that ship with Ghost are read-only. Every entry in the base install's `content/themes/` is linked, so the instance gets whichever theme a fresh site activates. |
 | `content/data/` | real directory | Holds `ghost.db`, this instance's SQLite database. |
 | `content/images/`, `content/media/`, `content/files/` | real directory | User uploads. |
-| `content/themes/` | real directory | So a user-uploaded theme lands here, next to the `casper` symlink. |
+| `content/themes/` | real directory | So a user-uploaded theme lands here, next to the stock-theme symlinks. |
 | `content/settings/`, `content/adapters/`, `content/public/`, `content/logs/` | real directory | Ghost writes generated routes, assets and logs here. |
 | `config.production.json` | real file | Per-instance URL, port, and database path. |
 
@@ -70,7 +70,7 @@ cd "${INSTALL_DIR}"
 yarn install --production
 
 # 4. Confirm the layout the provisioner expects.
-ls index.js core node_modules package.json content/themes/casper
+ls index.js core node_modules package.json content/themes
 
 # 5. Make it read-only to the service account — instances only ever read it.
 chown -R root:root "${INSTALL_DIR}"
