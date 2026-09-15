@@ -68,7 +68,10 @@ quota_mb = 512
 kind = "Ghost"
 # Prepared base Ghost install every instance soft-links to. Required for Ghost.
 # See docs/GHOST_PROVISIONER.md for how to prepare and upgrade it.
-source_dir = "/opt/goopy-life/ghost"
+# Must be the version-stamped install directory, never a stable symlink that
+# later moves — the path is stored as given, so repointing it would drag every
+# running instance onto a different Ghost.
+source_dir = "/opt/goopy-life/ghost-5.87.1"
 # Version of that base install; stamped onto each instance as service_version.
 # Required. Bump it after upgrading — existing instances keep the version they
 # were created with.
