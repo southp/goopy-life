@@ -9,10 +9,27 @@ Restart=on-failure
 RestartSec=5
 WorkingDirectory=/opt/goopy-life
 Environment=RUST_LOG=debug
-PrivateTmp=yes
-ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=/opt/goopy-life /run /var/log/nginx /etc/systemd/system /etc/nginx/sites-available /etc/nginx/sites-enabled
+# No filesystem sandboxing here, deliberately.
+#
+# PrivateTmp/ProtectSystem/ProtectHome each give this unit a private mount
+# namespace, and systemd sets that namespace up as a *slave*: it receives
+# mounts from the host but never propagates its own back. ZfsAllocator
+# provisions by running `sudo zfs create`, which mounts the new dataset — so
+# with any of those options the dataset is mounted only inside this namespace.
+# The provisioner then writes the instance tree onto that invisible mount and
+# reports success, while every goopy-{slug}.service, which runs in the host
+# namespace, sees a bare empty directory and dies with
+# `Cannot find module index.js`. Nothing logs an error, and the instance is
+# registered Done while crash-looping.
+#
+# MountFlags=shared does not rescue this: systemd applies it before the
+# sandboxing options re-slave the namespace, so it is silently overridden.
+#
+# The hardening this gives up is smaller than it looks: gl-serv already writes
+# /etc/systemd/system and /etc/nginx/* through `sudo tee` and runs
+# `zfs create`/`zfs destroy`, all pinned in deploy/sudoers.goopy. Keeping the
+# namespace out of the picture is what makes ZFS provisioning work at all.
+# Restoring it means moving the mount out of this process — see issue #136.
 
 [Install]
 WantedBy=multi-user.target
