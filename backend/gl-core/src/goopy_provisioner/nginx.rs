@@ -7,6 +7,14 @@
 //! layer (e.g. #89's `auth_request` caching) is made once rather than per
 //! provisioner.
 //!
+//! TLS terminates here and the instance is proxied over plain HTTP, so the
+//! upstream is told the original scheme with `X-Forwarded-Proto`. This is not
+//! cosmetic: Ghost enforces its configured canonical `url`, which is `https://`,
+//! and without that header it sees an `http://` request and answers every
+//! request with a 301 to the address already being requested — an infinite
+//! redirect loop. The Hello provisioner never needed it because a static page
+//! does not care what scheme it was reached over.
+//!
 //! The expiry check speaks `auth_request`'s vocabulary, which is narrower than
 //! it looks: `ngx_http_auth_request_module` forwards **401 and 403 only**,
 //! treats any 2xx as "allow", and collapses every other status into a 500. So
@@ -99,6 +107,8 @@ server {{
         proxy_pass http://127.0.0.1:{port};
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }}
 }}
 "#,
@@ -289,6 +299,26 @@ mod tests {
         assert!(
             subrequest.contains("proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;"),
             "alive-check subrequest must forward X-Forwarded-For"
+        );
+    }
+
+    /// nginx terminates TLS and proxies to the instance over plain HTTP, so the
+    /// upstream only learns the original scheme from `X-Forwarded-Proto`.
+    /// Without it Ghost compares the apparent `http://` request against its
+    /// configured `https://` canonical url and 301s to the address already being
+    /// requested, looping forever. A static-page provisioner cannot detect the
+    /// omission, so this is asserted here rather than left to an instance to
+    /// discover.
+    #[test]
+    fn render_site_forwards_the_original_scheme() {
+        let cfg = render_site("tasty-lucky-clover", "goopy.life", 9876, "127.0.0.1:3000");
+        assert!(
+            cfg.contains("proxy_set_header X-Forwarded-Proto $scheme;"),
+            "instance proxy must forward the original scheme, or Ghost redirect-loops"
+        );
+        assert!(
+            cfg.contains("proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;"),
+            "instance proxy must preserve the client chain"
         );
     }
 }
