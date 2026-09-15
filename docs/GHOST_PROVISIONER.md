@@ -44,13 +44,14 @@ its own SQLite database on first boot. There is no separate migration step.
 
 ## Preparing the base install
 
-Do this once per Ghost version, as `root` on the droplet.
+Do this once per Ghost version. Only the last step needs `root`: `/opt/goopy-life`
+is owned by the service account, so it can build the tree itself.
 
 ```bash
 # 1. Pick a version-stamped directory. Keeping the version in the path lets a
 #    new install be prepared while the current one is still serving instances,
 #    and is what pins existing instances to the version they were created with.
-GHOST_VERSION=5.87.1
+GHOST_VERSION=6.63.0
 INSTALL_DIR=/opt/goopy-life/ghost-${GHOST_VERSION}
 
 mkdir -p "${INSTALL_DIR}"
@@ -61,53 +62,70 @@ cd /tmp
 npm pack ghost@${GHOST_VERSION}
 tar xzf ghost-${GHOST_VERSION}.tgz --strip-components=1 -C "${INSTALL_DIR}"
 
-# 3. Install Ghost's dependencies, with yarn, from inside the install dir.
+# 3. Install Ghost's dependencies, with pnpm, from inside the install dir.
+#    corepack reads the `packageManager` field and fetches the exact pnpm the
+#    release was built with, so there is nothing to install globally.
 cd "${INSTALL_DIR}"
-yarn install --production
+corepack pnpm install --prod
 
 # 4. Confirm the layout the provisioner expects.
 ls index.js core node_modules package.json content/themes
 
-# 5. Make it read-only to the service account — instances only ever read it.
-chown -R root:root "${INSTALL_DIR}"
-chmod -R a+rX "${INSTALL_DIR}"
+# 5. Make it read-only to the service account — instances only ever read it,
+#    and they run as that account, so anything it can write it can corrupt for
+#    every other instance sharing the install. Needs root.
+sudo chown -R root:root "${INSTALL_DIR}"
+sudo chmod -R a+rX "${INSTALL_DIR}"
 ```
 
-> **Use `npm pack` + `yarn`, not `npm install ghost@<version>`.** Ghost declares
-> 67 of its dependencies as `file:components/*.tgz` — tarballs that live *inside*
-> the Ghost package. Installing Ghost as a dependency of an empty project cannot
-> work: npm resolves those paths against the project root, where `components/`
-> does not exist, and fails with `ENOENT`. Unpacking first and installing from
-> inside the package root is what makes them resolve. Ghost also ships a
-> `yarn.lock` and no `package-lock.json`; npm rejects the tree on a `bookshelf`/
-> `knex` peer conflict that yarn accepts, and `--legacy-peer-deps` only trades it
-> for npm trying to fetch the bundled components from the registry.
+> **Use `npm pack` + the release's own package manager, not `npm install
+> ghost@<version>`.** Ghost declares 21 of its dependencies as
+> `file:components/*.tgz` — tarballs that live *inside* the Ghost package.
+> Installing Ghost as a dependency of an empty project cannot work: npm resolves
+> those paths against the project root, where `components/` does not exist, and
+> fails with `ENOENT`. Unpacking first and installing from inside the package
+> root is what makes them resolve.
 
-Then set the provisioner section in `/opt/goopy-life/config.toml`:
+> **6.x is pnpm; 5.x was yarn.** Ghost 6 ships a `pnpm-lock.yaml` and a
+> `pnpm-workspace.yaml` that leans on pnpm-only features — `catalog:` version
+> references, `overrides`, `allowBuilds` — none of which yarn or npm understand.
+> Follow the `packageManager` field in the release's `package.json` rather than
+> this paragraph if you move to a version that changes it again.
+
+Then point that host's `deploy/config/<env>.toml` at it — **both** keys, so they
+never disagree — and deploy:
 
 ```toml
 [provisioner]
 kind = "Ghost"
-source_dir = "/opt/goopy-life/ghost-5.87.1"
-version = "5.87.1"
+source_dir = "/opt/goopy-life/ghost-6.63.0"
+version = "6.63.0"
 node_bin = "/usr/bin/node"
 service_user = "goopy"
 ```
 
-and restart the API server:
-
 ```bash
-sudo systemctl restart gl-serv
+./deploy/deploy.sh goopy@<host> <env>
 ```
+
+The config is version-controlled and installed by the deploy, so editing
+`/opt/goopy-life/config.toml` over ssh does not survive the next run.
 
 ### Requirements
 
 - **Node.js** at `node_bin`. It must be an absolute path: systemd does not search
   `PATH` for `ExecStart`. It must also satisfy Ghost's `engines` range — for
-  5.87.x that is `^18.12.1 || ^20.11.1`. yarn enforces this and refuses to
-  install on anything else, which is the earliest place a wrong Node shows up.
-- **yarn**, to prepare the base install (`npm i -g yarn`). It is not needed at
-  runtime — only the once-per-version preparation above uses it.
+  6.63.0 that is `^22.23.1 || ^24.20.0`.
+- **Nothing checks that Node satisfies the range before an instance boots.**
+  `corepack pnpm install --prod` completes happily on an out-of-range Node, and
+  gl-serv never inspects it, so the first symptom of a wrong Node is a spawned
+  instance whose unit fails. Check it by hand while preparing:
+  ```bash
+  node --version
+  node -p "require('/opt/goopy-life/ghost-<version>/package.json').engines.node"
+  ```
+- **corepack**, to fetch pnpm for the once-per-version preparation. It ships with
+  Node and is not needed at runtime.
 - **`source_dir` must be the version-stamped directory**, never a symlink that
   later moves. The provisioner stores the path as given, so a moving symlink
   would silently pull running instances onto a different Ghost — see
@@ -203,7 +221,7 @@ they point at.
 
 Instances are **pinned to the version they were created with**, because their
 symlinks name the version-stamped install directory directly: an instance
-created against `ghost-5.87.1` keeps pointing there no matter what is prepared
+created against `ghost-6.63.0` keeps pointing there no matter what is prepared
 afterwards. `version` is recorded alongside on every instance as
 `service_version` at spawn time. Beta runs a single Ghost version at a time;
 supporting several coexisting versions is a follow-up.
@@ -211,14 +229,14 @@ supporting several coexisting versions is a follow-up.
 To upgrade:
 
 1. Prepare the new version in its own directory, following the steps above with
-   a new `GHOST_VERSION` (e.g. `/opt/goopy-life/ghost-5.90.0`).
+   a new `GHOST_VERSION` (e.g. `/opt/goopy-life/ghost-6.64.0`).
 2. Point the config at it — **both** keys, so they never disagree:
    ```toml
    [provisioner]
-   source_dir = "/opt/goopy-life/ghost-5.90.0"
-   version = "5.90.0"
+   source_dir = "/opt/goopy-life/ghost-6.64.0"
+   version = "6.64.0"
    ```
-3. Restart `gl-serv`.
+3. Deploy, which installs the edited config and restarts `gl-serv`.
 4. Instances spawned from now on use the new version. Existing instances keep
    running against the old one.
 
@@ -243,7 +261,7 @@ Once no instance reports the old version — instances are ephemeral, so this
 happens within `life_in_days` — remove it:
 
 ```bash
-rm -rf /opt/goopy-life/ghost-5.87.1
+rm -rf /opt/goopy-life/ghost-6.63.0
 ```
 
 ---

@@ -71,12 +71,14 @@ kind = "Ghost"
 # Must be the version-stamped install directory, never a stable symlink that
 # later moves — the path is stored as given, so repointing it would drag every
 # running instance onto a different Ghost.
-source_dir = "/opt/goopy-life/ghost-5.87.1"
+source_dir = "/opt/goopy-life/ghost-6.63.0"
 # Version of that base install; stamped onto each instance as service_version.
 # Required. Bump it after upgrading — existing instances keep the version they
 # were created with.
-version = "5.87.1"
-# Absolute path to the Node.js binary (systemd does not search PATH).
+version = "6.63.0"
+# Absolute path to the Node.js binary (systemd does not search PATH). Must
+# satisfy the pinned Ghost's engines range — 6.63.0 wants ^22.23.1 || ^24.20.0,
+# and nothing checks it before an instance fails to boot.
 node_bin = "/usr/bin/node"
 # Unprivileged user each instance's systemd unit runs as.
 service_user = "goopy"
