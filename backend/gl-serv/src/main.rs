@@ -312,6 +312,20 @@ async fn get_goopy(
 ///
 /// So: do not return a status from here that is not 200 or 403 without
 /// working through what nginx will actually do with it.
+///
+/// # Cacheability
+///
+/// nginx caches this subrequest (see `proxy_cache` in the generated site), and
+/// **gl-serv decides per response whether it may**, rather than the site
+/// applying a blanket TTL. A live instance is cacheable for a few seconds; a
+/// denial never is.
+///
+/// That asymmetry is the point. Once #96 lands, this endpoint doubles as the
+/// wake trigger for a suspended instance, and a cached denial would strand it —
+/// nginx would keep answering from cache and the wake would never fire. Because
+/// only the `200` arm is cacheable, a suspended or expired instance always
+/// reaches gl-serv, and #96 inherits correct behaviour without having to revisit
+/// the cache.
 async fn alive_check(
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
@@ -325,17 +339,41 @@ async fn alive_check(
     .map_err(|e| AppError::from_core(e, state.cfg.sweep_interval_secs))?;
 
     let Some(goopy) = goopy else {
-        return Ok(StatusCode::FORBIDDEN.into_response());
+        return Ok(deny());
     };
 
     let expires_at = goopy.created_at + Duration::days(goopy.life_in_days as i64);
     let alive = goopy.status == gl_core::Status::Done && Utc::now() < expires_at;
 
     if alive {
-        Ok(StatusCode::OK.into_response())
+        Ok(allow(state.cfg.ratelimit.alive_cache_secs))
     } else {
-        Ok(StatusCode::FORBIDDEN.into_response())
+        Ok(deny())
     }
+}
+
+/// `200` with a short `max-age`, letting nginx serve the next few seconds of
+/// subrequests for this slug from cache.
+fn allow(cache_secs: u64) -> Response {
+    let mut response = StatusCode::OK.into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_str(&format!("max-age={cache_secs}"))
+            .expect("max-age from a u64 is always a valid header value"),
+    );
+    response
+}
+
+/// `403` with `no-store`, which is what keeps the cache wake-safe: a denial is
+/// never remembered, so a suspended or expired instance always reaches gl-serv.
+/// See the note on [`alive_check`].
+fn deny() -> Response {
+    let mut response = StatusCode::FORBIDDEN.into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 /// `GET /capacity` — current usage of both instance caps.
@@ -1372,6 +1410,7 @@ mod tests {
             read_period_secs: 1,
             alive_burst: 600,
             alive_period_secs: 1,
+            alive_cache_secs: 5,
         };
         let app = make_router_with_rl(
             "goopy.life",
@@ -1399,6 +1438,72 @@ mod tests {
         }
     }
 
+    /// A live instance may be cached, briefly.
+    #[tokio::test]
+    async fn alive_check_allows_caching_a_live_instance() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_goopy(&registry, "live-slug", 7, 0, 9020, Status::Done);
+        let app = make_router("goopy.life", registry);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
+                    .uri("/goopies/live-slug/alive")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("max-age=5"),
+        );
+    }
+
+    /// A denial must never be cached.
+    ///
+    /// This is the property that keeps the `proxy_cache` in the generated site
+    /// wake-safe for #96: if nginx could remember a 403, a suspended instance
+    /// would never reach gl-serv again and the wake would never fire. Asserted
+    /// for all three denial paths, since they are three separate returns.
+    #[tokio::test]
+    async fn alive_check_never_allows_caching_a_denial() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        // Created 10 days ago, lives 7 → expired.
+        seed_goopy(&registry, "expired-slug", 7, 10, 9021, Status::Done);
+        seed_goopy(&registry, "spawning-slug", 7, 0, 9022, Status::Spawning);
+        let app = make_router("goopy.life", registry);
+
+        for slug in ["expired-slug", "spawning-slug", "no-such-slug"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .header("x-real-ip", "127.0.0.1")
+                        .uri(format!("/goopies/{slug}/alive"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{slug}");
+            assert_eq!(
+                resp.headers()
+                    .get(axum::http::header::CACHE_CONTROL)
+                    .and_then(|v| v.to_str().ok()),
+                Some("no-store"),
+                "{slug}: a cached denial would strand a suspended instance once \
+                 #96 makes this the wake trigger",
+            );
+        }
+    }
+
     /// The liveness check must not be throttled by the read budget.
     ///
     /// nginx fires one `auth_request` subrequest per HTTP request to an
@@ -1417,6 +1522,7 @@ mod tests {
             read_period_secs: 60,
             alive_burst: 50,
             alive_period_secs: 1,
+            alive_cache_secs: 5,
         };
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         seed_goopy(&registry, "busy-slug", 7, 0, 9010, Status::Done);
@@ -1454,6 +1560,7 @@ mod tests {
             read_period_secs: 60,
             alive_burst: 2,
             alive_period_secs: 60,
+            alive_cache_secs: 5,
         };
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         seed_goopy(&registry, "busy-slug", 7, 0, 9011, Status::Done);
@@ -1668,6 +1775,7 @@ mod tests {
             read_period_secs: 1,
             alive_burst: 600,
             alive_period_secs: 1,
+            alive_cache_secs: 5,
         };
         let app = make_router_with_rl(
             "goopy.life",
@@ -1714,6 +1822,7 @@ mod tests {
             read_period_secs: 1,
             alive_burst: 600,
             alive_period_secs: 1,
+            alive_cache_secs: 5,
         };
         let app = make_router_with_rl(
             "goopy.life",
@@ -1760,6 +1869,7 @@ mod tests {
             read_period_secs: 1,
             alive_burst: 1,
             alive_period_secs: 60,
+            alive_cache_secs: 5,
         };
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         seed_goopy(&registry, "shared-slug", 7, 0, 9012, Status::Done);
