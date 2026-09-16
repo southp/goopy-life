@@ -14,6 +14,25 @@
 //! which the parent request never sees — an expired instance rendered a 500
 //! instead of redirecting, and the template test passed the whole time because
 //! it asserted the string rather than the behaviour.
+//!
+//! # The `goopy_alive` cache zone
+//!
+//! The expiry check runs once per *request*, not once per page, so a Ghost
+//! screen pulling ~45 subresources asks gl-serv 45 times whether the instance
+//! is alive. `proxy_cache` collapses that to roughly one question per slug per
+//! few seconds.
+//!
+//! How long "a few seconds" is, is **not decided here**. gl-serv sends
+//! `Cache-Control` on each response and nginx honours it: an affirmative answer
+//! carries a short `max-age`, a denial carries `no-store`. Keeping the decision
+//! at the origin is what makes the cache safe for #96 — a suspended instance's
+//! denial is never remembered, so the request always reaches the wake path.
+//!
+//! The zone itself must be declared in nginx's `http {{}}` block, which this
+//! per-site template cannot reach. It ships as `deploy/nginx/goopy-cache.conf`
+//! and is a **one-time install**: without it `nginx -t` fails on every site
+//! rendered here, so it must be in place before the first instance is
+//! provisioned with this template. See docs/GHOST_PROVISIONER.md.
 
 use crate::shared_types::Error;
 use crate::sys_utils::SysRunner;
@@ -44,6 +63,7 @@ server {{
         proxy_set_header Content-Length "";
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_cache goopy_alive;
     }}
 
     location @expired {{
@@ -195,6 +215,11 @@ mod tests {
         assert!(
             cfg.contains("return 302 https://goopy.life/expired;"),
             "expired location must redirect to /expired page"
+        );
+        assert!(
+            cfg.contains("proxy_cache goopy_alive;"),
+            "alive-check location must use the shared cache zone, or every \
+             subresource re-asks gl-serv whether the instance is alive"
         );
         assert!(
             !cfg.contains("error_page 410"),

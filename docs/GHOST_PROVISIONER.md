@@ -118,6 +118,56 @@ sudo systemctl restart gl-serv
 - **A wildcard TLS certificate** for the domain at
   `/etc/letsencrypt/live/<domain>/` — the same prerequisite the Hello
   provisioner has.
+- **The `goopy_alive` nginx cache zone** — see below. Unlike the others this
+  one is not optional and not Ghost-specific, but Ghost is what makes it
+  matter.
+
+---
+
+## The `goopy_alive` cache zone
+
+Install this once per host, **before provisioning any instance**:
+
+```bash
+sudo install -m 644 deploy/nginx/goopy-cache.conf /etc/nginx/conf.d/
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+> ⚠️ **Order matters, and getting it wrong is host-wide.**
+> Every generated site references the `goopy_alive` zone. A site referencing an
+> undeclared zone fails `nginx -t`, and nginx then refuses to reload *at all* —
+> so no instance can be provisioned or torn down until the zone exists. Install
+> the snippet first; it is inert on its own.
+
+### Why it exists
+
+Each instance's site runs an `auth_request` against gl-serv to check the
+instance has not expired. `auth_request` fires once per **request**, not once
+per page. A Ghost admin screen pulls around 45 subresources, so without caching
+that single page load asks gl-serv 45 times whether the instance is alive.
+
+That is not merely wasteful. The liveness endpoint is rate limited, and nginx's
+`auth_request` renders a refusal as a **500** — so exhausting the budget does
+not slow the page down, it blanks it. The cache removes the burst; the separate
+`ratelimit.alive_*` budget covers what remains.
+
+### How long anything is cached
+
+nginx does not decide — gl-serv does, per response:
+
+| Instance state | Response | `Cache-Control` |
+| --- | --- | --- |
+| alive | `200` | `max-age=<ratelimit.alive_cache_secs>` (default 5s) |
+| expired, not ready, unknown | `403` | `no-store` |
+
+Keeping the decision at the origin is what makes the cache safe. **A denial is
+never cached**, so an expired instance stops being reachable promptly, and once
+#96 (scale-to-zero) lands, a suspended instance's check always reaches gl-serv
+and the wake still fires.
+
+The tradeoff to know about: an instance that expires *mid-window* stays
+reachable for up to `alive_cache_secs`. Set it to `0` for exact expiry timing
+at the cost of one subrequest per asset; it is capped at 60.
 
 ---
 
