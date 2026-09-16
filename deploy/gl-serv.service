@@ -31,5 +31,32 @@ Environment=RUST_LOG=debug
 # namespace out of the picture is what makes ZFS provisioning work at all.
 # Restoring it means moving the mount out of this process — see issue #136.
 
+# What is safe to keep, in the meantime.
+#
+# Not every hardening option needs a mount namespace. The ones below restrict
+# the service through capabilities, seccomp or a UTS namespace only, so none of
+# them re-slaves the mount namespace the way the three above do — systemd's own
+# exec_needs_mount_namespace() (src/core/execute.c) names PrivateTmp,
+# ProtectSystem, ProtectHome, ProtectKernelTunables, ProtectKernelModules and
+# ProtectKernelLogs, and none of these.
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+RestrictNamespaces=yes
+
+# Two omissions that look like oversights and are not:
+#
+# NoNewPrivileges=yes would break the service outright. Every privileged
+# operation here runs through `sudo -n` (gl-core/src/sys_utils.rs, pinned in
+# deploy/sudoers.goopy), and sudo is setuid-root, which NoNewPrivileges makes
+# impossible to elevate through.
+#
+# ProtectKernelModules=yes and ProtectKernelLogs=yes each force a mount
+# namespace — they sit in the same exec_needs_mount_namespace() condition as
+# the three options this file removed, so they would reintroduce exactly the
+# invisible-mount bug described above.
+
 [Install]
 WantedBy=multi-user.target
