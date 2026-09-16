@@ -65,7 +65,7 @@ impl ProvisionerConfig {
 
 /// Rate limiting configuration (`[ratelimit]` section in TOML).
 ///
-/// Two independent GCRA (Generic Cell Rate Algorithm) buckets are configured:
+/// Three independent GCRA (Generic Cell Rate Algorithm) buckets are configured:
 ///
 /// * **Provision limit** — applied to `POST /goopies` only.  Defaults to a
 ///   burst of 2 requests with one token replenished every 60 seconds, so a
@@ -74,10 +74,21 @@ impl ProvisionerConfig {
 ///   pattern (one deliberate click) while blocking trivial abuse on the
 ///   expensive provisioning path.
 ///
-/// * **Read limit** — applied to all other endpoints (`GET /goopies/:slug`,
-///   `GET /goopies/:slug/alive`, `GET /config`).  Defaults to a burst of 30
-///   requests with one token replenished every 2 seconds, comfortable for a
-///   frontend that polls `alive` every few seconds but still rejects floods.
+/// * **Read limit** — applied to the endpoints a browser or the frontend calls
+///   directly (`GET /goopies/:slug`, `GET /config`, `GET /capacity`).
+///   Defaults to a burst of 30 requests with one token replenished every 2
+///   seconds, comfortable for a frontend that polls every few seconds but
+///   still rejects floods.
+///
+/// * **Alive limit** — applied to `GET /goopies/:slug/alive` alone.  This one
+///   is not a user-facing read: nginx runs it as an `auth_request` subrequest
+///   **once per HTTP request to an instance**, so its natural rate is the
+///   instance's entire traffic volume rather than a person clicking around.
+///   Sharing the read budget meant a single Ghost admin page, which pulls
+///   ~45 subresources at once, exhausted it and every asset came back 500
+///   (`auth_request` turns any non-2xx/401/403 into a 500).  Defaults to a
+///   burst of 600 — roughly a dozen such page loads back-to-back — with one
+///   token replenished every second.
 ///
 /// Both limits are per **real client IP**, resolved from the `X-Real-IP`
 /// header that nginx sets (falling back to `X-Forwarded-For` and then the
@@ -96,6 +107,12 @@ pub struct RateLimitConfig {
     /// Token replenishment period (seconds) for read endpoints.
     #[serde(default = "default_read_period_secs")]
     pub read_period_secs: u64,
+    /// Burst size for the nginx `auth_request` liveness check.
+    #[serde(default = "default_alive_burst")]
+    pub alive_burst: u32,
+    /// Token replenishment period (seconds) for the liveness check.
+    #[serde(default = "default_alive_period_secs")]
+    pub alive_period_secs: u64,
 }
 
 fn default_provision_burst() -> u32 {
@@ -110,6 +127,12 @@ fn default_read_burst() -> u32 {
 fn default_read_period_secs() -> u64 {
     2
 }
+fn default_alive_burst() -> u32 {
+    600
+}
+fn default_alive_period_secs() -> u64 {
+    1
+}
 
 impl Default for RateLimitConfig {
     fn default() -> Self {
@@ -118,6 +141,8 @@ impl Default for RateLimitConfig {
             provision_period_secs: default_provision_period_secs(),
             read_burst: default_read_burst(),
             read_period_secs: default_read_period_secs(),
+            alive_burst: default_alive_burst(),
+            alive_period_secs: default_alive_period_secs(),
         }
     }
 }
@@ -307,6 +332,14 @@ impl Config {
         if cfg.ratelimit.read_period_secs == 0 {
             return Err(Error::Config(
                 "ratelimit.read_period_secs must be > 0".into(),
+            ));
+        }
+        if cfg.ratelimit.alive_burst == 0 {
+            return Err(Error::Config("ratelimit.alive_burst must be > 0".into()));
+        }
+        if cfg.ratelimit.alive_period_secs == 0 {
+            return Err(Error::Config(
+                "ratelimit.alive_period_secs must be > 0".into(),
             ));
         }
         Ok(cfg)
@@ -702,6 +735,8 @@ kind = "PlainDir"
         assert_eq!(cfg.ratelimit.provision_period_secs, 60);
         assert_eq!(cfg.ratelimit.read_burst, 30);
         assert_eq!(cfg.ratelimit.read_period_secs, 2);
+        assert_eq!(cfg.ratelimit.alive_burst, 600);
+        assert_eq!(cfg.ratelimit.alive_period_secs, 1);
     }
 
     #[test]
@@ -735,5 +770,32 @@ kind = "PlainDir"
     fn zero_read_period_returns_config_error() {
         let err = write_config_with_ratelimit("[ratelimit]\nread_period_secs = 0\n").unwrap_err();
         assert!(matches!(err, Error::Config(ref s) if s.contains("read_period_secs")));
+    }
+
+    #[test]
+    fn zero_alive_burst_returns_config_error() {
+        let err = write_config_with_ratelimit("[ratelimit]\nalive_burst = 0\n").unwrap_err();
+        assert!(matches!(err, Error::Config(ref s) if s.contains("alive_burst")));
+    }
+
+    #[test]
+    fn zero_alive_period_returns_config_error() {
+        let err = write_config_with_ratelimit("[ratelimit]\nalive_period_secs = 0\n").unwrap_err();
+        assert!(matches!(err, Error::Config(ref s) if s.contains("alive_period_secs")));
+    }
+
+    /// The liveness budget exists precisely because it must not be the read
+    /// budget; a default that merely matched it would silently reintroduce the
+    /// exhaustion this split was made to fix.
+    #[test]
+    fn alive_budget_is_far_larger_than_the_read_budget() {
+        let cfg = write_config_with_ratelimit("").expect("should parse");
+        assert!(
+            cfg.ratelimit.alive_burst > cfg.ratelimit.read_burst * 10,
+            "alive_burst {} must dwarf read_burst {} — one Ghost page spends \
+             ~45 tokens on subresource liveness checks alone",
+            cfg.ratelimit.alive_burst,
+            cfg.ratelimit.read_burst
+        );
     }
 }

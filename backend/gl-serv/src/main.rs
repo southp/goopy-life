@@ -1329,6 +1329,8 @@ mod tests {
             provision_period_secs: 60,
             read_burst: 100,
             read_period_secs: 1,
+            alive_burst: 600,
+            alive_period_secs: 1,
         };
         let app = make_router_with_rl(
             "goopy.life",
@@ -1524,6 +1526,8 @@ mod tests {
             provision_period_secs: 60,
             read_burst: 100,
             read_period_secs: 1,
+            alive_burst: 600,
+            alive_period_secs: 1,
         };
         let app = make_router_with_rl(
             "goopy.life",
@@ -1568,6 +1572,8 @@ mod tests {
             provision_period_secs: 60,
             read_burst: 100,
             read_period_secs: 1,
+            alive_burst: 600,
+            alive_period_secs: 1,
         };
         let app = make_router_with_rl(
             "goopy.life",
