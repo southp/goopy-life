@@ -88,6 +88,34 @@ ssh goopy@<dev-host> 'systemctl status gl-serv --no-pager'
 curl -sS https://<dev-api-host>/config | head
 ```
 
+That check is honest but late: by the time it fires, the old binary has already
+been stopped and the outage has happened. So one class of failure is caught
+earlier. After both files are uploaded and **before** anything is installed,
+`push-binary.sh` runs the new binary against the staged config:
+
+```bash
+/tmp/gl-serv --check-config --config /opt/goopy-life/config.toml.new
+```
+
+`--check-config` parses the file, prints a summary of it and exits 0/1. It binds
+no port, opens no registry and starts no background task, so it is safe to run
+beside the live service — running the binary bare to test a config is not, as it
+collides on `Address in use`. A non-zero exit aborts the deploy with the
+installed binary and config untouched and still serving.
+
+It matters most on the **manual production path**: `deploy.sh` builds from
+whatever local tree the operator has, which need not be the commit CI validated,
+and nothing watches production. On the automated dev deploy it is close to
+tautological — binary and config come from the same trunk commit, and
+`deploy_configs.rs` has already parsed that config with the same `gl-core` — but
+it costs one ssh round trip and it is the cheap half of the guarantee.
+
+To run it by hand against a config before deploying it (from `backend/`):
+
+```bash
+cargo run -q -p gl-serv -- --check-config --config ../deploy/config/prod.toml
+```
+
 ## Frontend — Vercel Git integration
 
 The frontend deploys through Vercel's native GitHub integration, not a workflow:
@@ -173,6 +201,11 @@ Two rules keep it that way:
   a newly required field fails the PR that introduces it rather than the deploy
   that follows. Adding an environment means adding a file; the test picks it up
   with no edit.
+- **And again on the host, before the swap.** The deploy runs the uploaded
+  binary with `--check-config` against the staged config while the previous pair
+  is still installed — see [Verifying a deploy](#verifying-a-deploy). CI covers
+  the automated path; this covers the manual one, where the binary was built
+  from an operator's local tree.
 
 To roll a config change back, revert the commit and deploy again.
 
