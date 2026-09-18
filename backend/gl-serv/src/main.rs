@@ -1740,4 +1740,52 @@ mod tests {
         let other = app.clone().oneshot(make_req("198.51.100.2")).await.unwrap();
         assert_eq!(other.status(), StatusCode::CREATED);
     }
+
+    /// The liveness limit is keyed on the real client IP too.
+    ///
+    /// This is #142's second cause: `proxy_set_header` does not inherit across
+    /// nginx locations, so the `/goopy-alive-check` subrequest forwarded no
+    /// client IP and `SmartIpKeyExtractor` fell back to nginx's own peer
+    /// address on `127.0.0.1`. Every visitor of every instance on the host
+    /// shared one bucket, and one busy page starved all of them. The template
+    /// now forwards the headers (see `alive_check_subrequest_forwards_the_client_ip`
+    /// in `nginx.rs`); this guards the other half — that the `alive` governor
+    /// actually buckets on them.
+    #[tokio::test]
+    async fn alive_rate_limit_is_per_real_client_ip() {
+        let rl = gl_core::config::RateLimitConfig {
+            provision_burst: 100,
+            provision_period_secs: 1,
+            read_burst: 100,
+            read_period_secs: 1,
+            alive_burst: 1,
+            alive_period_secs: 60,
+        };
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_goopy(&registry, "shared-slug", 7, 0, 9012, Status::Done);
+        let app = make_router_with_rl("goopy.life", registry, rl);
+
+        let make_req = |ip: &str| {
+            Request::builder()
+                .uri("/goopies/shared-slug/alive")
+                .header("x-real-ip", ip)
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        // Exhaust the burst for the first visitor.
+        let first = app.clone().oneshot(make_req("198.51.100.1")).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let throttled = app.clone().oneshot(make_req("198.51.100.1")).await.unwrap();
+        assert_eq!(throttled.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // A second visitor of the same instance has an untouched bucket.
+        let other = app.clone().oneshot(make_req("198.51.100.2")).await.unwrap();
+        assert_eq!(
+            other.status(),
+            StatusCode::OK,
+            "one visitor exhausting the liveness budget must not blank the \
+             instance for everyone else on the host",
+        );
+    }
 }
