@@ -217,9 +217,56 @@ where
         Ok((slug, port))
     }
 
+    /// Despawn an instance without waiting for its teardown.
+    ///
+    /// Marks the row `Despawning` and hands the actual teardown to a thread, so
+    /// an HTTP caller gets an immediate answer instead of waiting on
+    /// `systemctl`, nginx and the storage allocator. The cost of that is that
+    /// the outcome of the teardown is *not* in the return value: `Ok` means the
+    /// despawn was accepted, not that the instance is gone. Callers that need
+    /// the real outcome — the sweep, above all (#117) — must use
+    /// [`despawn_blocking`] instead.
+    ///
+    /// [`despawn_blocking`]: GoopyManager::despawn_blocking
     #[tracing::instrument(skip(self))]
     pub fn despawn(&self, slug: String) -> Result<String, Error> {
-        let Some(goopy) = self.get(&slug)? else {
+        let goopy = self.begin_despawn(&slug)?;
+
+        let registry = Arc::clone(&self.registry);
+        let provisioner = Arc::clone(&self.provisioner);
+        let span = tracing::Span::current();
+
+        std::thread::spawn(move || {
+            let _guard = span.enter();
+            // The caller was already told `Ok`, so a failure here can only be
+            // reported through the log and the row's restored `Failed` status.
+            let _ = Self::teardown(&registry, &provisioner, &goopy);
+        });
+
+        Ok(slug)
+    }
+
+    /// Despawn an instance and wait for its teardown to finish.
+    ///
+    /// The blocking counterpart of [`despawn`]: it returns once the instance is
+    /// actually gone from the registry, or with the error that stopped it.
+    ///
+    /// Used by [`sweep`], which runs on a background task where nobody is
+    /// waiting on a response, so the extra thread bought nothing — and cost the
+    /// sweep any knowledge of whether the teardown worked.
+    ///
+    /// [`despawn`]: GoopyManager::despawn
+    /// [`sweep`]: GoopyManager::sweep
+    #[tracing::instrument(skip(self))]
+    pub fn despawn_blocking(&self, slug: &str) -> Result<(), Error> {
+        let goopy = self.begin_despawn(slug)?;
+        Self::teardown(&self.registry, &self.provisioner, &goopy)
+    }
+
+    /// Check that `slug` may be despawned and claim it by marking it
+    /// `Despawning`, returning the row as it stood before the claim.
+    fn begin_despawn(&self, slug: &str) -> Result<Goopy, Error> {
+        let Some(goopy) = self.get(slug)? else {
             return Err(Error::NotFound);
         };
 
@@ -228,46 +275,64 @@ where
         }
 
         // annotate the status
-        self.registry.update_status(&slug, Status::Despawning)?;
+        self.registry.update_status(slug, Status::Despawning)?;
 
-        let goopy_clone = goopy.clone();
-        let registry = Arc::clone(&self.registry);
-        let provisioner = Arc::clone(&self.provisioner);
-        let span = tracing::Span::current();
+        Ok(goopy)
+    }
 
-        let port = goopy.port;
-        let slug_for_return = slug.clone();
-        std::thread::spawn(move || {
-            let _guard = span.enter();
-            let result = provisioner.deprovision(&goopy_clone);
-            match result {
-                Ok(_) => {
-                    if let Err(e) = registry.delete(&goopy_clone.slug) {
-                        tracing::error!("despawning: delete {} error: {:?}", goopy_clone.slug, e);
-                    }
-                    if let Err(e) = registry.release_port(port) {
-                        tracing::error!("despawning: release port {} error: {:?}", port, e);
-                    }
-                }
-                Err(err) => {
+    /// Release an instance's resources and settle its registry row.
+    ///
+    /// `Ok(())` means — and only means — that the row is gone from the
+    /// registry, which is what lets [`sweep`] count reclaimed capacity rather
+    /// than attempted reclamations.
+    ///
+    /// On failure the row is put back to `Failed` and its port is deliberately
+    /// left reserved, so the stuck instance stays visible for investigation and
+    /// a later despawn — by hand or by the next sweep — can retry it and
+    /// release the port on success.
+    ///
+    /// [`sweep`]: GoopyManager::sweep
+    fn teardown(
+        registry: &Registry,
+        provisioner: &Provisioner,
+        goopy: &Goopy,
+    ) -> Result<(), Error> {
+        let torn_down = provisioner
+            .deprovision(goopy)
+            .and_then(|()| registry.delete(&goopy.slug));
+
+        match torn_down {
+            Ok(()) => {
+                // The row is gone, so the slot really was reclaimed. A port that
+                // fails to return to the pool leaks one port — worth logging,
+                // but it does not make the removal any less true.
+                if let Err(e) = registry.release_port(goopy.port) {
                     tracing::error!(
-                        "deprovisioning for goopy: {} failed: {:?}",
-                        goopy_clone.slug,
-                        err
+                        slug = %goopy.slug,
+                        port = goopy.port,
+                        error = ?e,
+                        "despawn: releasing the port failed",
                     );
-
-                    // Intentionally not calling release_port here: the port stays
-                    // reserved so the stuck goopy remains visible for investigation.
-                    // The operator can retry `despawn` once the underlying issue is
-                    // resolved, which will release the port on success.
-                    if let Err(e) = registry.update_status(&goopy_clone.slug, Status::Failed) {
-                        tracing::error!("despawning: update {} error: {:?}", goopy_clone.slug, e);
-                    }
                 }
+                Ok(())
             }
-        });
+            Err(err) => {
+                tracing::error!(
+                    slug = %goopy.slug,
+                    error = ?err,
+                    "despawn: teardown failed, instance left Failed",
+                );
 
-        Ok(slug_for_return)
+                if let Err(e) = registry.update_status(&goopy.slug, Status::Failed) {
+                    tracing::error!(
+                        slug = %goopy.slug,
+                        error = ?e,
+                        "despawn: restoring the Failed status failed",
+                    );
+                }
+                Err(err)
+            }
+        }
     }
 
     pub fn get(&self, slug: &str) -> Result<Option<Goopy>, Error> {
