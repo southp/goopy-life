@@ -318,6 +318,21 @@ impl Config {
                 ));
             }
         }
+        // A zero readiness budget would hand the instance over before it serves,
+        // which is the bug the wait exists to fix (#151); a zero poll interval
+        // would spin on the instance instead of waiting for it.
+        if let ProvisionerConfig::Ghost(ghost) = &cfg.provisioner {
+            if ghost.ready_timeout_secs == 0 {
+                return Err(Error::Config(
+                    "provisioner.ready_timeout_secs must be > 0".into(),
+                ));
+            }
+            if ghost.ready_poll_ms == 0 {
+                return Err(Error::Config(
+                    "provisioner.ready_poll_ms must be > 0".into(),
+                ));
+            }
+        }
         // A zero cap turns every spawn into a 503 with no startup error at all,
         // which is an easy typo to make and near-impossible to diagnose from
         // outside the service.
@@ -621,6 +636,63 @@ version = "5.87.1"
         assert_eq!(ghost.version, "5.87.1");
         assert_eq!(ghost.node_bin, "/usr/bin/node");
         assert_eq!(ghost.service_user, "goopy");
+        assert_eq!(ghost.ready_timeout_secs, 120);
+        assert_eq!(ghost.ready_poll_ms, 500);
+    }
+
+    #[test]
+    fn ghost_readiness_budget_is_tunable() {
+        let toml = format!(
+            r#"{}
+[provisioner]
+kind = "Ghost"
+source_dir = "/opt/goopy-life/ghost"
+version = "5.87.1"
+ready_timeout_secs = 300
+ready_poll_ms = 250
+"#,
+            GHOST_BASE
+        );
+        let cfg = write_config(&toml).expect("should parse");
+        let ProvisionerConfig::Ghost(ghost) = &cfg.provisioner else {
+            panic!("expected a Ghost provisioner config");
+        };
+        assert_eq!(ghost.ready_timeout_secs, 300);
+        assert_eq!(ghost.ready_poll_ms, 250);
+    }
+
+    /// A zero budget would hand the instance over before it serves — the exact
+    /// bug the wait exists to fix.
+    #[test]
+    fn ghost_zero_ready_timeout_rejected() {
+        let toml = format!(
+            r#"{}
+[provisioner]
+kind = "Ghost"
+source_dir = "/opt/goopy-life/ghost"
+version = "5.87.1"
+ready_timeout_secs = 0
+"#,
+            GHOST_BASE
+        );
+        let err = write_config(&toml).unwrap_err();
+        assert!(matches!(err, Error::Config(ref s) if s.contains("ready_timeout_secs")));
+    }
+
+    #[test]
+    fn ghost_zero_ready_poll_rejected() {
+        let toml = format!(
+            r#"{}
+[provisioner]
+kind = "Ghost"
+source_dir = "/opt/goopy-life/ghost"
+version = "5.87.1"
+ready_poll_ms = 0
+"#,
+            GHOST_BASE
+        );
+        let err = write_config(&toml).unwrap_err();
+        assert!(matches!(err, Error::Config(ref s) if s.contains("ready_poll_ms")));
     }
 
     #[test]
