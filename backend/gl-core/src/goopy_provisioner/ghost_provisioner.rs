@@ -62,8 +62,8 @@ pub struct GhostProvisioner {
 /// Ghost-specific settings, deserialized from the `[provisioner]` TOML section
 /// when `kind = "Ghost"`.
 ///
-/// These four values travel together from config to provisioner, so they are one
-/// type rather than four constructor arguments.
+/// These values travel together from config to provisioner, so they are one
+/// type rather than a handful of constructor arguments.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct GhostConfig {
     /// Prepared base Ghost install that every instance soft-links to.
@@ -82,6 +82,17 @@ pub struct GhostConfig {
     /// Unprivileged OS user the per-instance systemd unit runs as.
     #[serde(default = "default_service_user")]
     pub service_user: String,
+    /// How long a freshly started instance may take to serve, in seconds,
+    /// before the spawn is given up on and the instance marked `Failed`.
+    ///
+    /// See [`readiness`] for why the wait exists. The default has an order of
+    /// magnitude of headroom over the ~13 s a lone Ghost took to boot on the
+    /// dev droplet, because a loaded host is slow rather than broken.
+    #[serde(default = "default_ready_timeout_secs")]
+    pub ready_timeout_secs: u64,
+    /// Gap between readiness probes, in milliseconds.
+    #[serde(default = "default_ready_poll_ms")]
+    pub ready_poll_ms: u64,
 }
 
 fn default_node_bin() -> String {
@@ -90,6 +101,14 @@ fn default_node_bin() -> String {
 
 fn default_service_user() -> String {
     "goopy".to_string()
+}
+
+fn default_ready_timeout_secs() -> u64 {
+    readiness::DEFAULT_READY_TIMEOUT_SECS
+}
+
+fn default_ready_poll_ms() -> u64 {
+    readiness::DEFAULT_READY_POLL_MS
 }
 
 /// Entries symlinked from the base install: Ghost's own code, which it reads
@@ -285,8 +304,8 @@ WantedBy=multi-user.target
     /// How long to wait for a freshly started instance, and how often to ask.
     fn readiness_budget(&self) -> ReadinessBudget {
         ReadinessBudget {
-            timeout: Duration::from_secs(readiness::DEFAULT_READY_TIMEOUT_SECS),
-            poll_interval: Duration::from_millis(readiness::DEFAULT_READY_POLL_MS),
+            timeout: Duration::from_secs(self.ghost.ready_timeout_secs),
+            poll_interval: Duration::from_millis(self.ghost.ready_poll_ms),
         }
     }
 
@@ -392,7 +411,7 @@ impl GoopyProvisioner for GhostProvisioner {
 mod tests {
     use super::*;
     use crate::storage_allocator::PlainDirAllocator;
-    use crate::sys_utils::{MOCK_SPAWNED_PID, MockCall, MockSysRunner};
+    use crate::sys_utils::{MOCK_SPAWNED_PID, MockCall, MockProbe, MockSysRunner};
     use tempfile::{TempDir, tempdir};
 
     /// Themes a stock Ghost 5.x install ships. A fresh site activates `source`,
@@ -431,6 +450,18 @@ mod tests {
     }
 
     fn provisioner(dev_mode: bool, source: &TempDir, sys: Arc<dyn SysRunner>) -> GhostProvisioner {
+        provisioner_with_budget(dev_mode, source, sys, default_ready_timeout_secs(), 5)
+    }
+
+    /// A provisioner with an explicit readiness budget, for the tests that are
+    /// about waiting rather than about provisioning steps.
+    fn provisioner_with_budget(
+        dev_mode: bool,
+        source: &TempDir,
+        sys: Arc<dyn SysRunner>,
+        ready_timeout_secs: u64,
+        ready_poll_ms: u64,
+    ) -> GhostProvisioner {
         GhostProvisioner::new(
             "goopy.life".to_string(),
             dev_mode,
@@ -440,6 +471,8 @@ mod tests {
                 version: "5.87.1".to_string(),
                 node_bin: "/usr/bin/node".to_string(),
                 service_user: "goopy".to_string(),
+                ready_timeout_secs,
+                ready_poll_ms,
             },
             Arc::new(PlainDirAllocator),
             sys,
@@ -792,6 +825,40 @@ mod tests {
             mock.http_probes(),
             [("127.0.0.1:9876".to_string(), "/".to_string())],
             "the instance is probed on its own port, not through the public URL"
+        );
+    }
+
+    /// An instance that never boots must not be handed to anyone. Failing here
+    /// is what releases its port and marks it `Failed`, which `sweep()` reaps.
+    #[test]
+    fn prod_provision_fails_when_the_instance_never_serves() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        // A Ghost stuck on its maintenance page for longer than its budget.
+        let mock = Arc::new(MockSysRunner::with_probes(vec![MockProbe::Status(503)]));
+        let p = provisioner_with_budget(false, &source, mock.clone(), 1, 50);
+
+        let err = p
+            .provision(&test_goopy(&working_dir, 9876))
+            .expect_err("an instance that never serves is a failed spawn");
+
+        match err {
+            Error::ReadinessTimeout { last, .. } => {
+                assert!(last.contains("503"), "got {last:?}");
+            }
+            other => panic!("expected a readiness timeout, got {other:?}"),
+        }
+        assert!(
+            !mock
+                .sudo_write_paths()
+                .contains(&"/etc/nginx/sites-available/goopy-tasty-lucky-clover".to_string()),
+            "a Ghost that never served must never get a public route"
+        );
+        assert!(
+            !working_dir.exists(),
+            "a failed provision releases its working directory"
         );
     }
 
