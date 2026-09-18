@@ -250,6 +250,17 @@ pub enum Error {
     CapacityFull {
         kind: CapacityKind,
     },
+    /// A freshly provisioned instance never served HTTP within its readiness
+    /// budget, so it was never handed to a visitor.
+    ///
+    /// `last` records the final probe observation — a status code, or why
+    /// nothing answered — because that is the one detail worth keeping about a
+    /// boot that never finished (#118).
+    ReadinessTimeout {
+        slug: String,
+        waited_secs: u64,
+        last: String,
+    },
 }
 
 /// Which of the two instance caps a spawn ran into.
@@ -312,6 +323,14 @@ impl std::fmt::Display for Error {
                 )
             }
             Error::CapacityFull { kind } => write!(f, "capacity full: {kind}"),
+            Error::ReadinessTimeout {
+                slug,
+                waited_secs,
+                last,
+            } => write!(
+                f,
+                "{slug} did not serve HTTP within {waited_secs}s (last probe: {last})"
+            ),
         }
     }
 }

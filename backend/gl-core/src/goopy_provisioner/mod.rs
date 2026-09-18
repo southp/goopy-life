@@ -2,6 +2,7 @@ mod dev_process;
 pub mod ghost_provisioner;
 pub mod hello_provisioner;
 mod nginx;
+mod readiness;
 mod systemd;
 
 use crate::Goopy;
