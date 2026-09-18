@@ -98,6 +98,71 @@ assert_config_swap_is_atomic() {
     fi
 }
 
+# Asserts the config gate sits between the uploads and the install. Ordering is
+# the whole point of this step: a gate that ran after the swap would report a
+# failure the old binary was still in a position to prevent.
+assert_config_gate_is_ordered() {
+    local name=$1 binary=$2 config=$3
+    CASES=$((CASES + 1))
+    local output last_upload gate install
+    output=$(DRY_RUN=1 "$SCRIPT_UNDER_TEST" goopy@dev.example.com "$binary" "$config")
+    last_upload=$(printf '%s\n' "$output" | grep -n '^scp ' | tail -1 | cut -d: -f1)
+    gate=$(printf '%s\n' "$output" | grep -n -- '--check-config' | head -1 | cut -d: -f1)
+    install=$(printf '%s\n' "$output" | grep -n 'sudo install -m 755' | head -1 | cut -d: -f1)
+
+    if [[ -n "$last_upload" && -n "$gate" && -n "$install" \
+        && "$last_upload" -lt "$gate" && "$gate" -lt "$install" ]]; then
+        echo "ok   — $name"
+    else
+        echo "FAIL — $name"
+        echo "       last upload: ${last_upload:-<none>}"
+        echo "       gate:        ${gate:-<none>}"
+        echo "       install:     ${install:-<none>}"
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
+# Drives the script for real against stub scp/ssh, with the stub failing the
+# config gate. Asserts the deploy stops there: nothing installed, nothing
+# restarted, so the host keeps serving the pair it already had.
+assert_failed_gate_aborts_before_install() {
+    local name=$1
+    CASES=$((CASES + 1))
+    local stub log status
+    stub=$(mktemp -d)
+    log="$stub/calls"
+    printf '#!/bin/sh\nexit 0\n' >"$stub/scp"
+    cat >"$stub/ssh" <<STUB
+#!/bin/sh
+echo "\$*" >>"$log"
+case "\$*" in
+    *--check-config*) exit 1 ;;
+esac
+exit 0
+STUB
+    chmod +x "$stub/scp" "$stub/ssh"
+
+    # Any two existing files stand in for the binary and the config: the
+    # transfer is stubbed, only the existence check ahead of it is real.
+    PATH="$stub:$PATH" DRY_RUN=0 "$SCRIPT_UNDER_TEST" goopy@dev.example.com \
+        "$SCRIPT_UNDER_TEST" "$SCRIPT_UNDER_TEST" >/dev/null 2>&1
+    status=$?
+
+    local installed="" restarted=""
+    installed=$(grep -c 'sudo install' "$log" 2>/dev/null || true)
+    restarted=$(grep -c 'systemctl restart' "$log" 2>/dev/null || true)
+    /bin/rm -rf "$stub"
+
+    if [[ "$status" -ne 0 && "${installed:-0}" -eq 0 && "${restarted:-0}" -eq 0 ]]; then
+        echo "ok   — $name"
+    else
+        echo "FAIL — $name"
+        echo "       exit status: $status (expected non-zero)"
+        echo "       install calls: ${installed:-0}, restart calls: ${restarted:-0}"
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
 # Asserts that outside dry-run a non-existent input file aborts before any
 # command runs. Takes the binary and config paths so either can be the missing
 # one.
@@ -136,6 +201,20 @@ assert_emits push_binary_honours_custom_ssh_port_for_ssh \
 assert_emits push_binary_ships_the_config_alongside_the_binary \
     "scp -P 22 $CFG goopy@dev.example.com:$REMOTE_CFG.new" \
     goopy@dev.example.com "$BIN" "$CFG"
+
+# The gate runs the uploaded binary against the STAGED config, not the one
+# currently installed: the installed file is about to be replaced, so checking
+# it would pass on a broken incoming pair and fail on a fine one.
+assert_emits push_binary_checks_the_staged_config_with_the_new_binary \
+    "ssh -p 22 goopy@dev.example.com chmod +x /tmp/gl-serv && /tmp/gl-serv --check-config --config $REMOTE_CFG.new" \
+    goopy@dev.example.com "$BIN" "$CFG"
+
+assert_config_gate_is_ordered push_binary_checks_the_config_before_installing "$BIN" "$CFG"
+
+# The point of checking early: a bad config must cost a failed deploy, not an
+# outage. `systemctl is-active` at the end catches the same failure, but only
+# once the old binary has already been stopped.
+assert_failed_gate_aborts_before_install push_binary_aborts_the_deploy_when_the_config_check_fails
 
 # The install substring is whitelisted in deploy/sudoers.goopy — any drift there
 # (a different mode, path, or argument order) becomes a sudo denial on deploy.

@@ -17,7 +17,9 @@
 # this script the only writer of the remote file: a hand-edit there is
 # overwritten by the next deploy. Edit deploy/config/<env>.toml instead. A
 # config that drifts from the schema the binary expects is a crash loop —
-# gl-core's tests/deploy_configs.rs catches that at review time.
+# gl-core's tests/deploy_configs.rs catches that at review time, and the
+# --check-config gate below catches it on the host before the swap, which is
+# what the manual production path has instead of CI.
 #
 # Set DRY_RUN=1 to print the scp/ssh commands instead of running them.
 set -euo pipefail
@@ -59,6 +61,24 @@ run scp -P "$PORT" "$BINARY" "$TARGET:/tmp/gl-serv"
 # rename within one directory, which is atomic: gl-serv is restarted moments
 # later and must never read a half-written file.
 run scp -P "$PORT" "$CONFIG" "$TARGET:$REMOTE_CONFIG.new"
+
+# The gate: the binary that was just uploaded has to be able to read the config
+# that was just staged, while the pair currently on the host is still installed
+# and still serving. A config the new binary cannot parse is a crash loop --
+# `systemctl is-active` at the end of this script catches the same class of
+# failure, but only after the old binary has been stopped, i.e. after the outage.
+#
+# This runs as the deploy account with no sudo: both files were just written by
+# that account, so deploy/sudoers.goopy needs no entry for it.
+#
+# On failure `set -e` stops here, leaving /tmp/gl-serv and $REMOTE_CONFIG.new
+# behind. Neither is read by anything -- the rename below is what makes the
+# staged config live -- and the next deploy overwrites both.
+#
+# chmod first because scp's handling of the executable bit varies with the
+# transfer backend, and a gate that failed on a permission bit would block a
+# deploy for a reason that has nothing to do with the config.
+run ssh -p "$PORT" "$TARGET" "chmod +x /tmp/gl-serv && /tmp/gl-serv --check-config --config $REMOTE_CONFIG.new"
 
 # The statements are joined with && rather than ';' on purpose: the exit status
 # of a ';' sequence is the LAST command's, so a failed install would be reported
