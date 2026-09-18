@@ -88,19 +88,31 @@ service_user = "goopy"
 # header (falling back to X-Forwarded-For, then the TCP peer address). This
 # assumes nginx is the only way to reach gl-serv — see bind_address above. Two
 # independent GCRA buckets are used: a tighter one for the expensive
-# provisioning path and a looser one for read endpoints.
+# provisioning path, a looser one for read endpoints, and a third sized for the
+# nginx liveness subrequest, which runs far hotter than either.
 #
 # The whole section is optional — omit it to use the defaults shown below,
-# which are sized for the 1 vCPU / 2 GB droplet. All four values must be > 0.
+# which are sized for the 1 vCPU / 2 GB droplet. All six values must be > 0.
 #
 # Provisioning limit — applies to POST /goopies only.
 # Default: burst of 2 spawns, then 1 more allowed every 60s per IP.
 provision_burst      = 2
 provision_period_secs = 60
 #
-# Read limit — applies to GET /goopies/:slug, /goopies/:slug/alive, /config,
-# /capacity.
+# Read limit — applies to GET /goopies/:slug, /config, /capacity.
 # Default: burst of 30, replenishing 1 token every 2s per IP (comfortable for
-# a frontend that polls the alive endpoint every couple of seconds).
+# a frontend that polls every couple of seconds).
 read_burst      = 30
 read_period_secs = 2
+#
+# Liveness limit — applies to GET /goopies/:slug/alive only.
+#
+# This endpoint is not browsed: nginx calls it as an auth_request subrequest
+# once per HTTP request to an instance, so one page view costs as many tokens
+# as the page has subresources. A Ghost admin screen pulls ~45 at once, which
+# is why it needs its own budget rather than sharing the read one — and why
+# exhausting it is so visible: auth_request turns the 429 into a 500 for every
+# asset, and the page does not render at all.
+# Default: burst of 600, replenishing 1 token every 1s per IP.
+alive_burst      = 600
+alive_period_secs = 1

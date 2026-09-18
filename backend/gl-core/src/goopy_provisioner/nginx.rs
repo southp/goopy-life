@@ -3,8 +3,17 @@
 //! Every provisioner fronts its instance with the same reverse-proxy site:
 //! `{slug}.{domain}` on 443 (with the shared wildcard cert), an `auth_request`
 //! expiry check against gl-serv, and a redirect to `/expired` when that check
-//! returns 410. Keeping one template here means a change to the proxy layer
-//! (e.g. #89's `auth_request` caching) is made once rather than per provisioner.
+//! denies the request. Keeping one template here means a change to the proxy
+//! layer (e.g. #89's `auth_request` caching) is made once rather than per
+//! provisioner.
+//!
+//! The expiry check speaks `auth_request`'s vocabulary, which is narrower than
+//! it looks: `ngx_http_auth_request_module` forwards **401 and 403 only**,
+//! treats any 2xx as "allow", and collapses every other status into a 500. So
+//! the gate is 200/403 and the site maps 403 to `@expired`. It used to map 410,
+//! which the parent request never sees — an expired instance rendered a 500
+//! instead of redirecting, and the template test passed the whole time because
+//! it asserted the string rather than the behaviour.
 
 use crate::shared_types::Error;
 use crate::sys_utils::SysRunner;
@@ -33,6 +42,8 @@ server {{
         proxy_pass http://{api_address}/goopies/{slug}/alive;
         proxy_pass_request_body off;
         proxy_set_header Content-Length "";
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }}
 
     location @expired {{
@@ -41,7 +52,7 @@ server {{
 
     location / {{
         auth_request /goopy-alive-check;
-        error_page 410 = @expired;
+        error_page 403 = @expired;
         proxy_pass http://127.0.0.1:{port};
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -178,12 +189,45 @@ mod tests {
             "alive-check location must proxy to the correct gl-serv endpoint"
         );
         assert!(
-            cfg.contains("error_page 410 = @expired;"),
-            "nginx config must map 410 to @expired named location"
+            cfg.contains("error_page 403 = @expired;"),
+            "nginx config must map 403 to @expired named location"
         );
         assert!(
             cfg.contains("return 302 https://goopy.life/expired;"),
             "expired location must redirect to /expired page"
+        );
+        assert!(
+            !cfg.contains("error_page 410"),
+            "410 must not appear: auth_request never surfaces it to the parent \
+             request, so an error_page matching it can never fire"
+        );
+    }
+
+    /// The `auth_request` subrequest must carry the client's IP.
+    ///
+    /// `proxy_set_header` does not inherit across locations, so the headers set
+    /// in `location /` do not reach this one. Without them the rate limiter's
+    /// `SmartIpKeyExtractor` falls back to the peer address — nginx itself on
+    /// localhost — and every visitor of every instance on the host shares a
+    /// single bucket.
+    #[test]
+    fn alive_check_subrequest_forwards_the_client_ip() {
+        let cfg = render_site("tasty-lucky-clover", "goopy.life", 40123, "127.0.0.1:3000");
+
+        let subrequest = cfg
+            .split("location = /goopy-alive-check {")
+            .nth(1)
+            .and_then(|rest| rest.split("}").next())
+            .expect("rendered config must contain the alive-check location");
+
+        assert!(
+            subrequest.contains("proxy_set_header X-Real-IP $remote_addr;"),
+            "alive-check subrequest must forward X-Real-IP, or the rate limiter \
+             buckets every instance's traffic under nginx's own address"
+        );
+        assert!(
+            subrequest.contains("proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;"),
+            "alive-check subrequest must forward X-Forwarded-For"
         );
     }
 }

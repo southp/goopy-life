@@ -297,6 +297,21 @@ async fn get_goopy(
     }))
 }
 
+/// `GET /goopies/:slug/alive` — nginx's `auth_request` expiry gate.
+///
+/// This endpoint speaks the `auth_request` protocol, not REST: **200 allows
+/// the request through, 403 denies it**, and the site's `error_page 403 =
+/// @expired` turns the denial into the redirect a visitor sees.
+///
+/// Those are very nearly the only two codes available. nginx's
+/// `ngx_http_auth_request_module` forwards 401 and 403 verbatim, treats any
+/// 2xx as "allow", and collapses **everything else into a 500** — logging
+/// only `auth request unexpected status`. A 410 here does not produce a 410
+/// at the edge; it produces a blank 500 page, which is how this endpoint
+/// previously broke the expiry redirect without anyone noticing.
+///
+/// So: do not return a status from here that is not 200 or 403 without
+/// working through what nginx will actually do with it.
 async fn alive_check(
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
@@ -310,7 +325,7 @@ async fn alive_check(
     .map_err(|e| AppError::from_core(e, state.cfg.sweep_interval_secs))?;
 
     let Some(goopy) = goopy else {
-        return Ok(StatusCode::GONE.into_response());
+        return Ok(StatusCode::FORBIDDEN.into_response());
     };
 
     let expires_at = goopy.created_at + Duration::days(goopy.life_in_days as i64);
@@ -319,7 +334,7 @@ async fn alive_check(
     if alive {
         Ok(StatusCode::OK.into_response())
     } else {
-        Ok(StatusCode::GONE.into_response())
+        Ok(StatusCode::FORBIDDEN.into_response())
     }
 }
 
@@ -523,6 +538,27 @@ fn build_router(
 
     let read_layer = GovernorLayer::new(read_governor).error_handler(rate_limit_error_handler);
 
+    // Separate limit for the nginx liveness subrequest.
+    //
+    // This is not a user-facing read, so it cannot share the read budget: nginx
+    // fires it once per HTTP request to an instance, meaning one page view
+    // costs one token per subresource. Exhausting it does not degrade
+    // gracefully either — auth_request renders a 429 as a 500 — so the page
+    // simply does not load.
+    let alive_governor = GovernorConfigBuilder::default()
+        .key_extractor(SmartIpKeyExtractor)
+        .burst_size(rl.alive_burst)
+        .period(StdDuration::from_secs(rl.alive_period_secs))
+        .finish()
+        .expect("alive rate-limit values are validated by Config::from_file");
+
+    {
+        let limiter = alive_governor.limiter().clone();
+        spawn_governor_cleanup(move || limiter.retain_recent(), "alive");
+    }
+
+    let alive_layer = GovernorLayer::new(alive_governor).error_handler(rate_limit_error_handler);
+
     let spawn_routes = Router::new()
         .route("/goopies", post(spawn_goopy))
         .layer(provision_layer)
@@ -530,15 +566,20 @@ fn build_router(
 
     let read_routes = Router::new()
         .route("/goopies/{slug}", get(get_goopy))
-        .route("/goopies/{slug}/alive", get(alive_check))
         .route("/config", get(get_config))
         .route("/capacity", get(get_capacity))
         .layer(read_layer)
         .with_state(Arc::clone(&state));
 
+    let alive_routes = Router::new()
+        .route("/goopies/{slug}/alive", get(alive_check))
+        .layer(alive_layer)
+        .with_state(Arc::clone(&state));
+
     Router::new()
         .merge(spawn_routes)
         .merge(read_routes)
+        .merge(alive_routes)
         .layer(cors)
         .layer(TraceLayer::new_for_http())
 }
@@ -1136,7 +1177,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn alive_check_returns_410_for_expired_goopy() {
+    async fn alive_check_returns_403_for_expired_goopy() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         // Created 10 days ago, lives 7 → expired
         seed_goopy(&registry, "expired-slug", 7, 10, 9004, Status::Done);
@@ -1153,11 +1194,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resp.status(), StatusCode::GONE);
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
-    async fn alive_check_returns_410_for_non_done_status() {
+    async fn alive_check_returns_403_for_non_done_status() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         // Still spawning → not alive even if within lifetime
         seed_goopy(&registry, "spawning-slug", 7, 0, 9005, Status::Spawning);
@@ -1174,11 +1215,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resp.status(), StatusCode::GONE);
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
-    async fn alive_check_returns_410_for_unknown_slug() {
+    async fn alive_check_returns_403_for_unknown_slug() {
         let app = make_router(
             "goopy.life",
             SqliteRegistry::new(Path::new(":memory:")).unwrap(),
@@ -1195,7 +1236,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resp.status(), StatusCode::GONE);
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     // ── get_config ────────────────────────────────────────────────────────
@@ -1329,6 +1370,8 @@ mod tests {
             provision_period_secs: 60,
             read_burst: 100,
             read_period_secs: 1,
+            alive_burst: 600,
+            alive_period_secs: 1,
         };
         let app = make_router_with_rl(
             "goopy.life",
@@ -1354,6 +1397,105 @@ mod tests {
                 "read #{attempt} must not be throttled by the provisioning limit",
             );
         }
+    }
+
+    /// The liveness check must not be throttled by the read budget.
+    ///
+    /// nginx fires one `auth_request` subrequest per HTTP request to an
+    /// instance, so a single page costs one token per subresource. With both
+    /// on the same bucket, a read burst of 3 would blank a page with 4 assets
+    /// — and not with a 429, but with a 500 per asset, because that is what
+    /// `auth_request` renders a non-2xx/401/403 as.
+    #[tokio::test]
+    async fn alive_check_is_not_throttled_by_the_read_budget() {
+        let rl = gl_core::config::RateLimitConfig {
+            provision_burst: 1,
+            provision_period_secs: 60,
+            // Deliberately tiny: if the two budgets were still shared, the
+            // fourth liveness check below would be refused.
+            read_burst: 3,
+            read_period_secs: 60,
+            alive_burst: 50,
+            alive_period_secs: 1,
+        };
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_goopy(&registry, "busy-slug", 7, 0, 9010, Status::Done);
+        let app = make_router_with_rl("goopy.life", registry, rl);
+
+        for attempt in 0..40 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .header("x-real-ip", "203.0.113.42")
+                        .uri("/goopies/busy-slug/alive")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "liveness check #{attempt} was throttled; one page load spends \
+                 dozens of these and every refusal becomes a 500 at the proxy",
+            );
+        }
+    }
+
+    /// The two budgets are independent in both directions: exhausting the
+    /// liveness bucket must not spend the read one.
+    #[tokio::test]
+    async fn exhausting_the_alive_budget_leaves_reads_working() {
+        let rl = gl_core::config::RateLimitConfig {
+            provision_burst: 1,
+            provision_period_secs: 60,
+            read_burst: 10,
+            read_period_secs: 60,
+            alive_burst: 2,
+            alive_period_secs: 60,
+        };
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_goopy(&registry, "busy-slug", 7, 0, 9011, Status::Done);
+        let app = make_router_with_rl("goopy.life", registry, rl);
+
+        let mut throttled = false;
+        for _ in 0..6 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .header("x-real-ip", "203.0.113.43")
+                        .uri("/goopies/busy-slug/alive")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                throttled = true;
+            }
+        }
+        assert!(
+            throttled,
+            "alive_burst = 2 should throttle within 6 requests"
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "203.0.113.43")
+                    .uri("/goopies/busy-slug")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a flood of liveness checks must not spend the read budget",
+        );
     }
 
     /// A request with no `X-Real-IP` (and no `X-Forwarded-For`) must still be
@@ -1524,6 +1666,8 @@ mod tests {
             provision_period_secs: 60,
             read_burst: 100,
             read_period_secs: 1,
+            alive_burst: 600,
+            alive_period_secs: 1,
         };
         let app = make_router_with_rl(
             "goopy.life",
@@ -1568,6 +1712,8 @@ mod tests {
             provision_period_secs: 60,
             read_burst: 100,
             read_period_secs: 1,
+            alive_burst: 600,
+            alive_period_secs: 1,
         };
         let app = make_router_with_rl(
             "goopy.life",
@@ -1593,5 +1739,53 @@ mod tests {
         // A different IP still has its own fresh burst.
         let other = app.clone().oneshot(make_req("198.51.100.2")).await.unwrap();
         assert_eq!(other.status(), StatusCode::CREATED);
+    }
+
+    /// The liveness limit is keyed on the real client IP too.
+    ///
+    /// This is #142's second cause: `proxy_set_header` does not inherit across
+    /// nginx locations, so the `/goopy-alive-check` subrequest forwarded no
+    /// client IP and `SmartIpKeyExtractor` fell back to nginx's own peer
+    /// address on `127.0.0.1`. Every visitor of every instance on the host
+    /// shared one bucket, and one busy page starved all of them. The template
+    /// now forwards the headers (see `alive_check_subrequest_forwards_the_client_ip`
+    /// in `nginx.rs`); this guards the other half — that the `alive` governor
+    /// actually buckets on them.
+    #[tokio::test]
+    async fn alive_rate_limit_is_per_real_client_ip() {
+        let rl = gl_core::config::RateLimitConfig {
+            provision_burst: 100,
+            provision_period_secs: 1,
+            read_burst: 100,
+            read_period_secs: 1,
+            alive_burst: 1,
+            alive_period_secs: 60,
+        };
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_goopy(&registry, "shared-slug", 7, 0, 9012, Status::Done);
+        let app = make_router_with_rl("goopy.life", registry, rl);
+
+        let make_req = |ip: &str| {
+            Request::builder()
+                .uri("/goopies/shared-slug/alive")
+                .header("x-real-ip", ip)
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        // Exhaust the burst for the first visitor.
+        let first = app.clone().oneshot(make_req("198.51.100.1")).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let throttled = app.clone().oneshot(make_req("198.51.100.1")).await.unwrap();
+        assert_eq!(throttled.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // A second visitor of the same instance has an untouched bucket.
+        let other = app.clone().oneshot(make_req("198.51.100.2")).await.unwrap();
+        assert_eq!(
+            other.status(),
+            StatusCode::OK,
+            "one visitor exhausting the liveness budget must not blank the \
+             instance for everyone else on the host",
+        );
     }
 }
