@@ -63,6 +63,14 @@ impl ProvisionerConfig {
     }
 }
 
+/// Upper bound on [`RateLimitConfig::alive_cache_secs`].
+///
+/// A cached affirmative answer keeps an instance reachable for up to this long
+/// after it expires, so the window is capped rather than left to the operator:
+/// expiry is a promise to the person who spawned the instance, and a config
+/// typo should not be able to stretch it into minutes.
+const MAX_ALIVE_CACHE_SECS: u64 = 60;
+
 /// Rate limiting configuration (`[ratelimit]` section in TOML).
 ///
 /// Three independent GCRA (Generic Cell Rate Algorithm) buckets are configured:
@@ -113,6 +121,14 @@ pub struct RateLimitConfig {
     /// Token replenishment period (seconds) for the liveness check.
     #[serde(default = "default_alive_period_secs")]
     pub alive_period_secs: u64,
+    /// How long nginx may cache an *affirmative* liveness answer, in seconds.
+    ///
+    /// Sent as `Cache-Control: max-age` on the 200. Denials are always
+    /// `no-store`, so this never delays an expiry or (once #96 lands) a wake.
+    /// The tradeoff it does buy: an instance that expires mid-window stays
+    /// reachable for up to this long.
+    #[serde(default = "default_alive_cache_secs")]
+    pub alive_cache_secs: u64,
 }
 
 fn default_provision_burst() -> u32 {
@@ -133,6 +149,9 @@ fn default_alive_burst() -> u32 {
 fn default_alive_period_secs() -> u64 {
     1
 }
+fn default_alive_cache_secs() -> u64 {
+    5
+}
 
 impl Default for RateLimitConfig {
     fn default() -> Self {
@@ -143,6 +162,7 @@ impl Default for RateLimitConfig {
             read_period_secs: default_read_period_secs(),
             alive_burst: default_alive_burst(),
             alive_period_secs: default_alive_period_secs(),
+            alive_cache_secs: default_alive_cache_secs(),
         }
     }
 }
@@ -341,6 +361,16 @@ impl Config {
             return Err(Error::Config(
                 "ratelimit.alive_period_secs must be > 0".into(),
             ));
+        }
+        // Zero is allowed here and means "do not cache": `max-age=0` is a valid
+        // instruction, unlike a zero burst or period, which cannot be turned
+        // into a rate limiter at all. An operator who wants exact expiry
+        // timing at the cost of one subrequest per asset can set it.
+        if cfg.ratelimit.alive_cache_secs > MAX_ALIVE_CACHE_SECS {
+            return Err(Error::Config(format!(
+                "ratelimit.alive_cache_secs must be <= {MAX_ALIVE_CACHE_SECS}; \
+                 a longer window keeps expired instances reachable"
+            )));
         }
         Ok(cfg)
     }

@@ -92,7 +92,8 @@ service_user = "goopy"
 # nginx liveness subrequest, which runs far hotter than either.
 #
 # The whole section is optional — omit it to use the defaults shown below,
-# which are sized for the 1 vCPU / 2 GB droplet. All six values must be > 0.
+# which are sized for the 1 vCPU / 2 GB droplet. The burst and period values
+# must all be > 0; alive_cache_secs may be 0 and is capped at 60.
 #
 # Provisioning limit — applies to POST /goopies only.
 # Default: burst of 2 spawns, then 1 more allowed every 60s per IP.
@@ -116,3 +117,12 @@ read_period_secs = 2
 # Default: burst of 600, replenishing 1 token every 1s per IP.
 alive_burst      = 600
 alive_period_secs = 1
+#
+# How long nginx may cache an affirmative liveness answer, in seconds.
+# Sent as `Cache-Control: max-age` on the 200; denials are always `no-store`,
+# so this never delays an expiry (or, once #96 lands, a scale-to-zero wake).
+# Requires the goopy_alive cache zone from deploy/nginx/goopy-cache.conf.
+# Tradeoff: an instance that expires mid-window stays reachable for up to this
+# long. Set 0 to disable caching entirely; the maximum accepted is 60.
+# Default: 5.
+alive_cache_secs = 5

@@ -14,6 +14,48 @@
 //! which the parent request never sees — an expired instance rendered a 500
 //! instead of redirecting, and the template test passed the whole time because
 //! it asserted the string rather than the behaviour.
+//!
+//! # The `goopy_alive` cache zone
+//!
+//! The expiry check runs once per *request*, not once per page, so a Ghost
+//! screen pulling ~45 subresources asks gl-serv 45 times whether the instance
+//! is alive. `proxy_cache` collapses that to roughly one question per slug per
+//! few seconds.
+//!
+//! How long "a few seconds" is, is **not decided here**. gl-serv sends
+//! `Cache-Control` on each response and nginx honours it: an affirmative answer
+//! carries a short `max-age`, a denial carries `no-store`. Keeping the decision
+//! at the origin is what makes the cache safe for #96 — a suspended instance's
+//! denial is never remembered, so the request always reaches the wake path.
+//!
+//! The zone itself must be declared in nginx's `http {{}}` block, which this
+//! per-site template cannot reach. It ships as `deploy/nginx/goopy-cache.conf`
+//! and is a **one-time install**: without it `nginx -t` fails on every site
+//! rendered here, so it must be in place before the first instance is
+//! provisioned with this template. See docs/GHOST_PROVISIONER.md.
+//!
+//! ## Two invariants that are invisible in the rendered config
+//!
+//! Both of these look like omissions and are not. Measured against nginx
+//! 1.30.5 with this template verbatim, a 45-subresource page load produces
+//! **one** request to gl-serv; changing either invariant breaks that silently,
+//! because nothing about the site file reads as wrong afterwards.
+//!
+//! **There is deliberately no `proxy_cache_valid`.** nginx already honours an
+//! upstream `Cache-Control: max-age=N` on its own — `proxy_cache_valid` exists
+//! to supply a TTL for responses that do *not* carry one. Adding it would hand
+//! a `200` a fallback lifetime for the case where gl-serv stops sending the
+//! header, which is exactly the case that must fail closed: freshness is the
+//! origin's decision, and that is the whole basis of the #96 wake-safety
+//! argument above.
+//!
+//! **The cache key is per-slug only because `proxy_pass` carries a URI.** When
+//! `proxy_pass` has a URI component — ours is `/goopies/{slug}/alive` —
+//! nginx's default key uses *that* URI rather than `$request_uri`. This matters
+//! because inside an `auth_request` subrequest `$request_uri` is the parent's
+//! path (`/assets/foo.css`), so a key built from it would mint a separate entry
+//! per subresource and collapse nothing. Shortening the `proxy_pass` to a bare
+//! `http://{api_address}` would do precisely that.
 
 use crate::shared_types::Error;
 use crate::sys_utils::SysRunner;
@@ -44,6 +86,7 @@ server {{
         proxy_set_header Content-Length "";
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_cache goopy_alive;
     }}
 
     location @expired {{
@@ -186,7 +229,12 @@ mod tests {
         );
         assert!(
             cfg.contains("proxy_pass http://127.0.0.1:3000/goopies/tasty-lucky-clover/alive;"),
-            "alive-check location must proxy to the correct gl-serv endpoint"
+            "alive-check location must proxy to the correct gl-serv endpoint — and the \
+             URI part is load-bearing beyond routing: nginx's default cache key uses the \
+             `proxy_pass` URI when there is one, which is what gives the cache one entry \
+             per slug. Drop it and the key falls back to `$request_uri`, which inside an \
+             `auth_request` subrequest is the *parent's* path — one entry per subresource, \
+             collapsing nothing"
         );
         assert!(
             cfg.contains("error_page 403 = @expired;"),
@@ -195,6 +243,19 @@ mod tests {
         assert!(
             cfg.contains("return 302 https://goopy.life/expired;"),
             "expired location must redirect to /expired page"
+        );
+        assert!(
+            cfg.contains("proxy_cache goopy_alive;"),
+            "alive-check location must use the shared cache zone, or every \
+             subresource re-asks gl-serv whether the instance is alive"
+        );
+        assert!(
+            !cfg.contains("proxy_cache_valid"),
+            "proxy_cache_valid must not appear: nginx already honours the upstream \
+             `Cache-Control`, so this directive would only add a fallback TTL for the \
+             one case that must fail closed — gl-serv not sending the header at all. \
+             Freshness is the origin's decision; that is what keeps a denial uncacheable \
+             and the #96 wake path reachable"
         );
         assert!(
             !cfg.contains("error_page 410"),
