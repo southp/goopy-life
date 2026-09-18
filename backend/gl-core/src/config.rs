@@ -218,8 +218,11 @@ pub struct Config {
     /// in the registry, and because a `Failed` row left by a failed *despawn*
     /// does still hold both its port and its directory.
     ///
-    /// The sweep reaps `Failed` rows unconditionally, so one occupies a slot for
-    /// at most `sweep_interval_secs`.
+    /// The sweep reaps `Failed` rows unconditionally, so one normally occupies
+    /// a slot for at most `sweep_interval_secs`. A row whose teardown keeps
+    /// failing is the exception: it is retried every sweep and counted against
+    /// this cap until it succeeds, which is why the sweep reports what it
+    /// removed rather than what it attempted (#117).
     #[serde(default = "default_max_provisioned")]
     pub max_provisioned: u32,
     pub registry: RegistryConfig,
@@ -229,8 +232,16 @@ pub struct Config {
     pub ratelimit: RateLimitConfig,
 }
 
+/// Default sweep frequency: hourly.
+///
+/// Was 24h, which bought very little — a sweep over an empty registry is a
+/// single `SELECT` — and cost a lot: a slot held by an instance that expired
+/// (or whose provisioning failed) stays unusable until the next sweep, so the
+/// interval is the worst-case delay on reclaiming capacity. An hour keeps that
+/// delay short enough that a full server recovers on its own within an hour
+/// (#117).
 fn default_sweep_interval_secs() -> u64 {
-    86400
+    3600
 }
 
 /// Default RAM-bound resident-instance cap. See [`Config::max_active`].
@@ -441,7 +452,7 @@ kind = "PlainDir"
         assert_eq!(cfg.domain, "goopy.life");
         assert_eq!(cfg.life_in_days, 7);
         assert_eq!(cfg.port_range_start, 9000);
-        assert_eq!(cfg.sweep_interval_secs, 86400);
+        assert_eq!(cfg.sweep_interval_secs, 3600);
     }
 
     #[test]

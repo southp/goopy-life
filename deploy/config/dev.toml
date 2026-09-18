@@ -40,11 +40,10 @@ bind_address = "0.0.0.0:3000"
 
 # How often to sweep expired and Failed instances (seconds; 3600 = 1h).
 #
-# Not the 86400 default: the first sweep runs one full interval after startup
-# and every restart resets that clock (#117), so a longer interval leaves
-# reclaimable capacity wedged for up to a day — and with automated deploys,
-# potentially forever. An idle sweep over an empty registry is nearly free.
-# Revisit once #117 makes the schedule restart-proof.
+# Matches the shipped default since #117, which also made the first sweep run
+# at startup instead of one full interval later. Stated explicitly anyway: the
+# interval is the worst-case delay on reclaiming a wedged slot, so it is worth
+# being deliberate about on the box that runs at a cap of 10.
 sweep_interval_secs = 3600
 
 # Instance caps (#106). max_active is RAM-bound: ~200 MB per Ghost process on a
