@@ -217,9 +217,56 @@ where
         Ok((slug, port))
     }
 
+    /// Despawn an instance without waiting for its teardown.
+    ///
+    /// Marks the row `Despawning` and hands the actual teardown to a thread, so
+    /// an HTTP caller gets an immediate answer instead of waiting on
+    /// `systemctl`, nginx and the storage allocator. The cost of that is that
+    /// the outcome of the teardown is *not* in the return value: `Ok` means the
+    /// despawn was accepted, not that the instance is gone. Callers that need
+    /// the real outcome — the sweep, above all (#117) — must use
+    /// [`despawn_blocking`] instead.
+    ///
+    /// [`despawn_blocking`]: GoopyManager::despawn_blocking
     #[tracing::instrument(skip(self))]
     pub fn despawn(&self, slug: String) -> Result<String, Error> {
-        let Some(goopy) = self.get(&slug)? else {
+        let goopy = self.begin_despawn(&slug)?;
+
+        let registry = Arc::clone(&self.registry);
+        let provisioner = Arc::clone(&self.provisioner);
+        let span = tracing::Span::current();
+
+        std::thread::spawn(move || {
+            let _guard = span.enter();
+            // The caller was already told `Ok`, so a failure here can only be
+            // reported through the log and the row's restored `Failed` status.
+            let _ = Self::teardown(&registry, &provisioner, &goopy);
+        });
+
+        Ok(slug)
+    }
+
+    /// Despawn an instance and wait for its teardown to finish.
+    ///
+    /// The blocking counterpart of [`despawn`]: it returns once the instance is
+    /// actually gone from the registry, or with the error that stopped it.
+    ///
+    /// Used by [`sweep`], which runs on a background task where nobody is
+    /// waiting on a response, so the extra thread bought nothing — and cost the
+    /// sweep any knowledge of whether the teardown worked.
+    ///
+    /// [`despawn`]: GoopyManager::despawn
+    /// [`sweep`]: GoopyManager::sweep
+    #[tracing::instrument(skip(self))]
+    pub fn despawn_blocking(&self, slug: &str) -> Result<(), Error> {
+        let goopy = self.begin_despawn(slug)?;
+        Self::teardown(&self.registry, &self.provisioner, &goopy)
+    }
+
+    /// Check that `slug` may be despawned and claim it by marking it
+    /// `Despawning`, returning the row as it stood before the claim.
+    fn begin_despawn(&self, slug: &str) -> Result<Goopy, Error> {
+        let Some(goopy) = self.get(slug)? else {
             return Err(Error::NotFound);
         };
 
@@ -228,46 +275,64 @@ where
         }
 
         // annotate the status
-        self.registry.update_status(&slug, Status::Despawning)?;
+        self.registry.update_status(slug, Status::Despawning)?;
 
-        let goopy_clone = goopy.clone();
-        let registry = Arc::clone(&self.registry);
-        let provisioner = Arc::clone(&self.provisioner);
-        let span = tracing::Span::current();
+        Ok(goopy)
+    }
 
-        let port = goopy.port;
-        let slug_for_return = slug.clone();
-        std::thread::spawn(move || {
-            let _guard = span.enter();
-            let result = provisioner.deprovision(&goopy_clone);
-            match result {
-                Ok(_) => {
-                    if let Err(e) = registry.delete(&goopy_clone.slug) {
-                        tracing::error!("despawning: delete {} error: {:?}", goopy_clone.slug, e);
-                    }
-                    if let Err(e) = registry.release_port(port) {
-                        tracing::error!("despawning: release port {} error: {:?}", port, e);
-                    }
-                }
-                Err(err) => {
+    /// Release an instance's resources and settle its registry row.
+    ///
+    /// `Ok(())` means — and only means — that the row is gone from the
+    /// registry, which is what lets [`sweep`] count reclaimed capacity rather
+    /// than attempted reclamations.
+    ///
+    /// On failure the row is put back to `Failed` and its port is deliberately
+    /// left reserved, so the stuck instance stays visible for investigation and
+    /// a later despawn — by hand or by the next sweep — can retry it and
+    /// release the port on success.
+    ///
+    /// [`sweep`]: GoopyManager::sweep
+    fn teardown(
+        registry: &Registry,
+        provisioner: &Provisioner,
+        goopy: &Goopy,
+    ) -> Result<(), Error> {
+        let torn_down = provisioner
+            .deprovision(goopy)
+            .and_then(|()| registry.delete(&goopy.slug));
+
+        match torn_down {
+            Ok(()) => {
+                // The row is gone, so the slot really was reclaimed. A port that
+                // fails to return to the pool leaks one port — worth logging,
+                // but it does not make the removal any less true.
+                if let Err(e) = registry.release_port(goopy.port) {
                     tracing::error!(
-                        "deprovisioning for goopy: {} failed: {:?}",
-                        goopy_clone.slug,
-                        err
+                        slug = %goopy.slug,
+                        port = goopy.port,
+                        error = ?e,
+                        "despawn: releasing the port failed",
                     );
-
-                    // Intentionally not calling release_port here: the port stays
-                    // reserved so the stuck goopy remains visible for investigation.
-                    // The operator can retry `despawn` once the underlying issue is
-                    // resolved, which will release the port on success.
-                    if let Err(e) = registry.update_status(&goopy_clone.slug, Status::Failed) {
-                        tracing::error!("despawning: update {} error: {:?}", goopy_clone.slug, e);
-                    }
                 }
+                Ok(())
             }
-        });
+            Err(err) => {
+                tracing::error!(
+                    slug = %goopy.slug,
+                    error = ?err,
+                    "despawn: teardown failed, instance left Failed",
+                );
 
-        Ok(slug_for_return)
+                if let Err(e) = registry.update_status(&goopy.slug, Status::Failed) {
+                    tracing::error!(
+                        slug = %goopy.slug,
+                        error = ?e,
+                        "despawn: restoring the Failed status failed",
+                    );
+                }
+                Err(err)
+            }
+        }
     }
 
     pub fn get(&self, slug: &str) -> Result<Option<Goopy>, Error> {
@@ -304,11 +369,21 @@ where
     /// Instances with `Spawning` or `Despawning` status are skipped to avoid
     /// interfering with in-progress operations.
     ///
-    /// Returns `(swept_count, per_despawn_errors)`. Errors from individual
-    /// `despawn` calls are collected rather than aborting the sweep early.
+    /// Returns `(swept_count, per_instance_errors)`. `swept_count` is the
+    /// number of instances **actually removed from the registry**, not the
+    /// number of teardowns started: the sweep uses [`despawn_blocking`], so an
+    /// instance that cannot be deprovisioned lands in the error list instead of
+    /// the count, every run, for as long as it stays stuck. Errors are
+    /// collected rather than aborting the sweep early.
+    ///
+    /// The distinction is the whole point of this method's log line — it is the
+    /// only signal an operator has for whether capacity was reclaimed, so it
+    /// must not read as a success on a run that freed nothing (#117).
     ///
     /// Meant to be called periodically (e.g. via `tokio::time::interval` in
-    /// `gl-serv`).
+    /// `gl-serv`), from a context where blocking is acceptable.
+    ///
+    /// [`despawn_blocking`]: GoopyManager::despawn_blocking
     #[tracing::instrument(skip(self))]
     pub fn sweep(&self) -> Result<(u32, Vec<Error>), Error> {
         let now = Utc::now();
@@ -343,17 +418,23 @@ where
             };
 
             if should_reap {
-                match self.despawn(gp.slug) {
-                    Ok(_) => swept += 1,
+                match self.despawn_blocking(&gp.slug) {
+                    Ok(()) => swept += 1,
                     Err(e) => {
-                        tracing::error!(error = %e, "sweep: despawn failed, skipping");
+                        tracing::error!(
+                            slug = %gp.slug,
+                            error = %e,
+                            "sweep: instance could not be removed",
+                        );
                         errors.push(e);
                     }
                 }
             }
         }
 
-        tracing::info!(swept, "sweep complete");
+        // `failed` is logged unconditionally so a run that reclaimed nothing
+        // cannot be mistaken for a healthy one at a glance.
+        tracing::info!(swept, failed = errors.len(), "sweep complete");
         Ok((swept, errors))
     }
 }
@@ -905,6 +986,252 @@ mod tests {
             gm.get("alive-one").unwrap().is_some(),
             "healthy Done instance should remain"
         );
+    }
+
+    // ── the sweep tells the truth (#117) ──────────────────────────────────
+
+    /// A provisioner whose teardown always fails, reproducing the real fault:
+    /// `systemctl stop` on a unit that was never created. The row can never be
+    /// removed, so no number of sweeps may ever report it as swept.
+    struct UndeprovisionableProvisioner {
+        deprovision_calls: Arc<Mutex<u32>>,
+    }
+
+    impl GoopyProvisioner for UndeprovisionableProvisioner {
+        fn provision(&self, _goopy: &Goopy) -> Result<(), Error> {
+            Ok(())
+        }
+        fn deprovision(&self, _goopy: &Goopy) -> Result<(), Error> {
+            *self.deprovision_calls.lock().unwrap() += 1;
+            Err(Error::Subprocess("systemctl stop: Unit not found".into()))
+        }
+        fn kind(&self) -> ProvisionerKind {
+            ProvisionerKind::Hello
+        }
+        fn service_version(&self) -> &str {
+            "9.9.9-mock"
+        }
+    }
+
+    /// Fails the teardown for one slug and succeeds for every other, so a
+    /// single sweep can contain both outcomes.
+    struct FailsOneSlugProvisioner {
+        doomed: String,
+    }
+
+    impl GoopyProvisioner for FailsOneSlugProvisioner {
+        fn provision(&self, _goopy: &Goopy) -> Result<(), Error> {
+            Ok(())
+        }
+        fn deprovision(&self, goopy: &Goopy) -> Result<(), Error> {
+            if goopy.slug == self.doomed {
+                Err(Error::Subprocess("systemctl stop: Unit not found".into()))
+            } else {
+                Ok(())
+            }
+        }
+        fn kind(&self) -> ProvisionerKind {
+            ProvisionerKind::Hello
+        }
+        fn service_version(&self) -> &str {
+            "9.9.9-mock"
+        }
+    }
+
+    fn manager_with_provisioner<P: GoopyProvisioner + Send + Sync + 'static>(
+        registry: SqliteRegistry,
+        provisioner: P,
+    ) -> GoopyManager<SqliteRegistry, P> {
+        GoopyManager::new(
+            GoopyManagerConfig {
+                base_dir: PathBuf::from("/tmp"),
+                domain: "test.example".into(),
+                life_in_days: 7,
+                port_range_start: 9000,
+                port_range_end: 9100,
+                max_active: 100,
+                max_provisioned: 100,
+            },
+            registry,
+            provisioner,
+        )
+    }
+
+    /// The defect this issue was filed about: a sweep in which every teardown
+    /// fails freed nothing, so it must report nothing — and must surface the
+    /// failures rather than swallowing them in a background thread.
+    #[test]
+    fn sweep_reports_zero_when_every_deprovision_fails() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_row(&registry, "stuck-one", 9000, Status::Failed);
+        seed_row(&registry, "stuck-two", 9001, Status::Failed);
+
+        let calls = Arc::new(Mutex::new(0u32));
+        let gm = manager_with_provisioner(
+            registry,
+            UndeprovisionableProvisioner {
+                deprovision_calls: Arc::clone(&calls),
+            },
+        );
+
+        let (swept, errors) = gm.sweep().unwrap();
+
+        assert_eq!(swept, 0, "no slot was reclaimed, so none may be reported");
+        assert_eq!(errors.len(), 2, "both failures must reach the caller");
+        assert_eq!(*calls.lock().unwrap(), 2, "both rows must be attempted");
+
+        // Both rows survive, back in `Failed` so a later sweep retries them.
+        for slug in ["stuck-one", "stuck-two"] {
+            let row = gm.get(slug).unwrap().expect("stuck row must survive");
+            assert_eq!(
+                row.status,
+                Status::Failed,
+                "{slug} must be left Failed, not Despawning, so the sweep can retry it",
+            );
+        }
+    }
+
+    /// The count must follow the registry, not the attempts: one removal and
+    /// one stuck row is `swept = 1` with one error, never `swept = 2`.
+    #[test]
+    fn sweep_counts_only_the_rows_it_actually_removed() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_row(&registry, "reapable", 9000, Status::Failed);
+        seed_row(&registry, "stuck", 9001, Status::Failed);
+
+        let gm = manager_with_provisioner(
+            registry,
+            FailsOneSlugProvisioner {
+                doomed: "stuck".into(),
+            },
+        );
+
+        let (swept, errors) = gm.sweep().unwrap();
+
+        assert_eq!(swept, 1, "only the row that left the registry counts");
+        assert_eq!(errors.len(), 1);
+        assert!(
+            gm.get("reapable").unwrap().is_none(),
+            "sweep must not return before the removal it counted has happened",
+        );
+        assert!(gm.get("stuck").unwrap().is_some(), "the stuck row survives");
+    }
+
+    /// The failure that hid the bug for two and a half months: the same row,
+    /// swept over and over, logging success each time. Every run must now read
+    /// as zero reclaimed.
+    #[test]
+    fn repeated_sweeps_never_report_a_permanently_stuck_row_as_swept() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_row(&registry, "wedged", 9000, Status::Failed);
+
+        let calls = Arc::new(Mutex::new(0u32));
+        let gm = manager_with_provisioner(
+            registry,
+            UndeprovisionableProvisioner {
+                deprovision_calls: Arc::clone(&calls),
+            },
+        );
+
+        for run in 1..=3 {
+            let (swept, errors) = gm.sweep().unwrap();
+            assert_eq!(swept, 0, "run {run} reclaimed nothing");
+            assert_eq!(errors.len(), 1, "run {run} must report the failure");
+        }
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            3,
+            "each sweep must retry the wedged row",
+        );
+        assert!(gm.get("wedged").unwrap().is_some());
+    }
+
+    /// The count is only meaningful if the removal has already happened when
+    /// `sweep` returns — no polling, no grace period.
+    #[test]
+    fn sweep_removes_the_row_before_it_returns() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_row(&registry, "doomed", 9000, Status::Failed);
+
+        let gm = manager_with_provisioner(registry, NoopProvisioner);
+
+        let (swept, errors) = gm.sweep().unwrap();
+
+        assert_eq!(swept, 1);
+        assert!(errors.is_empty());
+        assert!(
+            gm.get("doomed").unwrap().is_none(),
+            "the row must be gone the instant sweep returns",
+        );
+    }
+
+    /// A teardown that blocks forever would stall the sweep, but must never
+    /// stall the HTTP handler: `despawn` stays fire-and-forget.
+    #[test]
+    fn despawn_returns_before_its_teardown_finishes() {
+        use std::sync::mpsc;
+
+        struct GatedProvisioner {
+            entered: mpsc::SyncSender<()>,
+            release: Mutex<mpsc::Receiver<()>>,
+        }
+
+        impl GoopyProvisioner for GatedProvisioner {
+            fn provision(&self, _goopy: &Goopy) -> Result<(), Error> {
+                Ok(())
+            }
+            fn deprovision(&self, _goopy: &Goopy) -> Result<(), Error> {
+                self.entered.send(()).expect("test receiver must be alive");
+                self.release
+                    .lock()
+                    .unwrap()
+                    .recv()
+                    .expect("test sender must be alive");
+                Ok(())
+            }
+            fn kind(&self) -> ProvisionerKind {
+                ProvisionerKind::Hello
+            }
+            fn service_version(&self) -> &str {
+                "9.9.9-mock"
+            }
+        }
+
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::channel();
+
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_row(&registry, "slow-teardown", 9000, Status::Done);
+        let gm = manager_with_provisioner(
+            registry,
+            GatedProvisioner {
+                entered: entered_tx,
+                release: Mutex::new(release_rx),
+            },
+        );
+
+        gm.despawn("slow-teardown".to_string())
+            .expect("despawn should be accepted immediately");
+
+        // The teardown thread is now parked inside `deprovision`, so the row
+        // cannot have been removed yet — proving `despawn` did not wait.
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the teardown thread should have reached deprovision");
+        let row = gm
+            .get("slow-teardown")
+            .unwrap()
+            .expect("the row must still exist while the teardown is in flight");
+        assert_eq!(row.status, Status::Despawning);
+
+        release_tx.send(()).unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while gm.get("slow-teardown").unwrap().is_some() {
+            assert!(std::time::Instant::now() < deadline, "despawn timed out");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     // ── capacity caps ─────────────────────────────────────────────────────
