@@ -65,8 +65,38 @@ kind = "Zfs"
 # Storage pool name (Zfs only).
 pool = "zpool_ghost"
 # Disk quota per instance in MB (Zfs only).
-quota_mb = 32
+#
+# Sized for what a Ghost instance *writes*, not what Ghost weighs: the ~631 MB
+# base install is symlinked from source_dir and never counted against the
+# dataset. A freshly booted 6.63.0 instance measured 1.4 MB, almost all of it
+# content/data/ghost.db — so this number is entirely headroom for uploads
+# (content/images, media, files), post content and logs.
+#
+# The ceiling is the pool, not the instance: zpool_ghost has ~4.35 GB usable and
+# max_provisioned is 10, so anything above ~445 MB would overcommit. A ZFS quota
+# caps a dataset but reserves nothing, and an overcommitted pool fails worse
+# than a quota does — the pool fills and *every* instance starts erroring, rather
+# than the one greedy instance hitting its own ceiling. 256 MB keeps all 10
+# instances fully backed with room to raise max_provisioned later.
+#
+# Was 32 MB, which was sized for the Hello provisioner's static page.
+quota_mb = 256
 
 [provisioner]
-# "Hello" (no-op dev provisioner) or "Ghost" (real Ghost install, #18).
-kind = "Hello"
+# "Ghost" (real Ghost instances) or "Hello" (PoC page, dev/testing).
+kind = "Ghost"
+# The prepared base install every instance soft-links against. Version-stamped
+# on purpose: the provisioner records this path as written, so a stable symlink
+# that later moved would drag every running instance onto a different Ghost on
+# its next restart. Upgrading means preparing a new directory and editing these
+# two keys together — see docs/GHOST_PROVISIONER.md.
+source_dir = "/opt/goopy-life/ghost-6.63.0"
+# Stamped onto every instance as service_version. Must name what source_dir
+# actually holds; nothing cross-checks them at startup.
+version = "6.63.0"
+# Absolute path — systemd does not search PATH for ExecStart. Ghost 6.63.0
+# requires Node ^22.23.1 || ^24.20.0, which the droplet's nodesource node_22.x
+# repo supplies.
+node_bin = "/usr/bin/node"
+# Unprivileged user each instance's systemd unit runs as.
+service_user = "goopy"

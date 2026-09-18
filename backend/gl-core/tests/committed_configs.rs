@@ -19,6 +19,7 @@
 use std::path::PathBuf;
 
 use gl_core::Config;
+use gl_core::config::ProvisionerConfig;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -88,4 +89,58 @@ fn the_local_config_enables_dev_mode() {
     // Together with the test above this pins the split: a local-style config
     // moved into deploy/config/ fails there, and this one stops the local
     // config quietly acquiring host-shaped settings.
+}
+
+/// `source_dir` and `version` are two hand-edited keys that must agree, and
+/// nothing at runtime cross-checks them: the provisioner links instances into
+/// `source_dir` and separately stamps `version` onto each one, so a stale
+/// `version` mislabels every instance a host creates and a stale `source_dir`
+/// silently serves the previous Ghost. `docs/GHOST_PROVISIONER.md` therefore
+/// requires the install directory to be version-stamped — this asserts the
+/// committed configs actually are, which is the only place the two can be
+/// compared without the host in front of you.
+#[test]
+fn a_ghost_deploy_config_names_a_version_stamped_source_dir() {
+    for path in deployed_configs() {
+        let cfg = Config::from_file(&path).expect("deployed configs parse");
+        let ProvisionerConfig::Ghost(ghost) = &cfg.provisioner else {
+            continue;
+        };
+
+        // Absolute: the provisioner symlinks instances at this path as written,
+        // and each instance's working directory is somewhere else entirely.
+        assert!(
+            ghost.source_dir.is_absolute(),
+            "{}: source_dir {} must be absolute",
+            path.display(),
+            ghost.source_dir.display()
+        );
+
+        let dir_name = ghost
+            .source_dir
+            .file_name()
+            .expect("an absolute source_dir has a final component")
+            .to_string_lossy();
+        // A bare suffix match is not enough: `ghost-6.63.0` ends with `3.0`,
+        // so a truncated or otherwise mistyped version would sail through the
+        // very check meant to catch it. Require the version to start at a
+        // boundary — either the whole component, or preceded by something that
+        // could not itself be part of a version number.
+        let stamped = dir_name
+            .strip_suffix(ghost.version.as_str())
+            .is_some_and(|prefix| {
+                prefix.is_empty()
+                    || !prefix.ends_with(|c: char| c.is_ascii_alphanumeric() || c == '.')
+            });
+        assert!(
+            stamped,
+            "{}: source_dir {dir_name} is not stamped with version {} — the \
+             version must be the final component or follow a separator, so \
+             that a partial match like `ghost-6.63.0` against `3.0` does not \
+             pass. The two keys disagree, and instances would be stamped with \
+             a version the install does not hold",
+            path.display(),
+            ghost.version
+        );
+    }
 }

@@ -66,5 +66,5 @@ kind = "Hello"
 # To drive real Ghost instances locally, switch to:
 #   kind = "Ghost"
 #   source_dir   = "/path/to/base-ghost-install"
-#   version      = "5.87.1"
+#   version      = "6.63.0"
 #   node_bin     = "/opt/homebrew/bin/node"   # output of `which node`

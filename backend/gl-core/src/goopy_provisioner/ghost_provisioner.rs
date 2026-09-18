@@ -202,10 +202,28 @@ impl GhostProvisioner {
                 },
                 "useNullAsDefault": true,
             },
-            // Sandboxes are throwaway, so no mail service is configured; Ghost
-            // falls back to printing invite/reset URLs into its log.
+            // Sandboxes are throwaway, so no mail service is configured.
+            // "Direct" attempts SMTP straight from the droplet, which providers
+            // block on port 25 — so assume mail never leaves.
             "mail": {
                 "transport": "Direct",
+            },
+            // Ghost 6 defaults `security:staffDeviceVerification` to true and
+            // gates *every* staff sign-in behind a code it mails out. With no
+            // working transport the code cannot arrive, so the owner account
+            // created at setup can never log in: `POST /ghost/api/admin/session/`
+            // answers 500 `EmailError/ESOCKET` and the admin UI — the entire
+            // point of the sandbox — is unreachable. It does not degrade to the
+            // log the way invite and reset URLs do.
+            //
+            // Turning it off is what Ghost's own config.development.json and
+            // config.testing.json do. It costs nothing here: an instance lives a
+            // day, and the "account" is whatever address a visitor typed into the
+            // setup form, so there is no mailbox behind it and no identity to
+            // protect. session-service.js marks the session verified at login, so
+            // no code is generated and the mailer is never reached.
+            "security": {
+                "staffDeviceVerification": false,
             },
             "logging": {
                 "transports": ["file", "stdout"],
@@ -527,6 +545,35 @@ mod tests {
             .unwrap();
         let cfg: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(cfg["url"], "https://tasty-lucky-clover.goopy.life");
+    }
+
+    /// Ghost 6 mails a device-verification code on every staff sign-in unless
+    /// this is off, and these instances have no working mail transport — so
+    /// leaving it at Ghost's default makes the owner account created at setup
+    /// impossible to log in with, and the admin UI unreachable. The failure is
+    /// a 500 from `POST /ghost/api/admin/session/`, nowhere near provisioning,
+    /// which is why it is pinned here rather than left to a droplet to find.
+    #[test]
+    fn prod_config_disables_staff_device_verification() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let p = provisioner(false, &source, Arc::new(MockSysRunner::new()));
+        let raw = p
+            .render_ghost_config(&test_goopy(&working_dir, 9876))
+            .unwrap();
+        let cfg: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        // Ghost reads this as `config.get(...) !== true`, so it must be present
+        // and must not be the string "false".
+        assert_eq!(
+            cfg["security"]["staffDeviceVerification"],
+            serde_json::Value::Bool(false),
+            "staff device verification must be disabled, or no one can log in \
+             to an instance: Ghost 6 defaults it on and mails a code that a \
+             sandbox with no mail transport can never deliver"
+        );
     }
 
     #[test]
