@@ -147,9 +147,19 @@ The config is version-controlled and installed by the deploy, so editing
 Install this once per host, **before provisioning any instance**:
 
 ```bash
+sudo mkdir -p /var/cache/nginx
 sudo install -m 644 deploy/nginx/goopy-cache.conf /etc/nginx/conf.d/
 sudo nginx -t && sudo systemctl reload nginx
 ```
+
+> The `mkdir` is load-bearing. nginx creates only the **final** component of a
+> `proxy_cache_path` — here `goopy_alive` — and never its parents, and the
+> nginx package does not ship `/var/cache/nginx` unless something on the host
+> already caches. Skip it and `nginx -t` fails with
+> `mkdir() "/var/cache/nginx/goopy_alive" failed (2: No such file or directory)`,
+> which is exactly the host-wide breakage the next paragraph warns about —
+> arriving through the install step rather than through forgetting it.
+> nginx creates `goopy_alive` itself, owned by its worker user, on first reload.
 
 > ⚠️ **Order matters, and getting it wrong is host-wide.**
 > Every generated site references the `goopy_alive` zone. A site referencing an
