@@ -2,9 +2,11 @@ use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tracing::{info, instrument};
 
+use super::readiness::{self, ReadinessBudget};
 use super::{GoopyProvisioner, dev_process, nginx, systemd};
 use crate::Goopy;
 use crate::shared_types::*;
@@ -60,8 +62,8 @@ pub struct GhostProvisioner {
 /// Ghost-specific settings, deserialized from the `[provisioner]` TOML section
 /// when `kind = "Ghost"`.
 ///
-/// These four values travel together from config to provisioner, so they are one
-/// type rather than four constructor arguments.
+/// These values travel together from config to provisioner, so they are one
+/// type rather than a handful of constructor arguments.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct GhostConfig {
     /// Prepared base Ghost install that every instance soft-links to.
@@ -80,6 +82,17 @@ pub struct GhostConfig {
     /// Unprivileged OS user the per-instance systemd unit runs as.
     #[serde(default = "default_service_user")]
     pub service_user: String,
+    /// How long a freshly started instance may take to serve, in seconds,
+    /// before the spawn is given up on and the instance marked `Failed`.
+    ///
+    /// See [`readiness`] for why the wait exists. The default has an order of
+    /// magnitude of headroom over the ~13 s a lone Ghost took to boot on the
+    /// dev droplet, because a loaded host is slow rather than broken.
+    #[serde(default = "default_ready_timeout_secs")]
+    pub ready_timeout_secs: u64,
+    /// Gap between readiness probes, in milliseconds.
+    #[serde(default = "default_ready_poll_ms")]
+    pub ready_poll_ms: u64,
 }
 
 fn default_node_bin() -> String {
@@ -88,6 +101,14 @@ fn default_node_bin() -> String {
 
 fn default_service_user() -> String {
     "goopy".to_string()
+}
+
+fn default_ready_timeout_secs() -> u64 {
+    readiness::DEFAULT_READY_TIMEOUT_SECS
+}
+
+fn default_ready_poll_ms() -> u64 {
+    readiness::DEFAULT_READY_POLL_MS
 }
 
 /// Entries symlinked from the base install: Ghost's own code, which it reads
@@ -275,6 +296,14 @@ WantedBy=multi-user.target
         format!("goopy-{slug}")
     }
 
+    /// How long to wait for a freshly started instance, and how often to ask.
+    fn readiness_budget(&self) -> ReadinessBudget {
+        ReadinessBudget {
+            timeout: Duration::from_secs(self.ghost.ready_timeout_secs),
+            poll_interval: Duration::from_millis(self.ghost.ready_poll_ms),
+        }
+    }
+
     // ── Inner provision (post-allocate steps) ───────────────────────────
 
     fn provision_inner(&self, goopy: &Goopy) -> Result<(), Error> {
@@ -292,11 +321,28 @@ WantedBy=multi-user.target
                 &[("NODE_ENV", "production")],
                 "ghost.log",
             )?;
+            readiness::wait_until_ready(
+                self.sys.as_ref(),
+                &goopy.slug,
+                goopy.port,
+                self.readiness_budget(),
+            )?;
         } else {
             systemd::install_and_start(
                 self.sys.as_ref(),
                 &Self::service_name(&goopy.slug),
                 &self.render_service_file(&goopy.slug, &goopy.working_dir),
+            )?;
+            // Before nginx, not after: the site is the visitor-facing half, and
+            // there is no point publishing a route to a Ghost that still
+            // answers its maintenance page. A `Type=simple` unit is "active"
+            // the moment `node` forks, so this is the only step that knows
+            // whether the instance actually works.
+            readiness::wait_until_ready(
+                self.sys.as_ref(),
+                &goopy.slug,
+                goopy.port,
+                self.readiness_budget(),
             )?;
             nginx::install_site(
                 self.sys.as_ref(),
@@ -360,7 +406,7 @@ impl GoopyProvisioner for GhostProvisioner {
 mod tests {
     use super::*;
     use crate::storage_allocator::PlainDirAllocator;
-    use crate::sys_utils::{MOCK_SPAWNED_PID, MockCall, MockSysRunner};
+    use crate::sys_utils::{MOCK_SPAWNED_PID, MockCall, MockProbe, MockSysRunner};
     use tempfile::{TempDir, tempdir};
 
     /// Themes a stock Ghost 5.x install ships. A fresh site activates `source`,
@@ -399,6 +445,18 @@ mod tests {
     }
 
     fn provisioner(dev_mode: bool, source: &TempDir, sys: Arc<dyn SysRunner>) -> GhostProvisioner {
+        provisioner_with_budget(dev_mode, source, sys, default_ready_timeout_secs(), 5)
+    }
+
+    /// A provisioner with an explicit readiness budget, for the tests that are
+    /// about waiting rather than about provisioning steps.
+    fn provisioner_with_budget(
+        dev_mode: bool,
+        source: &TempDir,
+        sys: Arc<dyn SysRunner>,
+        ready_timeout_secs: u64,
+        ready_poll_ms: u64,
+    ) -> GhostProvisioner {
         GhostProvisioner::new(
             "goopy.life".to_string(),
             dev_mode,
@@ -408,6 +466,8 @@ mod tests {
                 version: "5.87.1".to_string(),
                 node_bin: "/usr/bin/node".to_string(),
                 service_user: "goopy".to_string(),
+                ready_timeout_secs,
+                ready_poll_ms,
             },
             Arc::new(PlainDirAllocator),
             sys,
@@ -716,6 +776,103 @@ mod tests {
         assert_eq!(
             verb_seq,
             ["daemon-reload", "enable", "start", "ln", "reload"]
+        );
+    }
+
+    /// `Done` has to mean "serving". The nginx site is the visitor-facing half,
+    /// so it must not be published until the instance answers — otherwise the
+    /// URL is handed over while Ghost is still showing its maintenance page.
+    #[test]
+    fn prod_provision_waits_for_the_instance_before_publishing_the_nginx_site() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let mock = Arc::new(MockSysRunner::new());
+        let p = provisioner(false, &source, mock.clone());
+        p.provision(&test_goopy(&working_dir, 9876))
+            .expect("prod provision should succeed");
+
+        let calls = mock.recorded_calls();
+        let probe_at = calls
+            .iter()
+            .position(|c| matches!(c, MockCall::HttpProbe { .. }))
+            .expect("provisioning must probe the instance");
+        let site_at = calls
+            .iter()
+            .position(|c| {
+                matches!(c, MockCall::SudoWrite { path, .. }
+                    if path == "/etc/nginx/sites-available/goopy-tasty-lucky-clover")
+            })
+            .expect("provisioning must write the nginx site");
+        let start_at = calls
+            .iter()
+            .position(
+                |c| matches!(c, MockCall::SudoRun { args } if args.contains(&"start".to_string())),
+            )
+            .expect("provisioning must start the unit");
+
+        assert!(
+            start_at < probe_at && probe_at < site_at,
+            "the probe belongs between starting the unit and publishing the site"
+        );
+        assert_eq!(
+            mock.http_probes(),
+            [("127.0.0.1:9876".to_string(), "/".to_string())],
+            "the instance is probed on its own port, not through the public URL"
+        );
+    }
+
+    /// An instance that never boots must not be handed to anyone. Failing here
+    /// is what releases its port and marks it `Failed`, which `sweep()` reaps.
+    #[test]
+    fn prod_provision_fails_when_the_instance_never_serves() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        // A Ghost stuck on its maintenance page for longer than its budget.
+        let mock = Arc::new(MockSysRunner::with_probes(vec![MockProbe::Status(503)]));
+        let p = provisioner_with_budget(false, &source, mock.clone(), 1, 50);
+
+        let err = p
+            .provision(&test_goopy(&working_dir, 9876))
+            .expect_err("an instance that never serves is a failed spawn");
+
+        match err {
+            Error::ReadinessTimeout { last, .. } => {
+                assert!(last.contains("503"), "got {last:?}");
+            }
+            other => panic!("expected a readiness timeout, got {other:?}"),
+        }
+        assert!(
+            !mock
+                .sudo_write_paths()
+                .contains(&"/etc/nginx/sites-available/goopy-tasty-lucky-clover".to_string()),
+            "a Ghost that never served must never get a public route"
+        );
+        assert!(
+            !working_dir.exists(),
+            "a failed provision releases its working directory"
+        );
+    }
+
+    /// Dev mode has no nginx, but it starts the same Ghost and therefore has the
+    /// same race — a local run would otherwise report `Done` seconds early.
+    #[test]
+    fn dev_provision_also_waits_for_the_instance() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let mock = Arc::new(MockSysRunner::new());
+        let p = provisioner(true, &source, mock.clone());
+        p.provision(&test_goopy(&working_dir, 9876))
+            .expect("dev provision should succeed");
+
+        assert_eq!(
+            mock.http_probes(),
+            [("127.0.0.1:9876".to_string(), "/".to_string())]
         );
     }
 
