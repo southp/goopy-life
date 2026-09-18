@@ -809,6 +809,43 @@ async fn serve(listener: tokio::net::TcpListener, app: Router) -> std::io::Resul
 // Main
 // ---------------------------------------------------------------------------
 
+/// Sweep expired and `Failed` instances every `interval_duration`, forever.
+///
+/// The first sweep runs **at startup**, not one interval later. The sweep is
+/// the only thing that frees a capacity slot, so deferring it by a full
+/// interval meant every restart pushed it further away: with #112 deploying on
+/// each merge to trunk, an active day could postpone it indefinitely, and a fix
+/// to the teardown would not take effect until a day after it shipped (#117).
+///
+/// Sweeping at startup costs the startup path nothing. This runs on a detached
+/// task and hands the blocking work to `spawn_blocking`, so it cannot delay the
+/// listener bind — and therefore cannot turn a deploy's `systemctl is-active`
+/// check into a false negative.
+async fn run_sweeper(manager: Arc<dyn ManagerService>, interval_duration: std::time::Duration) {
+    let mut interval = tokio::time::interval(interval_duration);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        // The first tick completes immediately; every later one waits.
+        interval.tick().await;
+        let manager = Arc::clone(&manager);
+        match tokio::task::spawn_blocking(move || manager.sweep()).await {
+            Ok(Ok((swept, errors))) => {
+                if !errors.is_empty() {
+                    tracing::warn!(
+                        swept,
+                        error_count = errors.len(),
+                        "sweep completed with errors"
+                    );
+                } else {
+                    tracing::info!(swept, "sweep completed");
+                }
+            }
+            Ok(Err(e)) => tracing::error!(error = %e, "sweep failed"),
+            Err(e) => tracing::error!(error = %e, "sweep task panicked"),
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let span_events = match std::env::var("RUST_LOG_SPANS").as_deref() {
@@ -883,7 +920,6 @@ async fn main() {
 
     // Spawn the periodic sweep background task.
     {
-        let manager = Arc::clone(&state.manager);
         let interval_duration = std::time::Duration::from_secs(sweep_interval_secs);
         // `Config::from_file` already rejects a zero interval, so this only
         // fires for a `Config` built in code. Kept because the invariant
@@ -893,32 +929,7 @@ async fn main() {
             "sweep_interval_secs must be > 0 — Config::from_file enforces this \
              for configs read from disk"
         );
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(interval_duration);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            // The first tick fires immediately; skip it so the sweep runs after
-            // one full interval has elapsed rather than at startup.
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                let manager = Arc::clone(&manager);
-                match tokio::task::spawn_blocking(move || manager.sweep()).await {
-                    Ok(Ok((swept, errors))) => {
-                        if !errors.is_empty() {
-                            tracing::warn!(
-                                swept,
-                                error_count = errors.len(),
-                                "sweep completed with errors"
-                            );
-                        } else {
-                            tracing::info!(swept, "sweep completed");
-                        }
-                    }
-                    Ok(Err(e)) => tracing::error!(error = %e, "sweep failed"),
-                    Err(e) => tracing::error!(error = %e, "sweep task panicked"),
-                }
-            }
-        });
+        tokio::spawn(run_sweeper(Arc::clone(&state.manager), interval_duration));
     }
 
     let app = build_router(state, cors, &ratelimit_cfg);
@@ -1950,6 +1961,44 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "despawn timed out");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    /// A restart must not postpone the sweep by a full interval: the sweeper's
+    /// first pass runs at startup. Configured here with a day-long interval, so
+    /// the old behaviour (skip the first tick) would hang this test.
+    #[tokio::test]
+    async fn sweeper_sweeps_once_at_startup() {
+        struct SignallingManager {
+            swept: tokio::sync::mpsc::UnboundedSender<()>,
+        }
+
+        impl ManagerService for SignallingManager {
+            fn spawn(&self) -> Result<String, gl_core::Error> {
+                unimplemented!("the sweeper never spawns")
+            }
+            fn get(&self, _slug: &str) -> Result<Option<gl_core::Goopy>, gl_core::Error> {
+                unimplemented!("the sweeper never reads a single instance")
+            }
+            fn sweep(&self) -> Result<(u32, Vec<gl_core::Error>), gl_core::Error> {
+                let _ = self.swept.send(());
+                Ok((0, Vec::new()))
+            }
+            fn capacity(&self) -> Result<gl_core::Capacity, gl_core::Error> {
+                unimplemented!("the sweeper never reads capacity")
+            }
+        }
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let manager: Arc<dyn ManagerService> = Arc::new(SignallingManager { swept: tx });
+
+        let sweeper = tokio::spawn(run_sweeper(manager, std::time::Duration::from_secs(86_400)));
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the sweeper must sweep at startup, not one interval later")
+            .expect("the sweeper should still be running");
+
+        sweeper.abort();
     }
 
     // ── rate limiting ─────────────────────────────────────────────────────
