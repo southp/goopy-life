@@ -30,6 +30,54 @@ struct Cli {
     /// Path to the config file
     #[arg(long, default_value = "/opt/goopy-life/config.toml")]
     config: std::path::PathBuf,
+
+    /// Parse --config, print a summary of it, and exit without starting the
+    /// server. Exits 0 when the file is one this binary can run with, non-zero
+    /// with the parse error otherwise.
+    ///
+    /// Used by deploy/push-binary.sh to gate a deploy on the config it is about
+    /// to install, while the previous binary is still serving.
+    #[arg(long)]
+    check_config: bool,
+}
+
+/// Parse `path` and render a summary of what this binary read from it.
+///
+/// Deliberately stops at [`gl_core::Config::from_file`]: it opens no registry,
+/// binds no port and starts no background task, so it is safe to run next to a
+/// live gl-serv. Running the binary bare to test a config instead collides with
+/// the running service on `Address in use`.
+///
+/// The summary names the values that decide what the process becomes — the two
+/// kinds it will build, and the paths and address it will claim — so an
+/// operator can see that the file parsed *and* that it is the environment they
+/// meant to deploy.
+fn check_config(path: &std::path::Path) -> Result<String, gl_core::Error> {
+    let cfg = gl_core::Config::from_file(path)?;
+    Ok(format!(
+        "{} is valid\n  \
+         domain           {}\n  \
+         bind_address     {}\n  \
+         dev_mode         {}\n  \
+         provisioner      {}\n  \
+         allocator        {}\n  \
+         registry         {}\n  \
+         base_dir         {}\n  \
+         life_in_days     {}\n  \
+         max_active       {}\n  \
+         max_provisioned  {}",
+        path.display(),
+        cfg.domain,
+        cfg.bind_address,
+        cfg.dev_mode,
+        cfg.provisioner.kind(),
+        cfg.allocator.kind,
+        cfg.registry.path.display(),
+        cfg.base_dir.display(),
+        cfg.life_in_days,
+        cfg.max_active,
+        cfg.max_provisioned,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -660,6 +708,23 @@ async fn main() {
         .init();
 
     let cli = Cli::parse();
+
+    // Before anything is opened, bound or spawned: --check-config is a parse
+    // and nothing else, so it can run against a live host.
+    if cli.check_config {
+        match check_config(&cli.config) {
+            Ok(summary) => {
+                println!("{summary}");
+                return;
+            }
+            Err(e) => {
+                // `Error::Config` already renders its own "config error:"
+                // prefix, so the message is printed bare.
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     let cfg = gl_core::Config::from_file(&cli.config).unwrap_or_else(|e| {
         tracing::error!("config error: {e}");
@@ -1896,6 +1961,99 @@ mod tests {
             StatusCode::OK,
             "one visitor exhausting the liveness budget must not blank the \
              instance for everyone else on the host",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // --check-config
+    // -----------------------------------------------------------------------
+
+    const VALID_CONFIG: &str = r#"
+base_dir = "/tmp/goopy"
+domain = "goopy.life"
+life_in_days = 7
+port_range_start = 9000
+port_range_end = 9100
+dev_mode = true
+cors_origin = "https://goopy.life"
+bind_address = "127.0.0.1:8080"
+[registry]
+path = "/tmp/goopy-check.db"
+[allocator]
+kind = "PlainDir"
+[provisioner]
+kind = "Hello"
+"#;
+
+    fn write_config(toml: &str) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().expect("tempfile");
+        f.write_all(toml.as_bytes()).expect("write config");
+        f.flush().expect("flush config");
+        f
+    }
+
+    #[test]
+    fn check_config_accepts_a_valid_config_and_summarises_it() {
+        let f = write_config(VALID_CONFIG);
+        let summary = check_config(f.path()).expect("a valid config must check out");
+
+        assert!(summary.contains("is valid"), "summary was: {summary}");
+        // The values that decide what the process becomes; an operator reads
+        // these to confirm it is the environment they meant to deploy.
+        for expected in [
+            "goopy.life",
+            "127.0.0.1:8080",
+            "Hello",
+            "PlainDir",
+            "/tmp/goopy-check.db",
+        ] {
+            assert!(
+                summary.contains(expected),
+                "summary should mention {expected}, was: {summary}",
+            );
+        }
+    }
+
+    #[test]
+    fn check_config_rejects_a_config_missing_a_required_field() {
+        // Exactly the shape that took the API down: a file that predates a
+        // newly required field still parses as TOML but not as a Config.
+        let without_provisioner = VALID_CONFIG.replace("[provisioner]\nkind = \"Hello\"\n", "");
+        let f = write_config(&without_provisioner);
+
+        let err = check_config(f.path()).expect_err("a config missing `provisioner` must fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("provisioner"),
+            "the error must name the missing field, was: {message}",
+        );
+    }
+
+    #[test]
+    fn check_config_rejects_a_missing_file() {
+        let err = check_config(Path::new("/nonexistent/goopy-life/config.toml"))
+            .expect_err("a config that is not there must fail");
+        assert!(err.to_string().contains("could not read"), "was: {err}",);
+    }
+
+    #[test]
+    fn check_config_creates_no_registry_file() {
+        // The gate runs beside a live gl-serv. Opening the registry here would
+        // be a second writer against the running service's database.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry_path = dir.path().join("registry.db");
+        let toml = VALID_CONFIG.replace(
+            "/tmp/goopy-check.db",
+            registry_path.to_str().expect("utf-8 path"),
+        );
+        let f = write_config(&toml);
+
+        check_config(f.path()).expect("a valid config must check out");
+
+        assert!(
+            !registry_path.exists(),
+            "--check-config must not open the registry",
         );
     }
 }
