@@ -1999,28 +1999,7 @@ mod tests {
     /// the old behaviour (skip the first tick) would hang this test.
     #[tokio::test]
     async fn sweeper_sweeps_once_at_startup() {
-        struct SignallingManager {
-            swept: tokio::sync::mpsc::UnboundedSender<()>,
-        }
-
-        impl ManagerService for SignallingManager {
-            fn spawn(&self) -> Result<String, gl_core::Error> {
-                unimplemented!("the sweeper never spawns")
-            }
-            fn get(&self, _slug: &str) -> Result<Option<gl_core::Goopy>, gl_core::Error> {
-                unimplemented!("the sweeper never reads a single instance")
-            }
-            fn sweep(&self) -> Result<(u32, Vec<gl_core::Error>), gl_core::Error> {
-                let _ = self.swept.send(());
-                Ok((0, Vec::new()))
-            }
-            fn capacity(&self) -> Result<gl_core::Capacity, gl_core::Error> {
-                unimplemented!("the sweeper never reads capacity")
-            }
-        }
-
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let manager: Arc<dyn ManagerService> = Arc::new(SignallingManager { swept: tx });
+        let (manager, mut rx) = CountingManager::with_outcome(SweepOutcome::Ok);
 
         let sweeper = tokio::spawn(run_sweeper(manager, std::time::Duration::from_secs(86_400)));
 
@@ -2030,6 +2009,103 @@ mod tests {
             .expect("the sweeper should still be running");
 
         sweeper.abort();
+    }
+
+    /// A sweeper that swept once and then stopped would be the same silent
+    /// failure #117 is about, one interval later. Time is paused, so this pins
+    /// the interval itself rather than a real wall-clock wait.
+    #[tokio::test(start_paused = true)]
+    async fn sweeper_keeps_sweeping_at_the_configured_interval() {
+        let interval = std::time::Duration::from_secs(3_600);
+        let (manager, mut rx) = CountingManager::with_outcome(SweepOutcome::Ok);
+
+        let sweeper = tokio::spawn(run_sweeper(manager, interval));
+
+        // Startup tick.
+        rx.recv().await.expect("the sweeper must sweep at startup");
+
+        for pass in 1..=3 {
+            tokio::time::advance(interval).await;
+            rx.recv()
+                .await
+                .unwrap_or_else(|| panic!("the sweeper must sweep again on tick {pass}"));
+        }
+
+        sweeper.abort();
+    }
+
+    /// The loop must survive whatever a single sweep does to it. A `sweep` that
+    /// returns `Err`, or one that panics inside `spawn_blocking`, is logged and
+    /// the next tick still comes — otherwise one bad pass silently ends
+    /// reclamation for the life of the process.
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_or_panicking_sweep_does_not_stop_the_sweeper() {
+        let interval = std::time::Duration::from_secs(3_600);
+
+        for outcome in [SweepOutcome::Err, SweepOutcome::Panic] {
+            let (manager, mut rx) = CountingManager::with_outcome(outcome);
+            let sweeper = tokio::spawn(run_sweeper(manager, interval));
+
+            rx.recv().await.expect("the sweeper must sweep at startup");
+
+            tokio::time::advance(interval).await;
+            rx.recv()
+                .await
+                .unwrap_or_else(|| panic!("a {outcome:?} sweep must not stop the loop"));
+
+            assert!(!sweeper.is_finished(), "the sweeper must still be running");
+            sweeper.abort();
+        }
+    }
+
+    /// What a single `sweep` call does when the sweeper drives it.
+    #[derive(Clone, Copy, Debug)]
+    enum SweepOutcome {
+        Ok,
+        Err,
+        Panic,
+    }
+
+    /// Reports every `sweep` call on a channel before applying `outcome`, so a
+    /// test can count passes without waiting on wall-clock time.
+    struct CountingManager {
+        swept: tokio::sync::mpsc::UnboundedSender<()>,
+        outcome: SweepOutcome,
+    }
+
+    impl CountingManager {
+        /// Returns the manager already behind the trait object `run_sweeper`
+        /// takes, plus the receiving end of its sweep counter.
+        fn with_outcome(
+            outcome: SweepOutcome,
+        ) -> (
+            Arc<dyn ManagerService>,
+            tokio::sync::mpsc::UnboundedReceiver<()>,
+        ) {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let manager: Arc<dyn ManagerService> = Arc::new(Self { swept: tx, outcome });
+            (manager, rx)
+        }
+    }
+
+    impl ManagerService for CountingManager {
+        fn spawn(&self) -> Result<String, gl_core::Error> {
+            unimplemented!("the sweeper never spawns")
+        }
+        fn get(&self, _slug: &str) -> Result<Option<gl_core::Goopy>, gl_core::Error> {
+            unimplemented!("the sweeper never reads a single instance")
+        }
+        fn sweep(&self) -> Result<(u32, Vec<gl_core::Error>), gl_core::Error> {
+            let _ = self.swept.send(());
+            match self.outcome {
+                SweepOutcome::Ok => Ok((0, Vec::new())),
+                SweepOutcome::Err => Err(gl_core::Error::Subprocess("sweep blew up".into())),
+                SweepOutcome::Panic => panic!("sweep panicked"),
+            }
+        }
+        fn capacity(&self) -> Result<gl_core::Capacity, gl_core::Error> {
+            unimplemented!("the sweeper never reads capacity")
+        }
     }
 
     // ── rate limiting ─────────────────────────────────────────────────────
