@@ -17,7 +17,7 @@
 # this script the only writer of the remote file: a hand-edit there is
 # overwritten by the next deploy. Edit deploy/config/<env>.toml instead. A
 # config that drifts from the schema the binary expects is a crash loop —
-# gl-core's tests/deploy_configs.rs catches that at review time, and the
+# gl-core's tests/committed_configs.rs catches that at review time, and the
 # --check-config gate below catches it on the host before the swap, which is
 # what the manual production path has instead of CI.
 #
@@ -78,6 +78,14 @@ run scp -P "$PORT" "$CONFIG" "$TARGET:$REMOTE_CONFIG.new"
 # chmod first because scp's handling of the executable bit varies with the
 # transfer backend, and a gate that failed on a permission bit would block a
 # deploy for a reason that has nothing to do with the config.
+#
+# The other half of that: this execs from /tmp, so a host that mounts /tmp
+# noexec fails here with `Permission denied` -- a message that reads like a
+# config failure and is not one. The install below only *reads* /tmp/gl-serv,
+# so it never had this dependency. /tmp is a plain tmpfs on the droplets today
+# (rw,nosuid,nodev); if one is ever hardened, stage the binary somewhere
+# executable and update the install path pinned in deploy/sudoers.goopy to
+# match -- the two have to move together.
 run ssh -p "$PORT" "$TARGET" "chmod +x /tmp/gl-serv && /tmp/gl-serv --check-config --config $REMOTE_CONFIG.new"
 
 # The statements are joined with && rather than ';' on purpose: the exit status
