@@ -9,7 +9,7 @@
 # EnvironmentFile referenced from deploy/gl-serv.service instead.
 #
 # Every field here is parsed by gl_core::Config. A field the binary requires but
-# this file omits is a startup crash, which is why tests/deploy_configs.rs parses
+# this file omits is a startup crash, which is why tests/committed_configs.rs parses
 # this file on every CI run.
 
 # Base directory for goopy working directories.

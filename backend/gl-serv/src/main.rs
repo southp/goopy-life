@@ -10,8 +10,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{Duration, Utc};
 use clap::Parser;
+use gl_core::config::ProvisionerConfig;
 use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
-use gl_core::{CapacityKind, GoopyManager, RealSysRunner};
+use gl_core::{AllocatorKind, CapacityKind, GoopyManager, RealSysRunner};
 use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::key_extractor::SmartIpKeyExtractor;
@@ -30,6 +31,167 @@ struct Cli {
     /// Path to the config file
     #[arg(long, default_value = "/opt/goopy-life/config.toml")]
     config: std::path::PathBuf,
+
+    /// Parse --config, print a summary of it, and exit without starting the
+    /// server. Exits 0 when the file is one this binary can run with, non-zero
+    /// with the parse error otherwise.
+    ///
+    /// Used by deploy/push-binary.sh to gate a deploy on the config it is about
+    /// to install, while the previous binary is still serving.
+    #[arg(long)]
+    check_config: bool,
+}
+
+/// Parse `path`, check every value this binary would otherwise only discover
+/// at startup, and render a summary of what it read.
+///
+/// Deliberately stops short of opening a registry, binding a port or starting a
+/// background task, so it is safe to run next to a live gl-serv. Running the
+/// binary bare to test a config instead collides with the running service on
+/// `Address in use`.
+///
+/// Most of the validation lives in [`gl_core::Config::from_file`], so that
+/// gl-core's `tests/committed_configs.rs` catches a bad committed config at
+/// review time too. `cors_origin` is the exception and is checked here: it is
+/// only ever used as a [`HeaderValue`], and gl-core has no dependency on
+/// `http`. Host facts are checked separately again — see [`check_host_paths`].
+///
+/// The summary names the values that decide what the process becomes — the two
+/// kinds it will build, and the paths and address it will claim — so an
+/// operator can see that the file parsed *and* that it is the environment they
+/// meant to deploy.
+fn check_config(path: &std::path::Path) -> Result<(gl_core::Config, String), gl_core::Error> {
+    let cfg = gl_core::Config::from_file(path)?;
+
+    // Unchecked this is an `exit(1)` while building the router, which a deploy
+    // only reaches once it has swapped this config in and restarted the unit.
+    cfg.cors_origin.parse::<HeaderValue>().map_err(|e| {
+        gl_core::Error::Config(format!(
+            "cors_origin {:?} is not usable as a header value: {e}",
+            cfg.cors_origin
+        ))
+    })?;
+
+    // Ghost's paths are the difference between a config that starts and one
+    // that starts and then fails every spawn, so the summary names them rather
+    // than just the kind.
+    let provisioner = match &cfg.provisioner {
+        ProvisionerConfig::Hello => "Hello".to_string(),
+        ProvisionerConfig::Ghost(ghost) => format!(
+            "Ghost {} (source_dir {}, node_bin {})",
+            ghost.version,
+            ghost.source_dir.display(),
+            ghost.node_bin,
+        ),
+    };
+
+    // Same treatment for the allocator, and for the same reason: `Zfs` alone
+    // does not say which pool the instances will land in. `pool` and
+    // `quota_mb` are ignored under `PlainDir`, so printing them there would be
+    // the opposite error.
+    let allocator = match cfg.allocator.kind {
+        AllocatorKind::PlainDir => "PlainDir".to_string(),
+        AllocatorKind::Zfs => format!(
+            "Zfs (pool {}, quota {} MB)",
+            cfg.allocator.pool, cfg.allocator.quota_mb,
+        ),
+    };
+
+    // Built from pairs rather than one padded format string so the column
+    // stays aligned when a field is added: the longest key here is already
+    // wider than the block a hand-counted layout would have assumed.
+    let fields = [
+        ("domain", cfg.domain.clone()),
+        ("bind_address", cfg.bind_address.clone()),
+        ("cors_origin", cfg.cors_origin.clone()),
+        ("dev_mode", cfg.dev_mode.to_string()),
+        ("provisioner", provisioner),
+        ("allocator", allocator),
+        ("registry", cfg.registry.path.display().to_string()),
+        ("base_dir", cfg.base_dir.display().to_string()),
+        ("life_in_days", cfg.life_in_days.to_string()),
+        ("sweep_interval_secs", cfg.sweep_interval_secs.to_string()),
+        ("max_active", cfg.max_active.to_string()),
+        ("max_provisioned", cfg.max_provisioned.to_string()),
+    ];
+    let width = fields.iter().map(|(key, _)| key.len()).max().unwrap_or(0);
+
+    let mut summary = format!("{} is valid", path.display());
+    for (key, value) in fields {
+        summary.push_str(&format!("\n  {key:<width$}  {value}"));
+    }
+    Ok((cfg, summary))
+}
+
+/// Verify that the paths a configured provisioner will reach for exist on this
+/// host.
+///
+/// Split from [`check_config`] because these are *host* facts: they exist on
+/// the droplet and nowhere else, so neither CI nor gl-core's committed-config
+/// test can assert them. `--check-config` is the only step of a deploy that
+/// runs on the target host, which makes it the one place the check is possible
+/// at all.
+///
+/// Left unchecked, a typo here parses, starts, and reports `systemctl
+/// is-active` green — and then fails every `POST /goopies` at provision time.
+///
+/// `service_user` is deliberately not checked: verifying it needs an NSS
+/// lookup, and unlike these two it fails loudly at provision time rather than
+/// silently.
+fn check_host_paths(cfg: &gl_core::Config) -> Result<(), gl_core::Error> {
+    let ProvisionerConfig::Ghost(ghost) = &cfg.provisioner else {
+        return Ok(());
+    };
+
+    // Collected rather than returned one at a time: an operator fixing a
+    // prepared install wants both problems in one deploy attempt.
+    let mut problems: Vec<String> = Vec::new();
+
+    if !ghost.source_dir.is_dir() {
+        problems.push(format!(
+            "provisioner.source_dir {} is not a directory",
+            ghost.source_dir.display()
+        ));
+    } else {
+        let missing: Vec<&str> = gl_core::goopy_provisioner::ghost_provisioner::SHARED_ENTRIES
+            .iter()
+            .copied()
+            .filter(|entry| !ghost.source_dir.join(entry).exists())
+            .collect();
+        if !missing.is_empty() {
+            problems.push(format!(
+                "provisioner.source_dir {} is missing {} — it is not a prepared \
+                 Ghost install",
+                ghost.source_dir.display(),
+                missing.join(", "),
+            ));
+        }
+    }
+
+    if !is_executable(std::path::Path::new(&ghost.node_bin)) {
+        problems.push(format!(
+            "provisioner.node_bin {} is not an executable file",
+            ghost.node_bin
+        ));
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(gl_core::Error::Config(problems.join("\n")))
+    }
+}
+
+/// Whether `path` is a file with an execute bit set.
+///
+/// Any execute bit, not specifically the calling user's: the per-instance unit
+/// runs node as `service_user`, not as the deploy account running this check,
+/// so asking "can *I* execute it" would be the wrong question.
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -661,6 +823,30 @@ async fn main() {
 
     let cli = Cli::parse();
 
+    // Before anything is opened, bound or spawned: --check-config reads the
+    // file and the filesystem and nothing else, so it can run against a live
+    // host while the previous binary is still serving.
+    if cli.check_config {
+        match check_config(&cli.config) {
+            Ok((cfg, summary)) => {
+                // Printed before the host checks run, so a failure arrives
+                // next to the values it was judged against.
+                println!("{summary}");
+                if let Err(e) = check_host_paths(&cfg) {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+                return;
+            }
+            Err(e) => {
+                // `Error::Config` already renders its own "config error:"
+                // prefix, so the message is printed bare.
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let cfg = gl_core::Config::from_file(&cli.config).unwrap_or_else(|e| {
         tracing::error!("config error: {e}");
         std::process::exit(1);
@@ -699,9 +885,13 @@ async fn main() {
     {
         let manager = Arc::clone(&state.manager);
         let interval_duration = std::time::Duration::from_secs(sweep_interval_secs);
+        // `Config::from_file` already rejects a zero interval, so this only
+        // fires for a `Config` built in code. Kept because the invariant
+        // belongs where `tokio::time::interval` would otherwise panic on it.
         assert!(
             !interval_duration.is_zero(),
-            "sweep_interval_secs must be > 0 in config.toml"
+            "sweep_interval_secs must be > 0 — Config::from_file enforces this \
+             for configs read from disk"
         );
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(interval_duration);
@@ -1897,5 +2087,311 @@ mod tests {
             "one visitor exhausting the liveness budget must not blank the \
              instance for everyone else on the host",
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // --check-config
+    // -----------------------------------------------------------------------
+
+    const VALID_CONFIG: &str = r#"
+base_dir = "/tmp/goopy"
+domain = "goopy.life"
+life_in_days = 7
+port_range_start = 9000
+port_range_end = 9100
+dev_mode = true
+cors_origin = "https://goopy.life"
+bind_address = "127.0.0.1:8080"
+[registry]
+path = "/tmp/goopy-check.db"
+[allocator]
+kind = "PlainDir"
+[provisioner]
+kind = "Hello"
+"#;
+
+    fn write_config(toml: &str) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().expect("tempfile");
+        f.write_all(toml.as_bytes()).expect("write config");
+        f.flush().expect("flush config");
+        f
+    }
+
+    #[test]
+    fn check_config_accepts_a_valid_config_and_summarises_it() {
+        let f = write_config(VALID_CONFIG);
+        let (_cfg, summary) = check_config(f.path()).expect("a valid config must check out");
+
+        assert!(summary.contains("is valid"), "summary was: {summary}");
+        // The values that decide what the process becomes; an operator reads
+        // these to confirm it is the environment they meant to deploy. Every
+        // one of them is also a value the gate now validates — a summary that
+        // showed a field nothing checks is the trap this PR was fixing.
+        for expected in [
+            "goopy.life",
+            "127.0.0.1:8080",
+            "https://goopy.life",
+            "Hello",
+            "PlainDir",
+            "/tmp/goopy-check.db",
+        ] {
+            assert!(
+                summary.contains(expected),
+                "summary should mention {expected}, was: {summary}",
+            );
+        }
+    }
+
+    #[test]
+    fn check_config_rejects_a_config_missing_a_required_field() {
+        // Exactly the shape that took the API down: a file that predates a
+        // newly required field still parses as TOML but not as a Config.
+        let without_provisioner = VALID_CONFIG.replace("[provisioner]\nkind = \"Hello\"\n", "");
+        let f = write_config(&without_provisioner);
+
+        let err = check_config(f.path()).expect_err("a config missing `provisioner` must fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("provisioner"),
+            "the error must name the missing field, was: {message}",
+        );
+    }
+
+    #[test]
+    fn check_config_rejects_a_missing_file() {
+        let err = check_config(Path::new("/nonexistent/goopy-life/config.toml"))
+            .expect_err("a config that is not there must fail");
+        assert!(err.to_string().contains("could not read"), "was: {err}",);
+    }
+
+    #[test]
+    fn check_config_creates_no_registry_file() {
+        // The gate runs beside a live gl-serv. Opening the registry here would
+        // be a second writer against the running service's database.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry_path = dir.path().join("registry.db");
+        let toml = VALID_CONFIG.replace(
+            "/tmp/goopy-check.db",
+            registry_path.to_str().expect("utf-8 path"),
+        );
+        let f = write_config(&toml);
+
+        check_config(f.path()).expect("a valid config must check out");
+
+        assert!(
+            !registry_path.exists(),
+            "--check-config must not open the registry",
+        );
+    }
+
+    #[test]
+    fn check_config_names_the_pool_a_zfs_config_will_use() {
+        // `Zfs` alone is the under-reporting the summary exists to avoid: both
+        // deploy configs use it, and an operator checking a prod config by hand
+        // has nothing else to confirm it is pointed at the pool they meant.
+        let toml = VALID_CONFIG.replace(
+            "[allocator]\nkind = \"PlainDir\"",
+            "[allocator]\nkind = \"Zfs\"\npool = \"zpool_ghost\"\nquota_mb = 512",
+        );
+        let f = write_config(&toml);
+        let (_cfg, summary) = check_config(f.path()).expect("a Zfs config must check out");
+
+        for expected in ["zpool_ghost", "512"] {
+            assert!(
+                summary.contains(expected),
+                "summary should mention {expected}, was: {summary}",
+            );
+        }
+    }
+
+    #[test]
+    fn check_config_omits_pool_and_quota_for_a_plaindir_config() {
+        // The other half: both keys are ignored under PlainDir, so reporting
+        // them would be the opposite error -- a value that looks like it took
+        // effect and did not.
+        let f = write_config(&VALID_CONFIG.replace(
+            "[allocator]\nkind = \"PlainDir\"",
+            "[allocator]\nkind = \"PlainDir\"\npool = \"zpool_ignored\"\nquota_mb = 512",
+        ));
+        let (_cfg, summary) = check_config(f.path()).expect("a PlainDir config must check out");
+
+        assert!(
+            !summary.contains("zpool_ignored"),
+            "PlainDir ignores pool, so the summary must not imply otherwise: {summary}",
+        );
+    }
+
+    #[test]
+    fn check_config_rejects_an_unusable_cors_origin() {
+        // gl-core cannot catch this one: `HeaderValue` is not in its
+        // dependency tree. Left to startup it is an exit(1) after the deploy
+        // has already swapped the config in.
+        let toml = VALID_CONFIG.replace(
+            r#"cors_origin = "https://goopy.life""#,
+            "cors_origin = \"https://goopy.life\\n\"",
+        );
+        let f = write_config(&toml);
+
+        let err = check_config(f.path()).expect_err("a newline is not a header value");
+        assert!(err.to_string().contains("cors_origin"), "was: {err}");
+    }
+
+    #[test]
+    fn check_config_rejects_a_config_that_would_crash_loop_the_service() {
+        // The regression this whole pair of checks exists for: both of these
+        // parse as TOML and as a `Config`'s shape, and both abort `main()`
+        // *after* push-binary.sh has installed the binary and swapped the
+        // config -- i.e. after the outage has started.
+        for (from, to) in [
+            (
+                r#"bind_address = "127.0.0.1:8080""#,
+                r#"bind_address = "0.0.0.0""#,
+            ),
+            (
+                "dev_mode = true",
+                "dev_mode = true\nsweep_interval_secs = 0",
+            ),
+        ] {
+            let f = write_config(&VALID_CONFIG.replace(from, to));
+            let err = check_config(f.path())
+                .expect_err("a config gl-serv cannot start on must not pass the gate");
+            assert!(
+                err.to_string().contains("bind_address")
+                    || err.to_string().contains("sweep_interval_secs"),
+                "the error must name the offending key, was: {err}",
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // --check-config: host paths
+    // -----------------------------------------------------------------------
+
+    /// A Ghost config pointed at `source_dir`, with `node_bin` as its node.
+    fn ghost_config(source_dir: &std::path::Path, node_bin: &std::path::Path) -> gl_core::Config {
+        let toml = VALID_CONFIG.replace(
+            "[provisioner]\nkind = \"Hello\"",
+            &format!(
+                "[provisioner]\nkind = \"Ghost\"\nversion = \"6.63.0\"\n\
+                 source_dir = {:?}\nnode_bin = {:?}",
+                source_dir, node_bin,
+            ),
+        );
+        let f = write_config(&toml);
+        let (cfg, _) = check_config(f.path()).expect("a Ghost config parses");
+        cfg
+    }
+
+    /// A directory holding every entry the provisioner symlinks, plus an
+    /// executable standing in for node.
+    fn prepared_ghost_install() -> (tempfile::TempDir, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source_dir = dir.path().join("ghost-6.63.0");
+        std::fs::create_dir(&source_dir).expect("create source_dir");
+        for entry in gl_core::goopy_provisioner::ghost_provisioner::SHARED_ENTRIES {
+            std::fs::write(source_dir.join(entry), b"").expect("create shared entry");
+        }
+        let node_bin = dir.path().join("node");
+        std::fs::write(&node_bin, b"#!/bin/sh\n").expect("create node");
+        std::fs::set_permissions(&node_bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod node");
+        (dir, source_dir)
+    }
+
+    #[test]
+    fn check_host_paths_accepts_a_prepared_ghost_install() {
+        let (dir, source_dir) = prepared_ghost_install();
+        let cfg = ghost_config(&source_dir, &dir.path().join("node"));
+
+        check_host_paths(&cfg).expect("a prepared install must pass");
+    }
+
+    #[test]
+    fn check_host_paths_rejects_a_source_dir_that_is_not_there() {
+        // The failure CI structurally cannot see: the config parses, the
+        // service starts, `systemctl is-active` is green -- and every
+        // POST /goopies fails at provision time.
+        let (dir, _) = prepared_ghost_install();
+        let cfg = ghost_config(&dir.path().join("ghost-6.63.1"), &dir.path().join("node"));
+
+        let err = check_host_paths(&cfg).expect_err("a typo'd source_dir must fail");
+        assert!(err.to_string().contains("source_dir"), "was: {err}");
+    }
+
+    #[test]
+    fn check_host_paths_rejects_a_source_dir_that_is_not_a_ghost_install() {
+        // `is_dir` alone would pass this: the directory exists, it just is not
+        // the thing the provisioner links instances into.
+        let (dir, source_dir) = prepared_ghost_install();
+        std::fs::remove_file(source_dir.join("package.json")).expect("remove package.json");
+
+        let cfg = ghost_config(&source_dir, &dir.path().join("node"));
+        let err = check_host_paths(&cfg).expect_err("an unprepared install must fail");
+        assert!(err.to_string().contains("package.json"), "was: {err}");
+    }
+
+    #[test]
+    fn check_host_paths_rejects_a_node_bin_that_is_not_executable() {
+        let (dir, source_dir) = prepared_ghost_install();
+        let not_node = dir.path().join("node.txt");
+        std::fs::write(&not_node, b"").expect("create non-executable");
+
+        let cfg = ghost_config(&source_dir, &not_node);
+        let err = check_host_paths(&cfg).expect_err("a non-executable node_bin must fail");
+        assert!(err.to_string().contains("node_bin"), "was: {err}");
+    }
+
+    #[test]
+    fn check_host_paths_ignores_a_hello_config() {
+        // Hello has no host-side paths at all, so the check must be a no-op
+        // rather than something that has to be kept in step with it.
+        let f = write_config(VALID_CONFIG);
+        let (cfg, _) = check_config(f.path()).expect("a valid config must check out");
+
+        check_host_paths(&cfg).expect("Hello configures no host paths");
+    }
+
+    // -----------------------------------------------------------------------
+    // --check-config against the configs this repository commits
+    // -----------------------------------------------------------------------
+
+    /// The gl-serv-side counterpart to gl-core's `tests/committed_configs.rs`.
+    ///
+    /// That test covers everything `Config::from_file` validates. This one
+    /// exists for the single leg it cannot reach — `cors_origin`, which is
+    /// checked against `HeaderValue` and so lives on this side of the
+    /// dependency boundary. Without it, a committed config with an unusable
+    /// origin would still reach a droplet before anything objected.
+    ///
+    /// `check_host_paths` is deliberately *not* called here: its paths exist
+    /// only on a droplet, so asserting them in CI would fail every build.
+    #[test]
+    fn every_committed_config_passes_the_gate() {
+        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("the repository root is two levels above gl-serv");
+
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(repo_root.join("deploy/config"))
+            .expect("deploy/config should be readable — did the directory move?")
+            .map(|entry| entry.expect("readable directory entry").path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .collect();
+        files.sort();
+        // An empty deploy/config would make this vacuously green, which is the
+        // exact silence it exists to break.
+        assert!(
+            !files.is_empty(),
+            "no .toml files found in deploy/config — this test would pass by default"
+        );
+        files.push(repo_root.join("backend/config.local.toml"));
+
+        for path in files {
+            if let Err(e) = check_config(&path) {
+                panic!("{} does not pass --check-config: {e}", path.display());
+            }
+        }
     }
 }
