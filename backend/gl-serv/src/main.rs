@@ -12,7 +12,7 @@ use chrono::{Duration, Utc};
 use clap::Parser;
 use gl_core::config::ProvisionerConfig;
 use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
-use gl_core::{CapacityKind, GoopyManager, RealSysRunner};
+use gl_core::{AllocatorKind, CapacityKind, GoopyManager, RealSysRunner};
 use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::key_extractor::SmartIpKeyExtractor;
@@ -85,6 +85,18 @@ fn check_config(path: &std::path::Path) -> Result<(gl_core::Config, String), gl_
         ),
     };
 
+    // Same treatment for the allocator, and for the same reason: `Zfs` alone
+    // does not say which pool the instances will land in. `pool` and
+    // `quota_mb` are ignored under `PlainDir`, so printing them there would be
+    // the opposite error.
+    let allocator = match cfg.allocator.kind {
+        AllocatorKind::PlainDir => "PlainDir".to_string(),
+        AllocatorKind::Zfs => format!(
+            "Zfs (pool {}, quota {} MB)",
+            cfg.allocator.pool, cfg.allocator.quota_mb,
+        ),
+    };
+
     // Built from pairs rather than one padded format string so the column
     // stays aligned when a field is added: the longest key here is already
     // wider than the block a hand-counted layout would have assumed.
@@ -94,7 +106,7 @@ fn check_config(path: &std::path::Path) -> Result<(gl_core::Config, String), gl_
         ("cors_origin", cfg.cors_origin.clone()),
         ("dev_mode", cfg.dev_mode.to_string()),
         ("provisioner", provisioner),
-        ("allocator", cfg.allocator.kind.to_string()),
+        ("allocator", allocator),
         ("registry", cfg.registry.path.display().to_string()),
         ("base_dir", cfg.base_dir.display().to_string()),
         ("life_in_days", cfg.life_in_days.to_string()),
@@ -2170,6 +2182,43 @@ kind = "Hello"
         assert!(
             !registry_path.exists(),
             "--check-config must not open the registry",
+        );
+    }
+
+    #[test]
+    fn check_config_names_the_pool_a_zfs_config_will_use() {
+        // `Zfs` alone is the under-reporting the summary exists to avoid: both
+        // deploy configs use it, and an operator checking a prod config by hand
+        // has nothing else to confirm it is pointed at the pool they meant.
+        let toml = VALID_CONFIG.replace(
+            "[allocator]\nkind = \"PlainDir\"",
+            "[allocator]\nkind = \"Zfs\"\npool = \"zpool_ghost\"\nquota_mb = 512",
+        );
+        let f = write_config(&toml);
+        let (_cfg, summary) = check_config(f.path()).expect("a Zfs config must check out");
+
+        for expected in ["zpool_ghost", "512"] {
+            assert!(
+                summary.contains(expected),
+                "summary should mention {expected}, was: {summary}",
+            );
+        }
+    }
+
+    #[test]
+    fn check_config_omits_pool_and_quota_for_a_plaindir_config() {
+        // The other half: both keys are ignored under PlainDir, so reporting
+        // them would be the opposite error -- a value that looks like it took
+        // effect and did not.
+        let f = write_config(&VALID_CONFIG.replace(
+            "[allocator]\nkind = \"PlainDir\"",
+            "[allocator]\nkind = \"PlainDir\"\npool = \"zpool_ignored\"\nquota_mb = 512",
+        ));
+        let (_cfg, summary) = check_config(f.path()).expect("a PlainDir config must check out");
+
+        assert!(
+            !summary.contains("zpool_ignored"),
+            "PlainDir ignores pool, so the summary must not imply otherwise: {summary}",
         );
     }
 
