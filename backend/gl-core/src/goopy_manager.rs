@@ -1045,9 +1045,14 @@ mod tests {
         }
     }
 
-    fn manager_with_provisioner<P: GoopyProvisioner + Send + Sync + 'static>(
+    /// The one place a test `GoopyManager` is built. `manager_with_provisioner`
+    /// and `manager_with_caps` are the two narrow views onto it — every test
+    /// varies either the provisioner or the caps, never both.
+    fn manager_with<P: GoopyProvisioner + Send + Sync + 'static>(
         registry: SqliteRegistry,
         provisioner: P,
+        max_active: u32,
+        max_provisioned: u32,
     ) -> GoopyManager<SqliteRegistry, P> {
         GoopyManager::new(
             GoopyManagerConfig {
@@ -1056,12 +1061,20 @@ mod tests {
                 life_in_days: 7,
                 port_range_start: 9000,
                 port_range_end: 9100,
-                max_active: 100,
-                max_provisioned: 100,
+                max_active,
+                max_provisioned,
             },
             registry,
             provisioner,
         )
+    }
+
+    /// Caps high enough to stay out of the way; the provisioner is the variable.
+    fn manager_with_provisioner<P: GoopyProvisioner + Send + Sync + 'static>(
+        registry: SqliteRegistry,
+        provisioner: P,
+    ) -> GoopyManager<SqliteRegistry, P> {
+        manager_with(registry, provisioner, 100, 100)
     }
 
     /// The defect this issue was filed about: a sweep in which every teardown
@@ -1251,24 +1264,13 @@ mod tests {
         registry.acquire_port(slug, port, port + 1).unwrap();
     }
 
+    /// A provisioner that never objects; the caps are the variable.
     fn manager_with_caps(
         registry: SqliteRegistry,
         max_active: u32,
         max_provisioned: u32,
     ) -> GoopyManager<SqliteRegistry, NoopProvisioner> {
-        GoopyManager::new(
-            GoopyManagerConfig {
-                base_dir: PathBuf::from("/tmp"),
-                domain: "test.example".into(),
-                life_in_days: 7,
-                port_range_start: 9000,
-                port_range_end: 9100,
-                max_active,
-                max_provisioned,
-            },
-            registry,
-            NoopProvisioner,
-        )
+        manager_with(registry, NoopProvisioner, max_active, max_provisioned)
     }
 
     #[test]
