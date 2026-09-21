@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -334,6 +335,23 @@ impl Config {
                 "max_active must be <= max_provisioned".into(),
             ));
         }
+        // A zero interval cannot be turned into a `tokio::time::interval`, so
+        // gl-serv panics on it while spawning the sweep task — after the deploy
+        // has already swapped the config and restarted the unit.
+        if cfg.sweep_interval_secs == 0 {
+            return Err(Error::Config("sweep_interval_secs must be > 0".into()));
+        }
+        // gl-serv binds this verbatim. Rejecting it here rather than at
+        // `TcpListener::bind` is what lets `--check-config` catch it before the
+        // swap: a hostname or a missing port is an address the process can
+        // parse a config out of but never start on.
+        if cfg.bind_address.parse::<SocketAddr>().is_err() {
+            return Err(Error::Config(format!(
+                "bind_address must be an IP address and port, e.g. \
+                 \"127.0.0.1:3000\"; got {:?}",
+                cfg.bind_address
+            )));
+        }
         // A zero burst or period cannot be turned into a rate limiter, so reject
         // it here rather than letting gl-serv panic while building its router.
         if cfg.ratelimit.provision_burst == 0 {
@@ -551,6 +569,45 @@ kind = "PlainDir"
         let cfg = write_config(&toml).expect("diverged caps are valid");
         assert_eq!(cfg.max_active, 10);
         assert_eq!(cfg.max_provisioned, 20);
+    }
+
+    #[test]
+    fn zero_sweep_interval_rejected() {
+        // Left to gl-serv this is a panic while spawning the sweep task, which
+        // a deploy only discovers after it has swapped the config in.
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            with_caps(VALID_BASE, "sweep_interval_secs = 0")
+        );
+        let err = write_config(&toml).unwrap_err();
+        assert!(
+            matches!(err, Error::Config(ref s) if s.contains("sweep_interval_secs must be > 0")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn bind_address_without_a_port_rejected() {
+        // The shape of the typo that matters: still a valid IP, still valid
+        // TOML, and unusable as the address gl-serv listens on.
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            VALID_BASE.replace(
+                r#"bind_address = "127.0.0.1:8080""#,
+                r#"bind_address = "0.0.0.0""#
+            )
+        );
+        let err = write_config(&toml).unwrap_err();
+        assert!(
+            matches!(err, Error::Config(ref s) if s.contains("bind_address must be an IP address and port")),
+            "got {err:?}"
+        );
     }
 
     #[test]

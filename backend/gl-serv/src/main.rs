@@ -764,9 +764,13 @@ async fn main() {
     {
         let manager = Arc::clone(&state.manager);
         let interval_duration = std::time::Duration::from_secs(sweep_interval_secs);
+        // `Config::from_file` already rejects a zero interval, so this only
+        // fires for a `Config` built in code. Kept because the invariant
+        // belongs where `tokio::time::interval` would otherwise panic on it.
         assert!(
             !interval_duration.is_zero(),
-            "sweep_interval_secs must be > 0 in config.toml"
+            "sweep_interval_secs must be > 0 — Config::from_file enforces this \
+             for configs read from disk"
         );
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(interval_duration);
