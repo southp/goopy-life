@@ -107,7 +107,7 @@ It matters most on the **manual production path**: `deploy.sh` builds from
 whatever local tree the operator has, which need not be the commit CI validated,
 and nothing watches production. On the automated dev deploy it is close to
 tautological — binary and config come from the same trunk commit, and
-`deploy_configs.rs` has already parsed that config with the same `gl-core` — but
+`committed_configs.rs` has already parsed that config with the same `gl-core` — but
 it costs one ssh round trip and it is the cheap half of the guarantee.
 
 To run it by hand against a config before deploying it (from `backend/`):
@@ -196,7 +196,7 @@ Two rules keep it that way:
 - **No secrets in these files.** They are tracked in git and world-readable on
   the host. When gl-serv needs a credential, add it to a root-owned
   `EnvironmentFile` referenced from `deploy/gl-serv.service`.
-- **The schema is checked in CI.** `backend/gl-core/tests/deploy_configs.rs`
+- **The schema is checked in CI.** `backend/gl-core/tests/committed_configs.rs`
   parses every file in `deploy/config/` with `Config::from_file` on each run, so
   a newly required field fails the PR that introduces it rather than the deploy
   that follows. Adding an environment means adding a file; the test picks it up
