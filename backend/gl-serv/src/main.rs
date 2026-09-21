@@ -822,23 +822,66 @@ async fn serve(listener: tokio::net::TcpListener, app: Router) -> std::io::Resul
 /// listener bind — and therefore cannot turn a deploy's `systemctl is-active`
 /// check into a false negative.
 ///
+/// The loop waits for each sweep before the next tick, because a truthful count
+/// is exactly the thing that has to be waited for. That makes a wedged teardown
+/// expensive: `SysRunner` waits on its privileged children with no timeout
+/// (#156), so one hung `systemctl` stops every later sweep for the life of the
+/// process. Until that timeout exists, an overrunning sweep at least says so —
+/// see `warn_if_sweep_overruns`.
+///
 /// The outcome of a sweep is logged by `GoopyManager::sweep` itself and
 /// deliberately not repeated here; this function logs only the failures that
 /// `sweep` cannot log for itself.
 async fn run_sweeper(manager: Arc<dyn ManagerService>, interval_duration: std::time::Duration) {
+    // `Config::from_file` already rejects a zero interval, so this only fires
+    // for a `Config` built in code. Kept because the invariant belongs where
+    // `tokio::time::interval` would otherwise panic on it.
+    assert!(
+        !interval_duration.is_zero(),
+        "sweep_interval_secs must be > 0 — Config::from_file enforces this \
+         for configs read from disk"
+    );
+
     let mut interval = tokio::time::interval(interval_duration);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         // The first tick completes immediately; every later one waits.
         interval.tick().await;
         let manager = Arc::clone(&manager);
-        match tokio::task::spawn_blocking(move || manager.sweep()).await {
+        let sweep = tokio::task::spawn_blocking(move || manager.sweep());
+        match warn_if_sweep_overruns(sweep, interval_duration).await {
             // The `(swept, failed)` line belongs to `GoopyManager::sweep`.
             Ok(Ok(_)) => {}
             Ok(Err(e)) => tracing::error!(error = %e, "sweep failed"),
             Err(e) => tracing::error!(error = %e, "sweep task panicked"),
         }
     }
+}
+
+/// Await `sweep`, logging a warning if it has not finished within `budget`.
+///
+/// A sweep that outruns its own interval is the visible symptom of a teardown
+/// wedged on a privileged command (#156). The wait is not cut short — the count
+/// is only true once the teardown settles — but the stall stops being silent,
+/// which is the same failure mode #117 was filed about.
+async fn warn_if_sweep_overruns<T>(
+    sweep: tokio::task::JoinHandle<T>,
+    budget: std::time::Duration,
+) -> Result<T, tokio::task::JoinError> {
+    tokio::pin!(sweep);
+
+    tokio::select! {
+        result = &mut sweep => return result,
+        _ = tokio::time::sleep(budget) => {
+            tracing::warn!(
+                budget_secs = budget.as_secs(),
+                "sweep is still running a full interval after it started; \
+                 a teardown is likely wedged on a privileged command (#156)",
+            );
+        }
+    }
+
+    sweep.await
 }
 
 #[tokio::main]
@@ -913,19 +956,12 @@ async fn main() {
 
     let state = Arc::new(AppState { manager, cfg });
 
-    // Spawn the periodic sweep background task.
-    {
-        let interval_duration = std::time::Duration::from_secs(sweep_interval_secs);
-        // `Config::from_file` already rejects a zero interval, so this only
-        // fires for a `Config` built in code. Kept because the invariant
-        // belongs where `tokio::time::interval` would otherwise panic on it.
-        assert!(
-            !interval_duration.is_zero(),
-            "sweep_interval_secs must be > 0 — Config::from_file enforces this \
-             for configs read from disk"
-        );
-        tokio::spawn(run_sweeper(Arc::clone(&state.manager), interval_duration));
-    }
+    // Spawn the periodic sweep background task. `run_sweeper` asserts the
+    // interval is non-zero.
+    tokio::spawn(run_sweeper(
+        Arc::clone(&state.manager),
+        std::time::Duration::from_secs(sweep_interval_secs),
+    ));
 
     let app = build_router(state, cors, &ratelimit_cfg);
 
