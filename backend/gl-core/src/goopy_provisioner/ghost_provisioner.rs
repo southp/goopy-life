@@ -92,7 +92,12 @@ fn default_service_user() -> String {
 
 /// Entries symlinked from the base install: Ghost's own code, which it reads
 /// but never writes.
-const SHARED_ENTRIES: &[&str] = &["index.js", "core", "node_modules", "package.json"];
+///
+/// Public because `gl-serv --check-config` reads it to verify a configured
+/// `source_dir` on the host before a deploy swaps the config in. A directory
+/// that is merely present satisfies `is_dir` but is not a prepared Ghost
+/// install; tying the check to this list keeps it honest as the list changes.
+pub const SHARED_ENTRIES: &[&str] = &["index.js", "core", "node_modules", "package.json"];
 
 /// Per-instance writable directories under `content/`. Ghost creates files in
 /// all of these, so each instance needs its own.
