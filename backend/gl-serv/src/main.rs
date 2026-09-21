@@ -809,6 +809,81 @@ async fn serve(listener: tokio::net::TcpListener, app: Router) -> std::io::Resul
 // Main
 // ---------------------------------------------------------------------------
 
+/// Sweep expired and `Failed` instances every `interval_duration`, forever.
+///
+/// The first sweep runs **at startup**, not one interval later. The sweep is
+/// the only thing that frees a capacity slot, so deferring it by a full
+/// interval meant every restart pushed it further away: with #112 deploying on
+/// each merge to trunk, an active day could postpone it indefinitely, and a fix
+/// to the teardown would not take effect until a day after it shipped (#117).
+///
+/// Sweeping at startup costs the startup path nothing. This runs on a detached
+/// task and hands the blocking work to `spawn_blocking`, so it cannot delay the
+/// listener bind — and therefore cannot turn a deploy's `systemctl is-active`
+/// check into a false negative.
+///
+/// The loop waits for each sweep before the next tick, because a truthful count
+/// is exactly the thing that has to be waited for. That makes a wedged teardown
+/// expensive: `SysRunner` waits on its privileged children with no timeout
+/// (#156), so one hung `systemctl` stops every later sweep for the life of the
+/// process. Until that timeout exists, an overrunning sweep at least says so —
+/// see `warn_if_sweep_overruns`.
+///
+/// The outcome of a sweep is logged by `GoopyManager::sweep` itself and
+/// deliberately not repeated here; this function logs only the failures that
+/// `sweep` cannot log for itself.
+async fn run_sweeper(manager: Arc<dyn ManagerService>, interval_duration: std::time::Duration) {
+    // `Config::from_file` already rejects a zero interval, so this only fires
+    // for a `Config` built in code. Kept because the invariant belongs where
+    // `tokio::time::interval` would otherwise panic on it.
+    assert!(
+        !interval_duration.is_zero(),
+        "sweep_interval_secs must be > 0 — Config::from_file enforces this \
+         for configs read from disk"
+    );
+
+    let mut interval = tokio::time::interval(interval_duration);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        // The first tick completes immediately; every later one waits.
+        interval.tick().await;
+        let manager = Arc::clone(&manager);
+        let sweep = tokio::task::spawn_blocking(move || manager.sweep());
+        match warn_if_sweep_overruns(sweep, interval_duration).await {
+            // The `(swept, failed)` line belongs to `GoopyManager::sweep`.
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::error!(error = %e, "sweep failed"),
+            Err(e) => tracing::error!(error = %e, "sweep task panicked"),
+        }
+    }
+}
+
+/// Await `sweep`, logging a warning if it has not finished within `budget`.
+///
+/// A sweep that outruns its own interval is the visible symptom of a teardown
+/// wedged on a privileged command (#156). The wait is not cut short — the count
+/// is only true once the teardown settles — but the stall stops being silent,
+/// which is the same failure mode #117 was filed about.
+async fn warn_if_sweep_overruns<T>(
+    sweep: tokio::task::JoinHandle<T>,
+    budget: std::time::Duration,
+) -> Result<T, tokio::task::JoinError> {
+    tokio::pin!(sweep);
+
+    tokio::select! {
+        result = &mut sweep => return result,
+        _ = tokio::time::sleep(budget) => {
+            tracing::warn!(
+                budget_secs = budget.as_secs(),
+                "sweep is still running a full interval after it started; \
+                 a teardown is likely wedged on a privileged command (#156)",
+            );
+        }
+    }
+
+    sweep.await
+}
+
 #[tokio::main]
 async fn main() {
     let span_events = match std::env::var("RUST_LOG_SPANS").as_deref() {
@@ -881,45 +956,12 @@ async fn main() {
 
     let state = Arc::new(AppState { manager, cfg });
 
-    // Spawn the periodic sweep background task.
-    {
-        let manager = Arc::clone(&state.manager);
-        let interval_duration = std::time::Duration::from_secs(sweep_interval_secs);
-        // `Config::from_file` already rejects a zero interval, so this only
-        // fires for a `Config` built in code. Kept because the invariant
-        // belongs where `tokio::time::interval` would otherwise panic on it.
-        assert!(
-            !interval_duration.is_zero(),
-            "sweep_interval_secs must be > 0 — Config::from_file enforces this \
-             for configs read from disk"
-        );
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(interval_duration);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            // The first tick fires immediately; skip it so the sweep runs after
-            // one full interval has elapsed rather than at startup.
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                let manager = Arc::clone(&manager);
-                match tokio::task::spawn_blocking(move || manager.sweep()).await {
-                    Ok(Ok((swept, errors))) => {
-                        if !errors.is_empty() {
-                            tracing::warn!(
-                                swept,
-                                error_count = errors.len(),
-                                "sweep completed with errors"
-                            );
-                        } else {
-                            tracing::info!(swept, "sweep completed");
-                        }
-                    }
-                    Ok(Err(e)) => tracing::error!(error = %e, "sweep failed"),
-                    Err(e) => tracing::error!(error = %e, "sweep task panicked"),
-                }
-            }
-        });
-    }
+    // Spawn the periodic sweep background task. `run_sweeper` asserts the
+    // interval is non-zero.
+    tokio::spawn(run_sweeper(
+        Arc::clone(&state.manager),
+        std::time::Duration::from_secs(sweep_interval_secs),
+    ));
 
     let app = build_router(state, cors, &ratelimit_cfg);
 
@@ -1949,6 +1991,120 @@ mod tests {
         while manager.get("sweep-expired").unwrap().is_some() {
             assert!(std::time::Instant::now() < deadline, "despawn timed out");
             std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// A restart must not postpone the sweep by a full interval: the sweeper's
+    /// first pass runs at startup. Configured here with a day-long interval, so
+    /// the old behaviour (skip the first tick) would hang this test.
+    #[tokio::test]
+    async fn sweeper_sweeps_once_at_startup() {
+        let (manager, mut rx) = CountingManager::with_outcome(SweepOutcome::Ok);
+
+        let sweeper = tokio::spawn(run_sweeper(manager, std::time::Duration::from_secs(86_400)));
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the sweeper must sweep at startup, not one interval later")
+            .expect("the sweeper should still be running");
+
+        sweeper.abort();
+    }
+
+    /// A sweeper that swept once and then stopped would be the same silent
+    /// failure #117 is about, one interval later. Time is paused, so this pins
+    /// the interval itself rather than a real wall-clock wait.
+    #[tokio::test(start_paused = true)]
+    async fn sweeper_keeps_sweeping_at_the_configured_interval() {
+        let interval = std::time::Duration::from_secs(3_600);
+        let (manager, mut rx) = CountingManager::with_outcome(SweepOutcome::Ok);
+
+        let sweeper = tokio::spawn(run_sweeper(manager, interval));
+
+        // Startup tick.
+        rx.recv().await.expect("the sweeper must sweep at startup");
+
+        for pass in 1..=3 {
+            tokio::time::advance(interval).await;
+            rx.recv()
+                .await
+                .unwrap_or_else(|| panic!("the sweeper must sweep again on tick {pass}"));
+        }
+
+        sweeper.abort();
+    }
+
+    /// The loop must survive whatever a single sweep does to it. A `sweep` that
+    /// returns `Err`, or one that panics inside `spawn_blocking`, is logged and
+    /// the next tick still comes — otherwise one bad pass silently ends
+    /// reclamation for the life of the process.
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_or_panicking_sweep_does_not_stop_the_sweeper() {
+        let interval = std::time::Duration::from_secs(3_600);
+
+        for outcome in [SweepOutcome::Err, SweepOutcome::Panic] {
+            let (manager, mut rx) = CountingManager::with_outcome(outcome);
+            let sweeper = tokio::spawn(run_sweeper(manager, interval));
+
+            rx.recv().await.expect("the sweeper must sweep at startup");
+
+            tokio::time::advance(interval).await;
+            rx.recv()
+                .await
+                .unwrap_or_else(|| panic!("a {outcome:?} sweep must not stop the loop"));
+
+            assert!(!sweeper.is_finished(), "the sweeper must still be running");
+            sweeper.abort();
+        }
+    }
+
+    /// What a single `sweep` call does when the sweeper drives it.
+    #[derive(Clone, Copy, Debug)]
+    enum SweepOutcome {
+        Ok,
+        Err,
+        Panic,
+    }
+
+    /// Reports every `sweep` call on a channel before applying `outcome`, so a
+    /// test can count passes without waiting on wall-clock time.
+    struct CountingManager {
+        swept: tokio::sync::mpsc::UnboundedSender<()>,
+        outcome: SweepOutcome,
+    }
+
+    impl CountingManager {
+        /// Returns the manager already behind the trait object `run_sweeper`
+        /// takes, plus the receiving end of its sweep counter.
+        fn with_outcome(
+            outcome: SweepOutcome,
+        ) -> (
+            Arc<dyn ManagerService>,
+            tokio::sync::mpsc::UnboundedReceiver<()>,
+        ) {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let manager: Arc<dyn ManagerService> = Arc::new(Self { swept: tx, outcome });
+            (manager, rx)
+        }
+    }
+
+    impl ManagerService for CountingManager {
+        fn spawn(&self) -> Result<String, gl_core::Error> {
+            unimplemented!("the sweeper never spawns")
+        }
+        fn get(&self, _slug: &str) -> Result<Option<gl_core::Goopy>, gl_core::Error> {
+            unimplemented!("the sweeper never reads a single instance")
+        }
+        fn sweep(&self) -> Result<(u32, Vec<gl_core::Error>), gl_core::Error> {
+            let _ = self.swept.send(());
+            match self.outcome {
+                SweepOutcome::Ok => Ok((0, Vec::new())),
+                SweepOutcome::Err => Err(gl_core::Error::Subprocess("sweep blew up".into())),
+                SweepOutcome::Panic => panic!("sweep panicked"),
+            }
+        }
+        fn capacity(&self) -> Result<gl_core::Capacity, gl_core::Error> {
+            unimplemented!("the sweeper never reads capacity")
         }
     }
 
