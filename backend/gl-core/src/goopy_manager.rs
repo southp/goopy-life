@@ -291,6 +291,14 @@ where
     /// a later despawn — by hand or by the next sweep — can retry it and
     /// release the port on success.
     ///
+    /// What survives is the **row**, not the instance's data: both provisioners
+    /// call `storage.release` unconditionally and only warn if it fails, so a
+    /// teardown that errors afterwards has already removed the working
+    /// directory. So a retry is usually cheaper than the first attempt rather
+    /// than a repeat of it, and the `Failed` row is a record that something went
+    /// wrong, not a preserved scene to inspect — #118 is what gives the failure
+    /// a home that outlives the instance.
+    ///
     /// [`sweep`]: GoopyManager::sweep
     fn teardown(
         registry: &Registry,
