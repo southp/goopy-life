@@ -139,10 +139,34 @@ pub(crate) fn install_site(
 }
 
 /// Removes both the symlink and the site config, then reloads nginx.
+///
+/// The reload tolerates failure: `nginx -t` validates the *whole* of
+/// `sites-enabled`, so one unrelated broken neighbour site would otherwise make
+/// this return `Err` for an instance whose own files are already gone — and
+/// `sweep()` would then retry that instance every tick forever, never releasing
+/// its port or clearing its registry row. Both `rm -f` calls have already
+/// succeeded by the time the reload can fail, which is what makes tolerating it
+/// safe: this is a reporting problem, not a state problem. Mirrors the
+/// partial-state tolerance in [`super::systemd::stop_and_remove`].
+///
+/// The warning is the only signal a stale running config gets today. A failing
+/// `nginx -t` means *every* instance is being served from the last config that
+/// validated, so it deserves something more durable than a log line — see #118.
 pub(crate) fn remove_site(sys: &dyn SysRunner, slug: &str) -> Result<(), Error> {
     sys.sudo_run(&["rm", "-f", &enabled_path(slug)])?;
     sys.sudo_run(&["rm", "-f", &available_path(slug)])?;
-    reload(sys)
+
+    if let Err(e) = reload(sys) {
+        tracing::warn!(
+            error = %e,
+            %slug,
+            "nginx reload failed after removing the site, continuing; the site's own \
+             files are gone, but some other config in sites-enabled is broken and the \
+             running nginx config is now stale for every instance"
+        );
+    }
+
+    Ok(())
 }
 
 /// Validates the nginx config and reloads the running server.
@@ -219,6 +243,28 @@ mod tests {
                 "reload",
                 "nginx",
             ]
+        );
+    }
+
+    /// `nginx -t` validates every site in `sites-enabled`, not just this one, so
+    /// a single broken neighbour config must not block cleanup of an unrelated
+    /// instance whose own files were already removed — `sweep()` would retry it
+    /// every tick and strand it forever.
+    #[test]
+    fn remove_site_continues_when_the_config_check_fails() {
+        let sys = MockSysRunner::failing_sudo_run(|args| matches!(args, ["nginx", "-t"]));
+
+        remove_site(&sys, "tasty-lucky-clover")
+            .expect("removal must succeed even when an unrelated site fails `nginx -t`");
+
+        let args = sys.sudo_run_args();
+        assert!(
+            args.contains(&"/etc/nginx/sites-enabled/goopy-tasty-lucky-clover".to_string()),
+            "the symlink must still be removed"
+        );
+        assert!(
+            args.contains(&"/etc/nginx/sites-available/goopy-tasty-lucky-clover".to_string()),
+            "the site config must still be removed"
         );
     }
 
