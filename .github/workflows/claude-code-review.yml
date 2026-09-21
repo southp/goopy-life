@@ -31,7 +31,7 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           gh pr view "$PR" --repo "$REPO" --json body -q .body \
-            | sed 's/- \[[xX]\] \*\*Run bot review\*\*/- [ ] **Run bot review**/' \
+            | sed 's/- \[[xX]\] Run bot review/- [ ] Run bot review/' \
             | gh pr edit "$PR" --repo "$REPO" --body-file -
 
       - name: Checkout repository

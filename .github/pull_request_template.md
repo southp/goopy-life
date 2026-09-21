@@ -1,4 +1,4 @@
-- [ ] **Run bot review** — tick to kick off the Claude review. It un-ticks itself when the run starts; tick again for another round.
+- [ ] Run bot review — tick to kick off the Claude review. It un-ticks itself when the run starts; tick again for another round.
 
 ## Summary
 
