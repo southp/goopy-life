@@ -380,6 +380,13 @@ where
     /// only signal an operator has for whether capacity was reclaimed, so it
     /// must not read as a success on a run that freed nothing (#117).
     ///
+    /// **Teardowns run one after another.** Knowing an outcome means waiting for
+    /// it, so the parallelism the old detached-thread despawn gave us is gone by
+    /// construction: reclamation latency now scales with the number of rows
+    /// reaped in a pass, each paying for its own `systemctl` calls plus an
+    /// `nginx -t` and a reload. That cost is what #109 (batch the reloads) buys
+    /// back; until then a sweep over a full registry is the slow case to watch.
+    ///
     /// Meant to be called periodically (e.g. via `tokio::time::interval` in
     /// `gl-serv`), from a context where blocking is acceptable.
     ///

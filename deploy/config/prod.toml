@@ -44,6 +44,12 @@ cors_origin = "https://southp.dev"
 bind_address = "0.0.0.0:3000"
 
 # How often to sweep expired instances (seconds; 86400 = 24h).
+#
+# This deliberately diverges from gl-core's shipped default, which dropped to
+# 3600 in #117 — the interval is the worst-case delay on reclaiming a capacity
+# slot, so a day meant a full server stayed full for a day. Prod keeps 24h until
+# #147 (go live) sizes it against the real droplet; delete this note when it is
+# cut over.
 sweep_interval_secs = 86400
 
 # REVIEW: size these against the production droplet's RAM and disk, which need
