@@ -821,6 +821,10 @@ async fn serve(listener: tokio::net::TcpListener, app: Router) -> std::io::Resul
 /// task and hands the blocking work to `spawn_blocking`, so it cannot delay the
 /// listener bind — and therefore cannot turn a deploy's `systemctl is-active`
 /// check into a false negative.
+///
+/// The outcome of a sweep is logged by `GoopyManager::sweep` itself and
+/// deliberately not repeated here; this function logs only the failures that
+/// `sweep` cannot log for itself.
 async fn run_sweeper(manager: Arc<dyn ManagerService>, interval_duration: std::time::Duration) {
     let mut interval = tokio::time::interval(interval_duration);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -829,17 +833,8 @@ async fn run_sweeper(manager: Arc<dyn ManagerService>, interval_duration: std::t
         interval.tick().await;
         let manager = Arc::clone(&manager);
         match tokio::task::spawn_blocking(move || manager.sweep()).await {
-            Ok(Ok((swept, errors))) => {
-                if !errors.is_empty() {
-                    tracing::warn!(
-                        swept,
-                        error_count = errors.len(),
-                        "sweep completed with errors"
-                    );
-                } else {
-                    tracing::info!(swept, "sweep completed");
-                }
-            }
+            // The `(swept, failed)` line belongs to `GoopyManager::sweep`.
+            Ok(Ok(_)) => {}
             Ok(Err(e)) => tracing::error!(error = %e, "sweep failed"),
             Err(e) => tracing::error!(error = %e, "sweep task panicked"),
         }

@@ -432,9 +432,16 @@ where
             }
         }
 
-        // `failed` is logged unconditionally so a run that reclaimed nothing
-        // cannot be mistaken for a healthy one at a glance.
-        tracing::info!(swept, failed = errors.len(), "sweep complete");
+        // This is the sweep's single log line — `gl-serv` deliberately does not
+        // log the same outcome again, so that grepping `sweep complete` returns
+        // one record per run. `failed` is logged unconditionally, and a run that
+        // failed anything is a warning, so a run that reclaimed nothing cannot
+        // be mistaken for a healthy one at a glance.
+        if errors.is_empty() {
+            tracing::info!(swept, failed = 0, "sweep complete");
+        } else {
+            tracing::warn!(swept, failed = errors.len(), "sweep complete");
+        }
         Ok((swept, errors))
     }
 }
