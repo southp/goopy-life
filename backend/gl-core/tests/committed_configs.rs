@@ -78,6 +78,37 @@ fn no_deployed_config_enables_dev_mode() {
     }
 }
 
+/// On a deployed host nginx must be the *only* path to gl-serv.
+///
+/// A wildcard bind puts gl-serv on the public interface beside nginx, where a
+/// caller reaching it directly skips TLS and supplies its own `X-Real-IP` — the
+/// header the per-IP rate limiter keys on (#21, #105). The limiter is then not
+/// weakened but defeated, since a fresh forged IP per request empties every
+/// bucket. Asserted on the committed files rather than left to review because
+/// the exposure is invisible from the outside: everything keeps working.
+///
+/// Deployed configs only. A local run binding every interface is a reasonable
+/// thing to want (reaching the dev server from a phone) and risks nothing.
+#[test]
+fn no_deployed_config_binds_a_wildcard() {
+    for path in deployed_configs() {
+        let cfg = Config::from_file(&path).expect("deployed configs parse");
+        let addr: std::net::SocketAddr = cfg
+            .bind_address
+            .parse()
+            .expect("from_file has already rejected an unparseable bind_address");
+        assert!(
+            !addr.ip().is_unspecified(),
+            "{} binds {} — a deployed host must keep gl-serv on loopback, or the \
+             rate limiter's X-Real-IP can be forged by anyone who talks to port \
+             {} directly",
+            path.display(),
+            cfg.bind_address,
+            addr.port(),
+        );
+    }
+}
+
 #[test]
 fn the_local_config_enables_dev_mode() {
     let cfg = Config::from_file(&local_config()).expect("the local config parses");

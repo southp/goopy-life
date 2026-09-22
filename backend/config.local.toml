@@ -42,6 +42,13 @@ cors_origin = "http://localhost:3000"
 # backend work together with no edits on either side.
 bind_address = "127.0.0.1:3001"
 
+# Where nginx connects to reach gl-serv for an instance's alive-check. A
+# separate key from bind_address because the two answer different questions —
+# a wildcard is meaningful as a listen address and meaningless as a destination
+# (#149). Unset it takes bind_address's port on loopback, and dev mode renders
+# no nginx site at all, so locally it never matters.
+#   api_address = "127.0.0.1:3001"
+
 # Five minutes rather than the hourly default: locally you want to actually see
 # a sweep happen. The first one runs at startup (#117).
 sweep_interval_secs = 300
