@@ -227,6 +227,97 @@ they point at.
 
 ---
 
+## Readiness: why a spawn waits
+
+A spawn does not report `Done` when the provisioning steps return. It reports
+`Done` when the instance actually serves, and that is a deliberate extra wait of
+several seconds.
+
+Nothing in the start-up path knows whether Ghost works:
+
+* the unit is `Type=simple`, so systemd calls it active the instant `ExecStart`
+  has forked — `systemctl start` returns within milliseconds of `node` existing;
+* Ghost binds its port immediately and then answers **its own maintenance page**
+  for the whole of first boot: migrations against a brand-new SQLite file,
+  fixture seeding, theme compilation.
+
+Because Ghost is listening the entire time, a TCP-connect check would pass at
+once and prove nothing. So after starting the unit — and *before* publishing the
+nginx site — the provisioner polls `GET /` on `127.0.0.1:{port}` and accepts
+**only a real 200**. Anything else, including the maintenance response, is "not
+yet". The instance's own port is probed rather than `{slug}.{domain}`, because
+the public route goes through the `auth_request` gate, which denies anything not
+yet `Done` — probing it would deadlock.
+
+The visible effect is that the frontend keeps showing `Spawning…` for a few
+seconds longer, and the URL it eventually reveals renders Ghost on the first
+request. Before this existed, the URL was handed over roughly 13 s early and the
+only recovery on offer was the reload button (#151).
+
+### Why the probe forges two nginx headers
+
+Taking the shortcut around nginx costs the probe the request context nginx would
+have added, and Ghost does not treat that as cosmetic. It enforces its
+configured canonical `url`: a request that looks like it arrived on the wrong
+scheme is answered with a `301` to the right one, **however healthy the instance
+is**. Measured against Ghost 6.63.0 on the dev droplet, probing `GET /` on the
+instance's own port:
+
+| what the probe sends | booting | booted |
+|---|---|---|
+| nothing (bare loopback request) | `503` | **`301`** |
+| `Host:` alone | — | `301` |
+| `X-Forwarded-Proto: http` | — | `301` |
+| **`X-Forwarded-Proto: https`** | `503` | **`200`** |
+
+So a bare probe against a fully booted instance never sees a `200` and the wait
+can only end in a timeout — every spawn `Failed` after the full budget. The
+probe therefore sends the same `Host` and `X-Forwarded-Proto` that
+`nginx.rs` sets on the real route.
+
+The scheme is read from the instance's own configuration, not fixed at `https`:
+a dev instance is configured for `http://127.0.0.1:{port}` and would be
+redirected just as firmly the other way. `GhostProvisioner::instance_origin`
+is the single source of both the probe's origin and the `url` written into
+`config.production.json`, so the two cannot drift apart.
+
+This is the same wall `goopy_provisioner::nginx` documents for the production
+route; the probe hits it because it deliberately bypasses that route.
+
+### Tuning it
+
+Two keys under `[provisioner]`, when `kind = "Ghost"`:
+
+| key | default | what it does |
+|---|---|---|
+| `ready_timeout_secs` | `120` | how long an instance may take to serve before the spawn is given up on |
+| `ready_poll_ms` | `500` | gap between probes |
+
+One Ghost booting alone on the dev droplet took ~13 s, so the default timeout is
+an order of magnitude of headroom. Raise it if the host runs several instances
+at once, or if `zpool` IO is contended — a loaded host is slow, not broken.
+Lowering it below a measured boot time throws away sandboxes seconds before they
+would have worked.
+
+`ready_timeout_secs` is a real ceiling, not a floor: each probe is given no more
+than the wait has left, so a connection that hangs cannot carry a spawn past the
+configured budget.
+
+**When the budget runs out** the spawn fails: the instance ends `Failed`, its
+port is released, and `sweep()` reaps its working directory. The log line
+carries the last thing the instance said (`last probe: status 503`), which is
+what to look at first:
+
+```bash
+sudo journalctl -u gl-serv | grep 'never became ready'
+sudo journalctl -u goopy-{slug}          # what Ghost itself was doing
+```
+
+A run of these usually means the host is slower than the budget assumes, not
+that Ghost is broken.
+
+---
+
 ## Upgrading Ghost
 
 Instances are **pinned to the version they were created with**, because their
@@ -287,6 +378,9 @@ and removes the directory.
 
 Ghost is always run with `NODE_ENV=production` so it reads
 `config.production.json`; "dev mode" refers to goopy.life's mode, not Ghost's.
+
+The readiness wait applies here too — same Ghost, same first boot — so a local
+spawn also sits in `Spawning` until the instance serves.
 
 On macOS, set `node_bin` to the output of `which node` — the `/usr/bin/node`
 default is Linux-specific.

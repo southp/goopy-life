@@ -15,5 +15,5 @@ pub use shared_types::*;
 pub use slug_generator::generate_slug;
 pub use storage_allocator::{PlainDirAllocator, StorageAllocator, ZfsAllocator};
 #[cfg(any(test, feature = "test-utils"))]
-pub use sys_utils::{MockCall, MockSysRunner};
+pub use sys_utils::{MockCall, MockProbe, MockSysRunner};
 pub use sys_utils::{RealSysRunner, SysRunner};

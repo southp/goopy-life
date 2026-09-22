@@ -80,3 +80,14 @@ quota_mb = 32
 # REVIEW: production should serve real Ghost instances once #18 lands.
 # "Hello" (no-op dev provisioner) or "Ghost" (real Ghost install, #18).
 kind = "Hello"
+
+# Readiness wait — Ghost only, so commented out while kind = "Hello" (#151).
+# A spawn stays Spawning until the instance answers `GET /` with a 200, because
+# Ghost binds its port immediately and then serves its own maintenance page for
+# the whole of first boot. An instance that never answers ends Failed, with its
+# port released and its working dir reapable by the sweep. The timeout is a real
+# ceiling: no single probe is given more time than the wait has left.
+# REVIEW: size the timeout against production's boot times, which will be slower
+# than a dev droplet's if the host runs several instances at once.
+#   ready_timeout_secs = 120   # default
+#   ready_poll_ms      = 500   # default
