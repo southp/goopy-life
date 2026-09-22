@@ -288,6 +288,38 @@ impl GhostProvisioner {
             "explore": {
                 "update_url": "",
             },
+            // `privacy` defaults to `false` in Ghost's defaults.json, which
+            // makes `isPrivacyDisabled(flag)` return false for everything, so
+            // every privacy-gated feature is on. Two of them reach third
+            // parties with data that belongs to whoever is holding the
+            // sandbox:
+            //
+            //   useGravatar  — lib/image/gravatar.js and the member avatar
+            //                  service hash an email and fetch it from
+            //                  Gravatar. A visitor types a real address into
+            //                  the /ghost/ setup form, so that address reaches
+            //                  a third party.
+            //   useIndexNow  — services/indexnow-ping announces each published
+            //                  post's absolute URL to search engines. It skips
+            //                  `env == development`, but instances run under
+            //                  NODE_ENV=production, so it is live here. This
+            //                  one leaks the sandbox URL the same way the
+            //                  explore ping does.
+            //
+            // Named individually rather than with `useTinfoil: true`. Tinfoil
+            // is the broader hammer and would also switch off
+            // `useStructuredData`, which emits schema.org and OG tags in
+            // ghost_head and makes no outbound request at all. Stripping those
+            // would quietly change what a sandbox renders — the goal here is
+            // to stop instances phoning home, not to hand out a degraded Ghost.
+            //
+            // These are the only privacy flags 6.63.0 reads in `core/`; a
+            // Ghost upgrade can add more, which is why docs/GHOST_PROVISIONER.md
+            // calls this list out for re-checking.
+            "privacy": {
+                "useGravatar": false,
+                "useIndexNow": false,
+            },
             "logging": {
                 "transports": ["file", "stdout"],
                 "level": "info",
@@ -715,6 +747,65 @@ mod tests {
             cfg["explore"].get("testimonials_url").is_none(),
             "testimonials_url is a GET the admin UI makes, not a POST of our \
              data, so we deliberately leave it at Ghost's default"
+        );
+    }
+
+    /// Gravatar sends the email a visitor typed at setup to a third party, and
+    /// the IndexNow ping announces the sandbox's post URLs to search engines.
+    /// Ghost reads these as `config.get('privacy')[flag] === false`, so they
+    /// must be present and must be real booleans, not the string "false".
+    #[test]
+    fn prod_config_disables_the_privacy_gated_phone_homes() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let p = provisioner(false, &source, Arc::new(MockSysRunner::new()));
+        let raw = p
+            .render_ghost_config(&test_goopy(&working_dir, 9876))
+            .unwrap();
+        let cfg: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(
+            cfg["privacy"]["useGravatar"],
+            serde_json::Value::Bool(false),
+            "the email a visitor types at /ghost/ setup must not be hashed and \
+             sent to Gravatar"
+        );
+        assert_eq!(
+            cfg["privacy"]["useIndexNow"],
+            serde_json::Value::Bool(false),
+            "instances run under NODE_ENV=production, where the IndexNow ping \
+             is live and would announce this sandbox's post URLs to search \
+             engines"
+        );
+    }
+
+    /// `useTinfoil` would disable every privacy-gated feature in one line,
+    /// including `useStructuredData`, which only emits schema.org and OG tags
+    /// and makes no outbound request. A sandbox should render like a real
+    /// Ghost, so the flags are named individually on purpose.
+    #[test]
+    fn prod_config_leaves_render_only_privacy_features_alone() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let p = provisioner(false, &source, Arc::new(MockSysRunner::new()));
+        let raw = p
+            .render_ghost_config(&test_goopy(&working_dir, 9876))
+            .unwrap();
+        let cfg: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        assert!(
+            cfg["privacy"].get("useTinfoil").is_none(),
+            "useTinfoil is the blanket switch and would also strip structured \
+             data from the rendered pages"
+        );
+        assert!(
+            cfg["privacy"].get("useStructuredData").is_none(),
+            "structured data makes no outbound request, so it stays at Ghost's \
+             default"
         );
     }
 
