@@ -264,6 +264,30 @@ impl GhostProvisioner {
             "security": {
                 "staffDeviceVerification": false,
             },
+            // Ghost's own config.production.json points `explore.update_url`
+            // at https://explore.ghost.org/api/update, and on boot
+            // `explore-ping-service` POSTs the instance's public URL, site
+            // UUID, theme and post counts there. For a sandbox that lives a
+            // day, that publishes the address of every instance we hand out to
+            // a third party — and it happens once per instance, so it scales
+            // with traffic rather than with deployments.
+            //
+            // The empty string is load-bearing, not an unset leftover.
+            // Clearing the URL is Ghost's own supported off-switch: `ping()`
+            // opens with
+            //
+            //     const exploreUrl = this.config.get('explore:update_url');
+            //     if (!exploreUrl) { return; }
+            //
+            // Our per-instance config loads after config.production.json, so
+            // this overrides it. Filling the key in — or deleting it as dead
+            // weight — turns the ping back on.
+            //
+            // `explore.testimonials_url` is deliberately not touched: that one
+            // is a GET the admin UI makes, not a POST of our data.
+            "explore": {
+                "update_url": "",
+            },
             "logging": {
                 "transports": ["file", "stdout"],
                 "level": "info",
@@ -661,6 +685,36 @@ mod tests {
             "staff device verification must be disabled, or no one can log in \
              to an instance: Ghost 6 defaults it on and mails a code that a \
              sandbox with no mail transport can never deliver"
+        );
+    }
+
+    /// The explore ping POSTs the instance's public URL and site stats to
+    /// explore.ghost.org on every boot. Ghost gates it on the URL being
+    /// truthy, so the empty string is the off-switch — and it is exactly the
+    /// kind of line that reads like an oversight and gets "tidied up", which
+    /// is why it is pinned by a test.
+    #[test]
+    fn prod_config_disables_the_explore_ping() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let p = provisioner(false, &source, Arc::new(MockSysRunner::new()));
+        let raw = p
+            .render_ghost_config(&test_goopy(&working_dir, 9876))
+            .unwrap();
+        let cfg: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(
+            cfg["explore"]["update_url"],
+            serde_json::Value::String(String::new()),
+            "an empty explore update_url is what stops Ghost POSTing this \
+             sandbox's public URL to explore.ghost.org on boot"
+        );
+        assert!(
+            cfg["explore"].get("testimonials_url").is_none(),
+            "testimonials_url is a GET the admin UI makes, not a POST of our \
+             data, so we deliberately leave it at Ghost's default"
         );
     }
 
