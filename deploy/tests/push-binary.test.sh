@@ -77,6 +77,45 @@ assert_install_failure_propagates() {
 }
 
 
+# Asserts every `sudo install` the script would run is pinned verbatim in
+# deploy/sudoers.goopy. That drop-in whitelists exact command lines, so a mode,
+# path or argument-order change on one side alone is a bare sudo denial on the
+# droplet rather than anything self-explanatory. The commands are read out of
+# the script's own dry run instead of being restated here, so an artifact added
+# to the deploy later is covered without editing this test.
+assert_sudoers_pins_every_install() {
+    local name=$1 binary=$2 config=$3
+    CASES=$((CASES + 1))
+    local sudoers output installs unpinned=""
+    sudoers="$(cd "$(dirname "$0")/.." && pwd)/sudoers.goopy"
+    output=$(DRY_RUN=1 "$SCRIPT_UNDER_TEST" goopy@dev.example.com "$binary" "$config")
+
+    # Each install is one link of an && chain, so stop at the next operator.
+    installs=$(printf '%s\n' "$output" | grep -o 'sudo install [^&]*' | sed 's/ *$//')
+    if [[ -z "$installs" ]]; then
+        echo "FAIL — $name (no install command found in the dry run)"
+        FAILURES=$((FAILURES + 1))
+        return
+    fi
+
+    while IFS= read -r command; do
+        # sudo resolves a bare `install` through PATH to /usr/bin/install,
+        # which is the absolute path the drop-in has to spell.
+        local pinned="/usr/bin/${command#sudo }"
+        if ! grep -Fq -- "$pinned" "$sudoers"; then
+            unpinned+="       missing from sudoers.goopy: $pinned"$'\n'
+        fi
+    done <<<"$installs"
+
+    if [[ -z "$unpinned" ]]; then
+        echo "ok   — $name"
+    else
+        echo "FAIL — $name"
+        printf '%s' "$unpinned"
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
 # Asserts the config is staged in the same directory it is renamed into, which
 # is what makes the swap atomic. Compares the two paths the script actually
 # emits rather than restating them, so a change to either one is caught here.
@@ -221,6 +260,11 @@ assert_failed_gate_aborts_before_install push_binary_aborts_the_deploy_when_the_
 assert_emits push_binary_pins_the_sudoers_install_command \
     "ssh -p 22 goopy@dev.example.com sudo install -m 755 /tmp/gl-serv /opt/goopy-life/bin/gl-serv && chmod 644 $REMOTE_CFG.new && mv $REMOTE_CFG.new $REMOTE_CFG && rm /tmp/gl-serv" \
     goopy@dev.example.com "$BIN" "$CFG"
+
+# The same pinning, checked against the drop-in itself rather than a literal
+# repeated here: the assertion above catches a change to the script, this one
+# catches a change to either side that the other did not follow.
+assert_sudoers_pins_every_install push_binary_installs_only_commands_sudoers_allows "$BIN" "$CFG"
 
 # A ';' in that chain would report rm's exit status instead of install's, so a
 # sudo denial would leave the deploy green while the old binary kept running.
