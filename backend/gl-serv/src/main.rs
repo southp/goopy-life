@@ -103,6 +103,10 @@ fn check_config(path: &std::path::Path) -> Result<(gl_core::Config, String), gl_
     let fields = [
         ("domain", cfg.domain.clone()),
         ("bind_address", cfg.bind_address.clone()),
+        // Printed next to the listen address because the two are easy to
+        // conflate and used to be the same field: this is what nginx will be
+        // told to connect to in every instance's alive-check (#149).
+        ("api_address", cfg.resolved_api_address()),
         ("cors_origin", cfg.cors_origin.clone()),
         ("dev_mode", cfg.dev_mode.to_string()),
         ("provisioner", provisioner),
@@ -1030,6 +1034,7 @@ mod tests {
             dev_mode: true,
             cors_origin: "https://example.com".to_string(),
             bind_address: "127.0.0.1:0".to_string(),
+            api_address: None,
             sweep_interval_secs: 86400,
             max_active: 100,
             max_provisioned: 100,

@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -177,7 +177,27 @@ pub struct Config {
     pub port_range_end: u32,
     pub dev_mode: bool,
     pub cors_origin: String,
+    /// Where gl-serv listens. A wildcard is meaningful here and nowhere else —
+    /// see [`Config::api_address`].
     pub bind_address: String,
+    /// Where things *on the host* connect to reach gl-serv — today the
+    /// `auth_request` subrequest in every per-instance nginx site.
+    ///
+    /// Separate from [`Config::bind_address`] because the two answer different
+    /// questions, and only one of them tolerates a wildcard: `0.0.0.0` is a
+    /// perfectly good instruction to listen on every interface and a
+    /// meaningless address to connect to. Until #149 it was the same string,
+    /// which baked `proxy_pass http://0.0.0.0:3000/goopies/{slug}/alive` into
+    /// every site — working only because Linux treats a connect to `0.0.0.0` as
+    /// loopback, and leaving the alive-check for every live instance one
+    /// unrelated widening of the listen address away from breaking.
+    ///
+    /// Optional: left unset it is derived from `bind_address` by
+    /// [`Config::resolved_api_address`], which is what keeps existing configs
+    /// working. Set it explicitly only when nginx must reach gl-serv at an
+    /// address the listen address does not imply.
+    #[serde(default)]
+    pub api_address: Option<String>,
     #[serde(default = "default_sweep_interval_secs")]
     pub sweep_interval_secs: u64,
     /// Maximum number of **resident** (running) instances allowed simultaneously.
@@ -259,6 +279,38 @@ fn default_max_provisioned() -> u32 {
 }
 
 impl Config {
+    /// The address something else on the host connects to in order to reach
+    /// gl-serv, and the value a provisioner interpolates into each instance's
+    /// nginx site.
+    ///
+    /// [`Config::api_address`] when the config names one. Otherwise
+    /// `bind_address` with a wildcard replaced by the matching loopback
+    /// address, because an address naming *every* interface names no
+    /// destination: `0.0.0.0:3000` derives `127.0.0.1:3000` and `[::]:3000`
+    /// derives `[::1]:3000`, while an address that already picks an interface
+    /// — `10.0.0.5:3000`, `127.0.0.1:3000` — is a connect destination as it
+    /// stands and is kept verbatim.
+    ///
+    /// An unparseable `bind_address` comes back untouched; [`Config::from_file`]
+    /// rejects one, so that branch is unreachable for a config read from a file
+    /// and exists only so this stays total for a hand-built [`Config`].
+    pub fn resolved_api_address(&self) -> String {
+        if let Some(explicit) = &self.api_address {
+            return explicit.clone();
+        }
+        let Ok(bind) = self.bind_address.parse::<SocketAddr>() else {
+            return self.bind_address.clone();
+        };
+        if !bind.ip().is_unspecified() {
+            return bind.to_string();
+        }
+        let loopback = match bind {
+            SocketAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+            SocketAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        };
+        SocketAddr::new(loopback, bind.port()).to_string()
+    }
+
     /// Build the provisioner named by `self.provisioner.kind`.
     ///
     /// `dev_mode` is passed explicitly so callers can override the value from
@@ -273,18 +325,19 @@ impl Config {
         sys: Arc<dyn SysRunner>,
     ) -> Box<dyn GoopyProvisioner + Send + Sync> {
         let storage = self.allocator.build();
+        let api_address = self.resolved_api_address();
         match &self.provisioner {
             ProvisionerConfig::Hello => Box::new(HelloProvisioner::new(
                 self.domain.clone(),
                 dev_mode,
-                self.bind_address.clone(),
+                api_address,
                 storage,
                 sys,
             )),
             ProvisionerConfig::Ghost(ghost) => Box::new(GhostProvisioner::new(
                 self.domain.clone(),
                 dev_mode,
-                self.bind_address.clone(),
+                api_address,
                 ghost.clone(),
                 storage,
                 sys,
@@ -377,6 +430,35 @@ impl Config {
                  \"127.0.0.1:3000\"; got {:?}",
                 cfg.bind_address
             )));
+        }
+        // The provisioner interpolates this into every per-instance nginx site
+        // as a `proxy_pass` destination, so it has to be an address something
+        // can connect *to*. A wildcard is not one: it happens to reach loopback
+        // on Linux, which is exactly why `0.0.0.0` sat in every rendered site
+        // unnoticed until #149. Checking the *resolved* value rather than only
+        // an explicit `api_address` is what keeps a future widening of
+        // `bind_address` from reaching a `proxy_pass` again.
+        let api_address = cfg.resolved_api_address();
+        match api_address.parse::<SocketAddr>() {
+            Ok(addr) if addr.ip().is_unspecified() => {
+                return Err(Error::Config(format!(
+                    "api_address must be an address nginx can connect to, not a \
+                     wildcard; got {api_address:?}"
+                )));
+            }
+            Ok(addr) if addr.port() == 0 => {
+                return Err(Error::Config(format!(
+                    "api_address must name a real port; got {api_address:?} \
+                     (it takes bind_address's port when unset)"
+                )));
+            }
+            Ok(_) => {}
+            Err(_) => {
+                return Err(Error::Config(format!(
+                    "api_address must be an IP address and port, e.g. \
+                     \"127.0.0.1:3000\"; got {api_address:?}"
+                )));
+            }
         }
         // A zero burst or period cannot be turned into a rate limiter, so reject
         // it here rather than letting gl-serv panic while building its router.
@@ -632,6 +714,89 @@ kind = "PlainDir"
         let err = write_config(&toml).unwrap_err();
         assert!(
             matches!(err, Error::Config(ref s) if s.contains("bind_address must be an IP address and port")),
+            "got {err:?}"
+        );
+    }
+
+    /// Build a parseable config whose `bind_address` is `bind`, plus any extra
+    /// top-level `keys`. Both deployed configs listen on a wildcard, so this is
+    /// the shape every `api_address` assertion below starts from.
+    fn config_with(bind: &str, keys: &str) -> Result<Config, Error> {
+        let base = VALID_BASE.replace(
+            r#"bind_address = "127.0.0.1:8080""#,
+            &format!(r#"bind_address = "{bind}""#),
+        );
+        write_config(&format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            with_caps(&base, keys)
+        ))
+    }
+
+    /// The whole point of #149: a config that says "listen everywhere" must
+    /// still hand the provisioner somewhere to *connect*, without the operator
+    /// having to know that the two were ever the same field.
+    #[test]
+    fn a_wildcard_bind_address_derives_a_loopback_api_address() {
+        let cfg = config_with("0.0.0.0:3000", "").expect("should parse");
+        assert_eq!(cfg.resolved_api_address(), "127.0.0.1:3000");
+    }
+
+    /// The derived loopback follows the family of the wildcard: `127.0.0.1` is
+    /// not reachable on a host whose gl-serv only ever bound IPv6.
+    #[test]
+    fn an_ipv6_wildcard_bind_address_derives_ipv6_loopback() {
+        let cfg = config_with("[::]:3000", "").expect("should parse");
+        assert_eq!(cfg.resolved_api_address(), "[::1]:3000");
+    }
+
+    /// A listen address that already picks an interface *is* a connect
+    /// destination, so it is passed through rather than rewritten — rewriting
+    /// it to loopback would break a host that deliberately fronts gl-serv from
+    /// another address.
+    #[test]
+    fn a_specific_bind_address_is_its_own_api_address() {
+        let cfg = config_with("10.0.0.5:3000", "").expect("should parse");
+        assert_eq!(cfg.resolved_api_address(), "10.0.0.5:3000");
+    }
+
+    #[test]
+    fn an_explicit_api_address_wins_over_the_derived_one() {
+        let cfg =
+            config_with("0.0.0.0:3000", r#"api_address = "10.0.0.5:3000""#).expect("should parse");
+        assert_eq!(cfg.resolved_api_address(), "10.0.0.5:3000");
+    }
+
+    /// The wildcard must not be able to reach a `proxy_pass` by the front door
+    /// either. It resolves to loopback on Linux, so this fails silently in
+    /// production and only on the day someone runs the service elsewhere.
+    #[test]
+    fn a_wildcard_api_address_is_rejected() {
+        let err = config_with("127.0.0.1:8080", r#"api_address = "0.0.0.0:3000""#).unwrap_err();
+        assert!(
+            matches!(err, Error::Config(ref s) if s.contains("api_address must be an address nginx can connect to")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn an_api_address_without_a_port_is_rejected() {
+        let err = config_with("127.0.0.1:8080", r#"api_address = "127.0.0.1""#).unwrap_err();
+        assert!(
+            matches!(err, Error::Config(ref s) if s.contains("api_address must be an IP address and port")),
+            "got {err:?}"
+        );
+    }
+
+    /// Port 0 means "any free port" to a listener and nothing at all to a
+    /// client, so it is caught here rather than rendered into every site.
+    #[test]
+    fn a_portless_derived_api_address_is_rejected() {
+        let err = config_with("0.0.0.0:0", "").unwrap_err();
+        assert!(
+            matches!(err, Error::Config(ref s) if s.contains("api_address must name a real port")),
             "got {err:?}"
         );
     }

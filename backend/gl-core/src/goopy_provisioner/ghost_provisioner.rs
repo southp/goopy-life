@@ -52,7 +52,9 @@ use crate::sys_utils::SysRunner;
 pub struct GhostProvisioner {
     domain: String,
     dev_mode: bool,
-    /// Address on which gl-serv listens; used by nginx `auth_request` subrequests.
+    /// Address at which nginx can reach gl-serv, for the `auth_request`
+    /// subrequest in each instance's site. A connect destination, not gl-serv's
+    /// listen address — see `Config::resolved_api_address` (#149).
     api_address: String,
     ghost: GhostConfig,
     storage: Arc<dyn StorageAllocator>,
