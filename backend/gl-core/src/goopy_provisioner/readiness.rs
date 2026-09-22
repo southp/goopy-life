@@ -13,6 +13,11 @@
 //! thread, so this costs the HTTP handler nothing — the frontend simply keeps
 //! showing `Spawning…` for the extra seconds, which is what is actually true.
 //!
+//! The probe speaks to the instance the way nginx does — same `Host`, same
+//! `X-Forwarded-Proto` — because Ghost enforces its canonical `url` and answers
+//! a bare loopback request with a `301` no matter how healthy it is. See
+//! [`InstanceOrigin`].
+//!
 //! Shared rather than Ghost-specific: `HelloProvisioner` has the same race in
 //! miniature, and waking a suspended instance (#96) is the same question asked
 //! again.
@@ -22,7 +27,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 use crate::shared_types::Error;
-use crate::sys_utils::SysRunner;
+use crate::sys_utils::{HttpProbe, SysRunner};
 
 /// What the probe asks for: the instance's front page, which is exactly what
 /// the visitor is about to open.
@@ -35,6 +40,24 @@ const READY_PATH: &str = "/";
 /// another 5xx, a redirect, a reply that is not HTTP at all — is a page the
 /// visitor should not be shown yet.
 const READY_STATUS: u16 = 200;
+
+/// The origin an instance believes it is served at.
+///
+/// The probe goes to the loopback port directly, so it arrives without the
+/// `Host` and `X-Forwarded-Proto` nginx would have set — and Ghost enforces its
+/// configured canonical `url`, answering `301` to anything that looks like it
+/// came in on the wrong scheme. A fully booted instance probed bare therefore
+/// never answers `200`, which would turn the wait below into a guaranteed
+/// timeout. So the probe reconstructs what nginx presents.
+///
+/// Taken from the instance's own configuration rather than fixed at `https`:
+/// a dev instance is configured for `http://127.0.0.1:{port}` and would be
+/// redirected just as firmly the other way.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct InstanceOrigin<'a> {
+    pub scheme: &'a str,
+    pub host: &'a str,
+}
 
 /// Default ceiling on how long an instance may take to serve.
 ///
@@ -57,12 +80,15 @@ pub(crate) struct ReadinessBudget {
     pub poll_interval: Duration,
 }
 
-/// Blocks until the instance on `port` answers `GET /` with `200`.
+/// Blocks until the instance on `port` answers `GET /` with `200`, presenting
+/// itself as `origin` while it asks.
 ///
 /// Probes `127.0.0.1:{port}` directly, never the public `{slug}.{domain}` URL:
 /// that one goes through TLS and the nginx `auth_request` gate, which denies
 /// anything not yet `Done` — and the instance cannot reach `Done` until this
-/// call returns. Probing the public URL would deadlock.
+/// call returns. Probing the public URL would deadlock. `origin` is how the
+/// probe stays truthful about who it is while taking that shortcut; see
+/// [`InstanceOrigin`].
 ///
 /// Returns [`Error::ReadinessTimeout`] once the budget is spent, carrying the
 /// last thing the instance said. The caller treats that as a failed
@@ -71,6 +97,7 @@ pub(crate) fn wait_until_ready(
     sys: &dyn SysRunner,
     slug: &str,
     port: u32,
+    origin: InstanceOrigin<'_>,
     budget: ReadinessBudget,
 ) -> Result<(), Error> {
     let addr = format!("127.0.0.1:{port}");
@@ -80,7 +107,12 @@ pub(crate) fn wait_until_ready(
 
     loop {
         attempts += 1;
-        let last = match sys.http_probe(&addr, READY_PATH) {
+        let last = match sys.http_probe(HttpProbe {
+            addr: &addr,
+            host: origin.host,
+            scheme: origin.scheme,
+            path: READY_PATH,
+        }) {
             Ok(READY_STATUS) => {
                 info!(
                     slug,
@@ -126,12 +158,26 @@ mod tests {
         }
     }
 
+    /// The origin a production instance is configured for.
+    fn prod_origin() -> InstanceOrigin<'static> {
+        InstanceOrigin {
+            scheme: "https",
+            host: "tasty-lucky-clover.goopy.life",
+        }
+    }
+
     #[test]
     fn returns_as_soon_as_the_instance_serves() {
         let sys = MockSysRunner::with_probes(vec![MockProbe::Status(200)]);
 
-        wait_until_ready(&sys, "tasty-lucky-clover", 9876, quick_budget())
-            .expect("a serving instance is ready");
+        wait_until_ready(
+            &sys,
+            "tasty-lucky-clover",
+            9876,
+            prod_origin(),
+            quick_budget(),
+        )
+        .expect("a serving instance is ready");
 
         assert_eq!(
             sys.http_probes().len(),
@@ -152,8 +198,14 @@ mod tests {
             MockProbe::Status(200),
         ]);
 
-        wait_until_ready(&sys, "tasty-lucky-clover", 9876, quick_budget())
-            .expect("an instance that boots within the budget is ready");
+        wait_until_ready(
+            &sys,
+            "tasty-lucky-clover",
+            9876,
+            prod_origin(),
+            quick_budget(),
+        )
+        .expect("an instance that boots within the budget is ready");
 
         assert_eq!(
             sys.http_probes().len(),
@@ -166,7 +218,14 @@ mod tests {
     fn probes_the_instance_port_directly_rather_than_the_public_url() {
         let sys = MockSysRunner::new();
 
-        wait_until_ready(&sys, "tasty-lucky-clover", 9876, quick_budget()).unwrap();
+        wait_until_ready(
+            &sys,
+            "tasty-lucky-clover",
+            9876,
+            prod_origin(),
+            quick_budget(),
+        )
+        .unwrap();
 
         assert_eq!(
             sys.http_probes(),
@@ -180,8 +239,14 @@ mod tests {
     fn gives_up_once_the_budget_is_spent_and_reports_the_last_answer() {
         let sys = MockSysRunner::with_probes(vec![MockProbe::Status(503)]);
 
-        let err = wait_until_ready(&sys, "tasty-lucky-clover", 9876, quick_budget())
-            .expect_err("an instance that never boots must not be handed over");
+        let err = wait_until_ready(
+            &sys,
+            "tasty-lucky-clover",
+            9876,
+            prod_origin(),
+            quick_budget(),
+        )
+        .expect_err("an instance that never boots must not be handed over");
 
         match err {
             Error::ReadinessTimeout { slug, last, .. } => {
@@ -205,10 +270,66 @@ mod tests {
         // answer, and it is not a page the visitor should be shown.
         let sys = MockSysRunner::with_probes(vec![MockProbe::Status(302)]);
 
-        let err = wait_until_ready(&sys, "tasty-lucky-clover", 9876, quick_budget())
-            .expect_err("only a real 200 counts as serving");
+        let err = wait_until_ready(
+            &sys,
+            "tasty-lucky-clover",
+            9876,
+            prod_origin(),
+            quick_budget(),
+        )
+        .expect_err("only a real 200 counts as serving");
 
         assert!(matches!(err, Error::ReadinessTimeout { .. }), "got {err:?}");
+    }
+
+    /// What the dev droplet actually answers when the probe arrives without the
+    /// headers nginx sets. Pinned so that a future change to the request cannot
+    /// quietly reintroduce a wait that a healthy instance can never satisfy.
+    #[test]
+    fn a_301_is_never_ready() {
+        let sys = MockSysRunner::with_probes(vec![MockProbe::Status(301)]);
+
+        let err = wait_until_ready(
+            &sys,
+            "tasty-lucky-clover",
+            9876,
+            prod_origin(),
+            quick_budget(),
+        )
+        .expect_err("a redirect is not the page the visitor asked for");
+
+        assert!(matches!(err, Error::ReadinessTimeout { .. }), "got {err:?}");
+    }
+
+    /// The probe has to claim the origin the instance serves, not the loopback
+    /// socket it is reached on.
+    #[test]
+    fn presents_the_instance_origin_to_every_probe() {
+        let sys = MockSysRunner::with_probes(vec![MockProbe::Status(503), MockProbe::Status(200)]);
+
+        wait_until_ready(
+            &sys,
+            "tasty-lucky-clover",
+            9876,
+            prod_origin(),
+            quick_budget(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            sys.http_probe_origins(),
+            [
+                (
+                    "https".to_string(),
+                    "tasty-lucky-clover.goopy.life".to_string()
+                ),
+                (
+                    "https".to_string(),
+                    "tasty-lucky-clover.goopy.life".to_string()
+                ),
+            ],
+            "Ghost redirects anything that disagrees with its canonical url"
+        );
     }
 
     #[test]
@@ -220,7 +341,7 @@ mod tests {
         };
 
         let started = Instant::now();
-        wait_until_ready(&sys, "tasty-lucky-clover", 9876, budget).unwrap_err();
+        wait_until_ready(&sys, "tasty-lucky-clover", 9876, prod_origin(), budget).unwrap_err();
 
         assert!(
             started.elapsed() < Duration::from_millis(500),

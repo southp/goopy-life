@@ -254,6 +254,36 @@ seconds longer, and the URL it eventually reveals renders Ghost on the first
 request. Before this existed, the URL was handed over roughly 13 s early and the
 only recovery on offer was the reload button (#151).
 
+### Why the probe forges two nginx headers
+
+Taking the shortcut around nginx costs the probe the request context nginx would
+have added, and Ghost does not treat that as cosmetic. It enforces its
+configured canonical `url`: a request that looks like it arrived on the wrong
+scheme is answered with a `301` to the right one, **however healthy the instance
+is**. Measured against Ghost 6.63.0 on the dev droplet, probing `GET /` on the
+instance's own port:
+
+| what the probe sends | booting | booted |
+|---|---|---|
+| nothing (bare loopback request) | `503` | **`301`** |
+| `Host:` alone | — | `301` |
+| `X-Forwarded-Proto: http` | — | `301` |
+| **`X-Forwarded-Proto: https`** | `503` | **`200`** |
+
+So a bare probe against a fully booted instance never sees a `200` and the wait
+can only end in a timeout — every spawn `Failed` after the full budget. The
+probe therefore sends the same `Host` and `X-Forwarded-Proto` that
+`nginx.rs` sets on the real route.
+
+The scheme is read from the instance's own configuration, not fixed at `https`:
+a dev instance is configured for `http://127.0.0.1:{port}` and would be
+redirected just as firmly the other way. `GhostProvisioner::instance_origin`
+is the single source of both the probe's origin and the `url` written into
+`config.production.json`, so the two cannot drift apart.
+
+This is the same wall `goopy_provisioner::nginx` documents for the production
+route; the probe hits it because it deliberately bypasses that route.
+
 ### Tuning it
 
 Two keys under `[provisioner]`, when `kind = "Ghost"`:

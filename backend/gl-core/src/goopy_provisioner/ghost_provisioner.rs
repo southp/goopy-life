@@ -197,16 +197,29 @@ impl GhostProvisioner {
 
     // ── Template rendering ──────────────────────────────────────────────
 
-    /// Public URL Ghost is told to serve itself at.
+    /// Scheme and host Ghost is told to serve itself at.
     ///
-    /// In production this is the nginx-fronted subdomain; in dev mode there is
-    /// no proxy, so the instance is addressed directly on its assigned port.
-    fn instance_url(&self, slug: &str, port: u32) -> String {
+    /// In production this is the nginx-fronted subdomain over TLS; in dev mode
+    /// there is no proxy, so the instance is addressed directly on its assigned
+    /// port over plain HTTP.
+    ///
+    /// The readiness probe reads this too, not just the rendered config: Ghost
+    /// redirects any request that disagrees with its canonical `url`, so a
+    /// probe that claimed the wrong scheme would never see a `200` from a
+    /// perfectly healthy instance. Deriving both from one place is what keeps
+    /// them from drifting apart.
+    fn instance_origin(&self, slug: &str, port: u32) -> (&'static str, String) {
         if self.dev_mode {
-            format!("http://127.0.0.1:{port}")
+            ("http", format!("127.0.0.1:{port}"))
         } else {
-            format!("https://{}.{}", slug, self.domain)
+            ("https", format!("{}.{}", slug, self.domain))
         }
+    }
+
+    /// Public URL Ghost is told to serve itself at.
+    fn instance_url(&self, slug: &str, port: u32) -> String {
+        let (scheme, host) = self.instance_origin(slug, port);
+        format!("{scheme}://{host}")
     }
 
     /// Renders the per-instance `config.production.json`.
@@ -326,10 +339,15 @@ WantedBy=multi-user.target
                 &[("NODE_ENV", "production")],
                 "ghost.log",
             )?;
+            let (scheme, host) = self.instance_origin(&goopy.slug, goopy.port);
             readiness::wait_until_ready(
                 self.sys.as_ref(),
                 &goopy.slug,
                 goopy.port,
+                readiness::InstanceOrigin {
+                    scheme,
+                    host: &host,
+                },
                 self.readiness_budget(),
             )?;
         } else {
@@ -343,10 +361,15 @@ WantedBy=multi-user.target
             // answers its maintenance page. A `Type=simple` unit is "active"
             // the moment `node` forks, so this is the only step that knows
             // whether the instance actually works.
+            let (scheme, host) = self.instance_origin(&goopy.slug, goopy.port);
             readiness::wait_until_ready(
                 self.sys.as_ref(),
                 &goopy.slug,
                 goopy.port,
+                readiness::InstanceOrigin {
+                    scheme,
+                    host: &host,
+                },
                 self.readiness_budget(),
             )?;
             nginx::install_site(
@@ -826,6 +849,77 @@ mod tests {
             [("127.0.0.1:9876".to_string(), "/".to_string())],
             "the instance is probed on its own port, not through the public URL"
         );
+    }
+
+    /// Measured on the dev droplet: a fully booted Ghost 6.63.0 answers `301`,
+    /// not `200`, to a bare loopback request, because it enforces its canonical
+    /// `https://{slug}.{domain}` url. The probe takes a shortcut around nginx
+    /// and so has to carry the origin nginx would have forwarded, or the wait
+    /// can only ever end in a timeout against a perfectly healthy instance.
+    #[test]
+    fn prod_probe_claims_the_https_origin_the_instance_serves() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let mock = Arc::new(MockSysRunner::new());
+        let p = provisioner(false, &source, mock.clone());
+        p.provision(&test_goopy(&working_dir, 9876))
+            .expect("prod provision should succeed");
+
+        assert_eq!(
+            mock.http_probe_origins(),
+            [(
+                "https".to_string(),
+                "tasty-lucky-clover.goopy.life".to_string()
+            )],
+            "the probe must present the origin Ghost is configured for"
+        );
+    }
+
+    /// The mirror image, and why the scheme cannot be a constant: a dev
+    /// instance's canonical url is `http://127.0.0.1:{port}`, so a probe
+    /// claiming `https` would be redirected exactly as firmly.
+    #[test]
+    fn dev_probe_claims_the_http_origin_the_instance_serves() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let mock = Arc::new(MockSysRunner::new());
+        let p = provisioner(true, &source, mock.clone());
+        p.provision(&test_goopy(&working_dir, 9876))
+            .expect("dev provision should succeed");
+
+        assert_eq!(
+            mock.http_probe_origins(),
+            [("http".to_string(), "127.0.0.1:9876".to_string())],
+            "a dev instance serves itself over plain HTTP on its own port"
+        );
+    }
+
+    /// The probe origin and the url written into `config.production.json` are
+    /// derived from one place, so they cannot drift into disagreeing.
+    #[test]
+    fn the_probe_origin_matches_the_url_ghost_is_configured_with() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        for dev_mode in [false, true] {
+            let p = provisioner(dev_mode, &source, Arc::new(MockSysRunner::new()));
+            let goopy = test_goopy(&working_dir, 9876);
+            let cfg: serde_json::Value =
+                serde_json::from_str(&p.render_ghost_config(&goopy).unwrap()).unwrap();
+            let (scheme, host) = p.instance_origin(&goopy.slug, goopy.port);
+
+            assert_eq!(
+                cfg["url"],
+                format!("{scheme}://{host}"),
+                "dev_mode={dev_mode}: the probe would claim an origin Ghost \
+                 does not serve"
+            );
+        }
     }
 
     /// An instance that never boots must not be handed to anyone. Failing here

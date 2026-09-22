@@ -46,8 +46,8 @@ pub trait SysRunner: Send + Sync {
     /// trusted to validate a string.
     fn kill_pid(&self, pid: u32) -> Result<(), Error>;
 
-    /// Send `GET {path}` to `addr` (a `host:port`) and return the HTTP status
-    /// code from the response's status line.
+    /// Ask an instance for one page and return the HTTP status code from the
+    /// response's status line.
     ///
     /// This is the readiness seam. A booting service binds its port long before
     /// it serves anything — Ghost answers its own maintenance page for the whole
@@ -58,7 +58,40 @@ pub trait SysRunner: Send + Sync {
     /// reply that is not an HTTP status line. For a caller polling a service
     /// that is still starting, that is a not-ready observation like any other,
     /// not a fatal condition.
-    fn http_probe(&self, addr: &str, path: &str) -> Result<u16, Error>;
+    fn http_probe(&self, req: HttpProbe<'_>) -> Result<u16, Error>;
+}
+
+/// One readiness probe: what to ask, and whom to claim to be while asking.
+///
+/// The probe connects to the loopback port directly, so it arrives without any
+/// of the context nginx would have added. That is not a detail it can ignore:
+/// an application that enforces a canonical URL answers a bare loopback request
+/// with a redirect rather than the page, however healthy it is. So the probe
+/// reconstructs the origin nginx presents — see [`HttpProbe::host`] and
+/// [`HttpProbe::scheme`].
+#[derive(Debug, Clone, Copy)]
+pub struct HttpProbe<'a> {
+    /// Where to connect: a `host:port`, always loopback.
+    pub addr: &'a str,
+    /// What to send as `Host:`, mirroring nginx's `proxy_set_header Host $host`
+    /// — the origin the instance is configured to serve, not `addr`.
+    pub host: &'a str,
+    /// What to send as `X-Forwarded-Proto:`, mirroring nginx's
+    /// `proxy_set_header X-Forwarded-Proto $scheme`.
+    ///
+    /// Load-bearing, and the reason this struct exists. Ghost enforces its
+    /// configured canonical `url`: told the wrong scheme it answers `301` to
+    /// every request, including a fully booted one, so a readiness caller
+    /// allowlisting `200` would wait out its whole budget against a healthy
+    /// instance. Measured on the dev droplet against Ghost 6.63.0 — see the
+    /// module docs on `goopy_provisioner::nginx`, which hit the same wall.
+    ///
+    /// It must be the scheme of the instance's *own* canonical URL, not a
+    /// constant: claiming `https` to an instance configured for `http` earns
+    /// the same redirect in the opposite direction.
+    pub scheme: &'a str,
+    /// The path to request.
+    pub path: &'a str,
 }
 
 /// Per-probe connect, write and read timeout.
@@ -205,19 +238,22 @@ impl SysRunner for RealSysRunner {
     /// gl-core has no HTTP client dependency, and one probe of one status line
     /// does not justify growing one. Only the status line is read; the
     /// connection is then dropped, which `Connection: close` makes clean.
-    fn http_probe(&self, addr: &str, path: &str) -> Result<u16, Error> {
-        // `path` is written straight into the request line, so a stray CR or LF
-        // would be request splitting. Every caller passes a literal today; this
-        // keeps that from being load-bearing.
-        if path.chars().any(|c| c.is_control() || c == ' ') {
-            return Err(Error::Invalid);
+    fn http_probe(&self, req: HttpProbe<'_>) -> Result<u16, Error> {
+        // Every one of these is interpolated into the request, so a stray CR or
+        // LF would be request splitting. Callers pass literals and a slug-built
+        // host today; this keeps that from being load-bearing.
+        for field in [req.path, req.host, req.scheme] {
+            if field.chars().any(|c| c.is_control() || c == ' ') {
+                return Err(Error::Invalid);
+            }
         }
 
-        let socket = addr
+        let socket = req
+            .addr
             .to_socket_addrs()
             .map_err(Error::Io)?
             .next()
-            .ok_or_else(|| Error::Config(format!("no socket address for {addr:?}")))?;
+            .ok_or_else(|| Error::Config(format!("no socket address for {:?}", req.addr)))?;
 
         let stream = TcpStream::connect_timeout(&socket, PROBE_IO_TIMEOUT).map_err(Error::Io)?;
         stream
@@ -227,12 +263,25 @@ impl SysRunner for RealSysRunner {
             .set_write_timeout(Some(PROBE_IO_TIMEOUT))
             .map_err(Error::Io)?;
 
+        // `Host` and `X-Forwarded-Proto` are what nginx would have added; see
+        // the docs on `HttpProbe`. Without them a healthy Ghost answers 301.
+        //
+        // Built as one string and written once: `write!` straight at the
+        // unbuffered stream would put each piece on the wire separately, and a
+        // server that reads the request in one go would see only the first few
+        // bytes.
+        let request = format!(
+            "GET {path} HTTP/1.1\r\n\
+             Host: {host}\r\n\
+             X-Forwarded-Proto: {scheme}\r\n\
+             User-Agent: goopy-life-readiness\r\n\
+             Connection: close\r\n\r\n",
+            path = req.path,
+            host = req.host,
+            scheme = req.scheme,
+        );
         let mut writer = &stream;
-        write!(
-            writer,
-            "GET {path} HTTP/1.1\r\nHost: {addr}\r\nUser-Agent: goopy-life-readiness\r\nConnection: close\r\n\r\n"
-        )
-        .map_err(Error::Io)?;
+        writer.write_all(request.as_bytes()).map_err(Error::Io)?;
         writer.flush().map_err(Error::Io)?;
 
         let mut status_line = String::new();
@@ -241,7 +290,7 @@ impl SysRunner for RealSysRunner {
             .map_err(Error::Io)?;
 
         let code = parse_status_code(status_line.trim_end())?;
-        debug!(addr, path, code, "http probe");
+        debug!(addr = req.addr, path = req.path, code, "http probe");
         Ok(code)
     }
 }
@@ -302,6 +351,8 @@ pub enum MockCall {
     },
     HttpProbe {
         addr: String,
+        host: String,
+        scheme: String,
         path: String,
     },
 }
@@ -343,7 +394,24 @@ impl MockSysRunner {
             .unwrap()
             .iter()
             .filter_map(|c| match c {
-                MockCall::HttpProbe { addr, path } => Some((addr.clone(), path.clone())),
+                MockCall::HttpProbe { addr, path, .. } => Some((addr.clone(), path.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The `scheme`/`host` origins each `http_probe` claimed, in call order.
+    ///
+    /// Kept apart from [`Self::http_probes`] so that tests about *where* the
+    /// probe went and tests about *who it said it was* stay readable
+    /// separately.
+    pub fn http_probe_origins(&self) -> Vec<(String, String)> {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| match c {
+                MockCall::HttpProbe { scheme, host, .. } => Some((scheme.clone(), host.clone())),
                 _ => None,
             })
             .collect()
@@ -462,10 +530,12 @@ impl SysRunner for MockSysRunner {
         Ok(())
     }
 
-    fn http_probe(&self, addr: &str, path: &str) -> Result<u16, Error> {
+    fn http_probe(&self, req: HttpProbe<'_>) -> Result<u16, Error> {
         self.calls.lock().unwrap().push(MockCall::HttpProbe {
-            addr: addr.to_string(),
-            path: path.to_string(),
+            addr: req.addr.to_string(),
+            host: req.host.to_string(),
+            scheme: req.scheme.to_string(),
+            path: req.path.to_string(),
         });
 
         let mut script = self.probe_script.lock().unwrap();
@@ -480,7 +550,8 @@ impl SysRunner for MockSysRunner {
         match answer {
             MockProbe::Status(code) => Ok(code),
             MockProbe::Unreachable => Err(Error::Subprocess(format!(
-                "mock: connection refused for {addr}"
+                "mock: connection refused for {}",
+                req.addr
             ))),
         }
     }
@@ -491,6 +562,7 @@ mod tests {
     use super::*;
     use std::io::Read;
     use std::net::TcpListener;
+    use std::sync::mpsc::{self, Receiver};
 
     /// Serves `response` once on a loopback port and returns its address.
     ///
@@ -498,21 +570,48 @@ mod tests {
     /// hand-rolled request is one a server accepts and that the status line is
     /// read back off the wire.
     fn serve_once(response: &'static str) -> String {
+        serve_once_recording(response).0
+    }
+
+    /// As [`serve_once`], but also hands back the bytes the client sent, so a
+    /// test can assert on the request the probe actually put on the wire.
+    fn serve_once_recording(response: &'static str) -> (String, Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
-            let mut buf = [0u8; 1024];
-            let _ = stream.read(&mut buf);
+            // Read until the blank line that ends the headers: a request can
+            // arrive in more than one segment, and a single `read` would
+            // capture only the first.
+            let mut req = Vec::new();
+            let mut buf = [0u8; 256];
+            while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => req.extend_from_slice(&buf[..n]),
+                }
+            }
+            let _ = tx.send(String::from_utf8_lossy(&req).into_owned());
             let _ = stream.write_all(response.as_bytes());
         });
-        addr
+        (addr, rx)
+    }
+
+    /// A probe of `addr` with the defaults the readiness caller uses.
+    fn probe_of<'a>(addr: &'a str, path: &'a str) -> HttpProbe<'a> {
+        HttpProbe {
+            addr,
+            host: "tasty-lucky-clover.example.test",
+            scheme: "https",
+            path,
+        }
     }
 
     #[test]
     fn http_probe_reports_the_status_code_of_a_serving_instance() {
         let addr = serve_once("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
-        assert_eq!(RealSysRunner.http_probe(&addr, "/").unwrap(), 200);
+        assert_eq!(RealSysRunner.http_probe(probe_of(&addr, "/")).unwrap(), 200);
     }
 
     /// The whole reason the probe speaks HTTP: Ghost binds its port and answers
@@ -521,7 +620,58 @@ mod tests {
     #[test]
     fn http_probe_reports_a_maintenance_response_rather_than_succeeding() {
         let addr = serve_once("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n");
-        assert_eq!(RealSysRunner.http_probe(&addr, "/").unwrap(), 503);
+        assert_eq!(RealSysRunner.http_probe(probe_of(&addr, "/")).unwrap(), 503);
+    }
+
+    /// The regression test for the bug the dev droplet caught: probed without
+    /// the headers nginx sets, a fully booted Ghost answers `301` forever, so
+    /// the readiness wait could only ever time out. The probe has to present
+    /// the origin the instance is configured for.
+    #[test]
+    fn http_probe_presents_the_origin_nginx_would_have_forwarded() {
+        let (addr, requests) = serve_once_recording("HTTP/1.1 200 OK\r\n\r\n");
+        RealSysRunner
+            .http_probe(HttpProbe {
+                addr: &addr,
+                host: "tasty-lucky-clover.goopy.life",
+                scheme: "https",
+                path: "/",
+            })
+            .unwrap();
+
+        let req = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            req.contains("\r\nHost: tasty-lucky-clover.goopy.life\r\n"),
+            "the instance must be addressed by the origin it serves, not by \
+             the loopback socket, got:\n{req}"
+        );
+        assert!(
+            req.contains("\r\nX-Forwarded-Proto: https\r\n"),
+            "without this header Ghost answers 301 however healthy it is, \
+             got:\n{req}"
+        );
+    }
+
+    /// The mirror image, and why the scheme is not a constant: a dev instance
+    /// is configured for `http://127.0.0.1:{port}` and redirects just as firmly
+    /// if the probe claims `https`.
+    #[test]
+    fn http_probe_forwards_the_scheme_it_was_given() {
+        let (addr, requests) = serve_once_recording("HTTP/1.1 200 OK\r\n\r\n");
+        RealSysRunner
+            .http_probe(HttpProbe {
+                addr: &addr,
+                host: "127.0.0.1:9000",
+                scheme: "http",
+                path: "/",
+            })
+            .unwrap();
+
+        let req = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            req.contains("\r\nX-Forwarded-Proto: http\r\n"),
+            "got:\n{req}"
+        );
     }
 
     #[test]
@@ -532,7 +682,7 @@ mod tests {
             listener.local_addr().unwrap().to_string()
         };
         assert!(
-            RealSysRunner.http_probe(&addr, "/").is_err(),
+            RealSysRunner.http_probe(probe_of(&addr, "/")).is_err(),
             "a refused connection is not a status code"
         );
     }
@@ -541,8 +691,35 @@ mod tests {
     fn http_probe_rejects_a_path_that_could_split_the_request() {
         let addr = serve_once("HTTP/1.1 200 OK\r\n\r\n");
         let err = RealSysRunner
-            .http_probe(&addr, "/ HTTP/1.1\r\nX-Injected: yes")
+            .http_probe(probe_of(&addr, "/ HTTP/1.1\r\nX-Injected: yes"))
             .expect_err("a path with a newline must never reach the socket");
+        assert!(matches!(err, Error::Invalid), "got {err:?}");
+    }
+
+    /// `host` and `scheme` are interpolated into the request too, so they need
+    /// the same guard the path has.
+    #[test]
+    fn http_probe_rejects_an_origin_that_could_split_the_request() {
+        let addr = serve_once("HTTP/1.1 200 OK\r\n\r\n");
+
+        let err = RealSysRunner
+            .http_probe(HttpProbe {
+                addr: &addr,
+                host: "evil\r\nX-Injected: yes",
+                scheme: "https",
+                path: "/",
+            })
+            .expect_err("a host with a newline must never reach the socket");
+        assert!(matches!(err, Error::Invalid), "got {err:?}");
+
+        let err = RealSysRunner
+            .http_probe(HttpProbe {
+                addr: &addr,
+                host: "tasty-lucky-clover.example.test",
+                scheme: "https\r\nX-Injected: yes",
+                path: "/",
+            })
+            .expect_err("a scheme with a newline must never reach the socket");
         assert!(matches!(err, Error::Invalid), "got {err:?}");
     }
 
@@ -570,11 +747,17 @@ mod tests {
             MockProbe::Status(200),
         ]);
 
-        assert!(sys.http_probe("127.0.0.1:9000", "/").is_err());
-        assert_eq!(sys.http_probe("127.0.0.1:9000", "/").unwrap(), 503);
-        assert_eq!(sys.http_probe("127.0.0.1:9000", "/").unwrap(), 200);
+        assert!(sys.http_probe(probe_of("127.0.0.1:9000", "/")).is_err());
         assert_eq!(
-            sys.http_probe("127.0.0.1:9000", "/").unwrap(),
+            sys.http_probe(probe_of("127.0.0.1:9000", "/")).unwrap(),
+            503
+        );
+        assert_eq!(
+            sys.http_probe(probe_of("127.0.0.1:9000", "/")).unwrap(),
+            200
+        );
+        assert_eq!(
+            sys.http_probe(probe_of("127.0.0.1:9000", "/")).unwrap(),
             200,
             "the last entry is the steady state, not a one-off"
         );
@@ -585,7 +768,7 @@ mod tests {
     fn mock_http_probe_defaults_to_a_ready_instance() {
         assert_eq!(
             MockSysRunner::new()
-                .http_probe("127.0.0.1:9000", "/")
+                .http_probe(probe_of("127.0.0.1:9000", "/"))
                 .unwrap(),
             200,
             "tests about provisioning steps should not also be tests about waiting"
