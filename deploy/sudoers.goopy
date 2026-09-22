@@ -3,6 +3,7 @@
 # and nginx configs without a password prompt.
 goopy ALL=(root) NOPASSWD: \
     /usr/bin/install -m 755 /tmp/gl-serv /opt/goopy-life/bin/gl-serv, \
+    /usr/bin/install -m 755 /tmp/gl-cli /opt/goopy-life/bin/gl-cli, \
     /usr/sbin/zfs create -o quota=* zpool_ghost/*, \
     /usr/sbin/zfs destroy zpool_ghost/*, \
     /bin/chown * /opt/goopy-life/data/*, \

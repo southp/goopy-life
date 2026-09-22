@@ -77,10 +77,13 @@ jobs:
       - name: Lint
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Build release binary
+      - name: Build release binaries
+        # gl-cli is built here, not on a path of its own: it links the same
+        # gl-core as gl-serv, so the droplet must never hold a pair built from
+        # different commits.
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
-        run: cargo build --release --target x86_64-unknown-linux-musl -p gl-serv
+        run: cargo build --release --target x86_64-unknown-linux-musl -p gl-serv -p gl-cli
 
       - name: Configure SSH
         env:
@@ -124,6 +127,7 @@ jobs:
           "$GITHUB_WORKSPACE/deploy/push-binary.sh" \
             "$DEV_DEPLOY_USER@$DEV_DEPLOY_HOST" \
             target/x86_64-unknown-linux-musl/release/gl-serv \
+            target/x86_64-unknown-linux-musl/release/gl-cli \
             "$GITHUB_WORKSPACE/deploy/config/dev.toml" \
             "${DEV_SSH_PORT:-22}"
 
@@ -132,5 +136,5 @@ jobs:
         env:
           DEV_DEPLOY_HOST: ${{ vars.DEV_DEPLOY_HOST }}
         run: |
-          echo "\`gl-serv\` @ ${GITHUB_SHA::7} → \`$DEV_DEPLOY_HOST\` — ${{ job.status }}." \
+          echo "\`gl-serv\` + \`gl-cli\` @ ${GITHUB_SHA::7} → \`$DEV_DEPLOY_HOST\` — ${{ job.status }}." \
             >> "$GITHUB_STEP_SUMMARY"

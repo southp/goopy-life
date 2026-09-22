@@ -8,9 +8,13 @@
 # deployed automatically on every merge to trunk by
 # .github/workflows/backend-deploy.yml; see docs/DEPLOYMENT.md.
 #
-# Cross-compiles gl-serv for x86_64 Linux and hands the binary and that
-# environment's config to deploy/push-binary.sh, which installs both and
-# restarts the systemd service.
+# Cross-compiles gl-serv and gl-cli for x86_64 Linux and hands both binaries and
+# that environment's config to deploy/push-binary.sh, which installs all three
+# and restarts the systemd service.
+#
+# gl-cli is built from the same invocation as gl-serv rather than separately:
+# the two link the same gl-core, so a droplet must never hold a pair built from
+# different commits.
 #
 # The environment is a required argument with no default: the config is shipped
 # to the host, so a default would quietly reconfigure one environment with
@@ -41,5 +45,8 @@ if [[ ! -f "$CONFIG" ]]; then
 fi
 
 cd "$HERE/../backend"
-cargo zigbuild --release --target x86_64-unknown-linux-musl -p gl-serv
-"$HERE/push-binary.sh" "$TARGET" target/x86_64-unknown-linux-musl/release/gl-serv "$CONFIG" "$PORT"
+cargo zigbuild --release --target x86_64-unknown-linux-musl -p gl-serv -p gl-cli
+"$HERE/push-binary.sh" "$TARGET" \
+    target/x86_64-unknown-linux-musl/release/gl-serv \
+    target/x86_64-unknown-linux-musl/release/gl-cli \
+    "$CONFIG" "$PORT"
