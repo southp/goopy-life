@@ -213,11 +213,28 @@ To roll a config change back, revert the commit and deploy again.
 production host yet. Every line that still names a dev-only value is marked
 `REVIEW`; work through them before the first production deploy.
 
-A note on `bind_address`: it is `0.0.0.0:3000`, which exposes gl-serv directly
-alongside nginx. A caller reaching it that way bypasses TLS and can set the
-`X-Real-IP` header the rate limiter keys on. `127.0.0.1:3000` satisfies both
-nginx's `proxy_pass` and its `auth_request` subrequests; the value is left as-is
-here only because changing it is a behaviour change, not a cleanup.
+### `bind_address` and `api_address`
+
+gl-serv binds `127.0.0.1:3000`, so **nginx is the only path to it**. That is
+what makes the `X-Real-IP` the rate limiter keys on trustworthy: a caller able
+to reach port 3000 directly would skip TLS and set the header itself, which does
+not weaken the limiter so much as remove it — a fresh forged IP per request
+empties every bucket (#21, #105). CI pins it —
+`no_deployed_config_binds_a_wildcard` fails any file in `deploy/config/` that
+listens on a wildcard.
+
+`api_address` is the other half of the same fix (#149). It is where nginx
+*connects* to reach gl-serv for each instance's `auth_request` alive-check, and
+it is a separate key because a wildcard is a sensible thing to listen on and a
+meaningless thing to connect to. Left unset — as all three committed configs
+leave it — it takes `bind_address`'s port on loopback. `gl-serv --check-config`
+prints both, so a host can be checked without reading its config file.
+
+Instance sites rendered before #149 keep `proxy_pass http://0.0.0.0:3000/...`
+until that instance is reprovisioned. This is harmless: the connect lands on
+loopback regardless, which is why nobody noticed the wildcard in the first
+place. No migration is needed — it is worth knowing only when reading
+`sites-available` mid-transition and finding both forms.
 
 ## Testing the deploy scripts
 

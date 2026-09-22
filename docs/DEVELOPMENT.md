@@ -168,7 +168,8 @@ Key settings:
 | `dev_mode` | Skips systemd/nginx/ZFS operations |
 | `sweep_interval_secs` | Sweeper frequency |
 | `cors_origin` | Allowed CORS origin |
-| `bind_address` | gl-serv HTTP bind address |
+| `bind_address` | Address gl-serv listens on (loopback on a deployed host) |
+| `api_address` | Address nginx connects to for the alive-check; defaults to loopback on `bind_address`'s port |
 | `registry.path` | SQLite database file path |
 | `allocator.pool` | ZFS pool name |
 | `allocator.quota_mb` | Disk quota per instance |
