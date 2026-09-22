@@ -85,7 +85,8 @@ kind = "Hello"
 # A spawn stays Spawning until the instance answers `GET /` with a 200, because
 # Ghost binds its port immediately and then serves its own maintenance page for
 # the whole of first boot. An instance that never answers ends Failed, with its
-# port released and its working dir reapable by the sweep.
+# port released and its working dir reapable by the sweep. The timeout is a real
+# ceiling: no single probe is given more time than the wait has left.
 # REVIEW: size the timeout against production's boot times, which will be slower
 # than a dev droplet's if the host runs several instances at once.
 #   ready_timeout_secs = 120   # default

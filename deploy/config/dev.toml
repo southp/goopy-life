@@ -107,6 +107,7 @@ service_user = "goopy"
 # link ~13s before it served anything. One boot measured ~13s on this droplet;
 # the timeout leaves an order of magnitude of headroom for a host booting
 # several at once. An instance that never answers ends Failed, with its port
-# released and its working dir reapable by the sweep.
+# released and its working dir reapable by the sweep. The timeout is a real
+# ceiling: no single probe is given more time than the wait has left.
 ready_timeout_secs = 120
 ready_poll_ms = 500

@@ -299,6 +299,10 @@ at once, or if `zpool` IO is contended — a loaded host is slow, not broken.
 Lowering it below a measured boot time throws away sandboxes seconds before they
 would have worked.
 
+`ready_timeout_secs` is a real ceiling, not a floor: each probe is given no more
+than the wait has left, so a connection that hangs cannot carry a spawn past the
+configured budget.
+
 **When the budget runs out** the spawn fails: the instance ends `Failed`, its
 port is released, and `sweep()` reaps its working directory. The log line
 carries the last thing the instance said (`last probe: status 503`), which is

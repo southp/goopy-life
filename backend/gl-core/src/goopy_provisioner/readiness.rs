@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 use crate::shared_types::Error;
-use crate::sys_utils::{HttpProbe, SysRunner};
+use crate::sys_utils::{HttpProbe, PROBE_IO_TIMEOUT, SysRunner};
 
 /// What the probe asks for: the instance's front page, which is exactly what
 /// the visitor is about to open.
@@ -90,6 +90,10 @@ pub(crate) struct ReadinessBudget {
 /// probe stays truthful about who it is while taking that shortcut; see
 /// [`InstanceOrigin`].
 ///
+/// `budget.timeout` is a real ceiling. Each probe is given no more time than
+/// the wait has left, so a connection that hangs cannot carry the call past its
+/// deadline the way an independently-timed probe would.
+///
 /// Returns [`Error::ReadinessTimeout`] once the budget is spent, carrying the
 /// last thing the instance said. The caller treats that as a failed
 /// provision — an instance that never booted is exactly that.
@@ -104,14 +108,29 @@ pub(crate) fn wait_until_ready(
     let started = Instant::now();
     let deadline = started + budget.timeout;
     let mut attempts = 0_u32;
+    // Only read after at least one probe, since the budget is validated as
+    // non-zero at config load and so always buys one.
+    let mut last = "never probed".to_string();
 
     loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            warn!(slug, %addr, attempts, %last, "instance never became ready");
+            return Err(Error::ReadinessTimeout {
+                slug: slug.to_string(),
+                waited_secs: budget.timeout.as_secs(),
+                last,
+            });
+        }
+
         attempts += 1;
-        let last = match sys.http_probe(HttpProbe {
+        last = match sys.http_probe(HttpProbe {
             addr: &addr,
             host: origin.host,
             scheme: origin.scheme,
             path: READY_PATH,
+            // Never let one probe outlive the wait it belongs to.
+            timeout: PROBE_IO_TIMEOUT.min(remaining),
         }) {
             Ok(READY_STATUS) => {
                 info!(
@@ -127,20 +146,14 @@ pub(crate) fn wait_until_ready(
             Err(e) => format!("no HTTP answer: {e}"),
         };
 
-        let now = Instant::now();
-        if now >= deadline {
-            warn!(slug, %addr, attempts, %last, "instance never became ready");
-            return Err(Error::ReadinessTimeout {
-                slug: slug.to_string(),
-                waited_secs: budget.timeout.as_secs(),
-                last,
-            });
-        }
-
         debug!(slug, %addr, attempts, %last, "instance not ready yet, waiting");
         // Never sleep past the deadline: the budget is what the operator
         // configured, not that value rounded up to a poll interval.
-        std::thread::sleep(budget.poll_interval.min(deadline - now));
+        std::thread::sleep(
+            budget
+                .poll_interval
+                .min(deadline.saturating_duration_since(Instant::now())),
+        );
     }
 }
 
@@ -329,6 +342,35 @@ mod tests {
                 ),
             ],
             "Ghost redirects anything that disagrees with its canonical url"
+        );
+    }
+
+    /// The budget is a ceiling on the wait, so it has to be a ceiling on each
+    /// probe inside it too — otherwise a connection that hangs carries the call
+    /// past the deadline the operator configured.
+    #[test]
+    fn no_probe_is_given_more_time_than_the_wait_has_left() {
+        let sys = MockSysRunner::with_probes(vec![MockProbe::Unreachable]);
+        let budget = ReadinessBudget {
+            timeout: Duration::from_millis(40),
+            poll_interval: Duration::from_millis(5),
+        };
+
+        wait_until_ready(&sys, "tasty-lucky-clover", 9876, prod_origin(), budget).unwrap_err();
+
+        let timeouts = sys.http_probe_timeouts();
+        assert!(!timeouts.is_empty(), "the budget should buy some attempts");
+        for (i, t) in timeouts.iter().enumerate() {
+            assert!(
+                *t <= budget.timeout,
+                "probe {i} was given {t:?}, more than the whole budget"
+            );
+            assert!(!t.is_zero(), "probe {i} was given no time at all");
+        }
+        assert!(
+            timeouts.windows(2).all(|w| w[0] >= w[1]),
+            "each probe has less of the budget left than the one before it, \
+             got {timeouts:?}"
         );
     }
 

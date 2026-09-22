@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::Command;
 #[cfg(any(test, feature = "test-utils"))]
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracing::{debug, error, info};
 
@@ -92,14 +92,17 @@ pub struct HttpProbe<'a> {
     pub scheme: &'a str,
     /// The path to request.
     pub path: &'a str,
+    /// Ceiling on the whole probe — connect, write and read together.
+    pub timeout: Duration,
 }
 
-/// Per-probe connect, write and read timeout.
+/// Default ceiling on one probe's connect, write and read.
 ///
 /// Generous enough that a busy host is not mistaken for a dead one, short
 /// enough that a black-holed connection cannot stall a polling caller past its
-/// own budget.
-const PROBE_IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// own budget. A caller with less budget left than this passes the remainder
+/// instead, so the probe never outlives the deadline it is serving.
+pub(crate) const PROBE_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Parses the status code out of an HTTP status line (`HTTP/1.1 200 OK`).
 ///
@@ -255,12 +258,26 @@ impl SysRunner for RealSysRunner {
             .next()
             .ok_or_else(|| Error::Config(format!("no socket address for {:?}", req.addr)))?;
 
-        let stream = TcpStream::connect_timeout(&socket, PROBE_IO_TIMEOUT).map_err(Error::Io)?;
+        // `req.timeout` is a ceiling on the probe as a whole, not on each of its
+        // three phases: a caller polling against a deadline hands us what is
+        // left of its budget, and three independent timeouts would let one
+        // probe overrun that by three times over.
+        let started = Instant::now();
+        let remaining = || {
+            let left = req.timeout.saturating_sub(started.elapsed());
+            if left.is_zero() {
+                Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "probe budget spent",
+                )))
+            } else {
+                Ok(left)
+            }
+        };
+
+        let stream = TcpStream::connect_timeout(&socket, remaining()?).map_err(Error::Io)?;
         stream
-            .set_read_timeout(Some(PROBE_IO_TIMEOUT))
-            .map_err(Error::Io)?;
-        stream
-            .set_write_timeout(Some(PROBE_IO_TIMEOUT))
+            .set_write_timeout(Some(remaining()?))
             .map_err(Error::Io)?;
 
         // `Host` and `X-Forwarded-Proto` are what nginx would have added; see
@@ -283,6 +300,10 @@ impl SysRunner for RealSysRunner {
         let mut writer = &stream;
         writer.write_all(request.as_bytes()).map_err(Error::Io)?;
         writer.flush().map_err(Error::Io)?;
+
+        stream
+            .set_read_timeout(Some(remaining()?))
+            .map_err(Error::Io)?;
 
         let mut status_line = String::new();
         BufReader::new(&stream)
@@ -354,6 +375,7 @@ pub enum MockCall {
         host: String,
         scheme: String,
         path: String,
+        timeout: Duration,
     },
 }
 
@@ -412,6 +434,21 @@ impl MockSysRunner {
             .iter()
             .filter_map(|c| match c {
                 MockCall::HttpProbe { scheme, host, .. } => Some((scheme.clone(), host.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The per-probe timeouts passed to `http_probe`, in call order. Lets a
+    /// test assert that a probe is never given more time than its caller has
+    /// left.
+    pub fn http_probe_timeouts(&self) -> Vec<Duration> {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| match c {
+                MockCall::HttpProbe { timeout, .. } => Some(*timeout),
                 _ => None,
             })
             .collect()
@@ -536,6 +573,7 @@ impl SysRunner for MockSysRunner {
             host: req.host.to_string(),
             scheme: req.scheme.to_string(),
             path: req.path.to_string(),
+            timeout: req.timeout,
         });
 
         let mut script = self.probe_script.lock().unwrap();
@@ -605,6 +643,7 @@ mod tests {
             host: "tasty-lucky-clover.example.test",
             scheme: "https",
             path,
+            timeout: Duration::from_secs(5),
         }
     }
 
@@ -636,6 +675,7 @@ mod tests {
                 host: "tasty-lucky-clover.goopy.life",
                 scheme: "https",
                 path: "/",
+                timeout: Duration::from_secs(5),
             })
             .unwrap();
 
@@ -664,6 +704,7 @@ mod tests {
                 host: "127.0.0.1:9000",
                 scheme: "http",
                 path: "/",
+                timeout: Duration::from_secs(5),
             })
             .unwrap();
 
@@ -687,6 +728,40 @@ mod tests {
         );
     }
 
+    /// `timeout` bounds the probe as a whole. Against a server that accepts and
+    /// then says nothing, the old code spent up to three times this long —
+    /// connect, write and read each had their own — which let one probe carry a
+    /// polling caller past the deadline it was serving.
+    #[test]
+    fn http_probe_gives_up_within_its_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().unwrap().to_string();
+        let accepted = std::thread::spawn(move || {
+            // Hold the connection open and never reply.
+            let (stream, _) = listener.accept().expect("accept");
+            std::thread::sleep(Duration::from_secs(3));
+            drop(stream);
+        });
+
+        let started = Instant::now();
+        let err = RealSysRunner
+            .http_probe(HttpProbe {
+                addr: &addr,
+                host: "tasty-lucky-clover.example.test",
+                scheme: "https",
+                path: "/",
+                timeout: Duration::from_millis(300),
+            })
+            .expect_err("a server that never answers is not a status code");
+
+        assert!(
+            started.elapsed() < Duration::from_millis(1500),
+            "one probe must not outlive its own budget, took {:?} ({err:?})",
+            started.elapsed()
+        );
+        let _ = accepted.join();
+    }
+
     #[test]
     fn http_probe_rejects_a_path_that_could_split_the_request() {
         let addr = serve_once("HTTP/1.1 200 OK\r\n\r\n");
@@ -708,6 +783,7 @@ mod tests {
                 host: "evil\r\nX-Injected: yes",
                 scheme: "https",
                 path: "/",
+                timeout: Duration::from_secs(5),
             })
             .expect_err("a host with a newline must never reach the socket");
         assert!(matches!(err, Error::Invalid), "got {err:?}");
@@ -718,6 +794,7 @@ mod tests {
                 host: "tasty-lucky-clover.example.test",
                 scheme: "https\r\nX-Injected: yes",
                 path: "/",
+                timeout: Duration::from_secs(5),
             })
             .expect_err("a scheme with a newline must never reach the socket");
         assert!(matches!(err, Error::Invalid), "got {err:?}");
