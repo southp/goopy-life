@@ -117,6 +117,45 @@ To run it by hand against a config before deploying it (from `backend/`):
 cargo run -q -p gl-serv -- --check-config --config ../deploy/config/prod.toml
 ```
 
+### What commit is running right now
+
+`GET /version` on gl-serv answers it directly, so nobody has to ssh in and guess
+from file mtimes:
+
+```bash
+curl -sS https://<dev-api-host>/version
+{"sha":"c50c932","sha_full":"c50c932…","built_at":"2026-09-04T11:57:00Z","version":"0.1.0"}
+```
+
+The commit id is compiled into the binary by `gl-core/build.rs` from
+`GL_GIT_SHA`, which both deploy paths set — `deploy.sh` from the checkout it is
+building, the workflow from `github.sha`. Three answers are possible and each
+means something specific:
+
+| `sha_full` | What it means |
+|---|---|
+| a commit id | that commit is serving |
+| `<commit>-dirty` | built by `deploy.sh` from a tree with uncommitted changes — what is running is *not* that commit |
+| `unknown` | built by neither deploy path (a local `cargo build`), so nothing can be said about which commit it is |
+
+Nothing has to be checked by hand on a normal deploy: `push-binary.sh` makes the
+comparison itself. After the restart and the `is-active` check it asks the host
+for `/version` and fails the run unless the sha matches what it just built. That
+turns the post-deploy check from "something is running" into "the thing I merged
+is running" — the gap that let #117's fix sit undeployed for three weeks.
+
+A failure there prints the sha it built and the body `/version` returned, and
+means the restart did not produce the binary the install put down. Check in this
+order: that the install actually replaced `/opt/goopy-life/bin/gl-serv`, that
+`systemctl restart gl-serv` took, and that no other gl-serv is bound to the port.
+
+The frontend half of the answer — a footer showing the deployed commit for both
+halves — is deferred to a follow-up PR on #119. The backend's sha is deliberately
+**not** served from `GET /config`: the frontend fetches that once at Vercel build
+time into a `force-static` page, and `ignoreCommand` skips the Vercel build for
+backend-only changes, so a sha carried there would go stale and stay stale while
+looking authoritative.
+
 ## The maintenance CLI on the host
 
 `gl-serv` exposes no despawn route, so tearing down one instance by hand,
@@ -223,6 +262,14 @@ one-time local toolchain setup in the
 The environment argument is required. It has no default because the config
 reaches the host: a default would let an omitted argument reconfigure one
 environment with another's settings.
+
+It builds from whatever is in the local checkout, so it stamps the binary with
+`git rev-parse HEAD` and appends `-dirty` when tracked files differ from it.
+Deploying dirty is allowed — it is sometimes the point of the manual path — but
+`/version` will say so, and nothing will later claim that commit is what is
+running. Untracked files are not counted: a build's inputs cannot change without
+some tracked file changing too, and counting scratch files would mark every
+manual deploy dirty, which is the same as not marking any.
 
 ## Configuration
 
