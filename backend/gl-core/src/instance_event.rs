@@ -11,6 +11,26 @@
 //! An [`InstanceEvent`] is written where the error is — the failure arm of a
 //! spawn, the failure arm of a teardown — into an append-only table with no
 //! foreign key to `goopies`. Outliving the row is the entire point.
+//!
+//! # What is not recorded here, and why
+//!
+//! **Successful transitions.** A spawn that worked writes nothing; only
+//! failures and reaps are kept. Widening this into a full audit trail is
+//! additive and can wait for a reason to want it.
+//!
+//! **Failures a provisioner swallows** — notably the tolerated `nginx -t` /
+//! reload failure during teardown (#150), which #133 asks about. It deserves a
+//! louder signal than `tracing::warn!`, because a broken `sites-enabled`
+//! leaves the running config stale for *every* instance, not just the one
+//! being removed. But it is raised inside [`GoopyProvisioner`], which holds no
+//! registry and is deliberately ignorant of one — handing it a registry to
+//! write a warning is a larger change than the warning is worth, and the
+//! condition is a host-level fault rather than an instance-level one, so
+//! `slug` would be the wrong key for it anyway. Left to #133 on purpose. What
+//! *is* recorded is the case where that failure is fatal: then it comes back
+//! as the teardown's `Error` and lands here through the ordinary path.
+//!
+//! [`GoopyProvisioner`]: crate::goopy_provisioner::GoopyProvisioner
 
 use chrono::{DateTime, Utc};
 

@@ -509,12 +509,10 @@ where
     /// back; until then a sweep over a full registry is the slow case to watch.
     ///
     /// Also enforces retention on the instance event log — see
-    /// [`prune_events`], which is deliberately outside the returned counts.
+    /// `prune_events`, which is deliberately outside the returned counts.
     ///
     /// Meant to be called periodically (e.g. via `tokio::time::interval` in
     /// `gl-serv`), from a context where blocking is acceptable.
-    ///
-    /// [`prune_events`]: GoopyManager::prune_events
     ///
     /// [`despawn_blocking`]: GoopyManager::despawn_blocking
     #[tracing::instrument(skip(self))]
