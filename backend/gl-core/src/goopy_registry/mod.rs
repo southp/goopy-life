@@ -1,7 +1,10 @@
 pub mod sqlite_registry;
 
 use crate::goopy::Goopy;
+use crate::instance_event::InstanceEvent;
 use crate::shared_types::*;
+
+use chrono::{DateTime, Utc};
 
 pub trait GoopyRegistry {
     fn save(&self, gp: &Goopy) -> Result<(), Error>;
@@ -57,4 +60,51 @@ pub trait GoopyRegistry {
         max_provisioned: u32,
         max_active: u32,
     ) -> Result<(), Error>;
+
+    // -- the instance event log (#118) ------------------------------------
+    //
+    // Append-only, and deliberately not keyed to a `goopies` row: it is what
+    // is left once the row has been reaped. See [`crate::instance_event`].
+
+    /// Append `event` to the log.
+    ///
+    /// For an event that stands alone. When the event describes something that
+    /// also changes the instance's row, prefer [`fail_with_event`] or
+    /// [`delete_with_event`], which write both together.
+    ///
+    /// [`fail_with_event`]: GoopyRegistry::fail_with_event
+    /// [`delete_with_event`]: GoopyRegistry::delete_with_event
+    fn record_event(&self, event: &InstanceEvent) -> Result<(), Error>;
+
+    /// Mark `slug` [`Status::Failed`] and append `event`, in one transaction.
+    ///
+    /// The two halves of recording a failure: the row says *this is broken*,
+    /// the event says *why*. Splitting them across two writes would let a crash
+    /// in between produce the exact state #118 exists to abolish — a `Failed`
+    /// row with no reason attached.
+    fn fail_with_event(&self, slug: &str, event: &InstanceEvent) -> Result<(), Error>;
+
+    /// Delete `slug` and append `event`, in one transaction.
+    ///
+    /// Atomicity matters in both directions here. A committed delete with a
+    /// lost event silently destroys the instance's only record; a committed
+    /// event with a rolled-back delete claims a reap that did not happen, which
+    /// is the lie #117 was filed about, written somewhere more durable than a
+    /// log line.
+    fn delete_with_event(&self, slug: &str, event: &InstanceEvent) -> Result<(), Error>;
+
+    /// Drop events that occurred strictly before `cutoff`, returning how many
+    /// rows went.
+    ///
+    /// Append-only means unbounded, so something has to trim it. The sweep
+    /// does, because it is already the periodic maintenance task.
+    fn prune_events_before(&self, cutoff: DateTime<Utc>) -> Result<u32, Error>;
+
+    /// Read up to `limit` events, newest first, for one `slug` or for every
+    /// instance.
+    ///
+    /// Newest first because the question is almost always "what has been
+    /// failing lately". Note that the results carry `detail`, which is
+    /// operator-only — see [`InstanceEvent`].
+    fn events(&self, slug: Option<&str>, limit: u32) -> Result<Vec<InstanceEvent>, Error>;
 }

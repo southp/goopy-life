@@ -468,6 +468,7 @@ mod tests {
     use crate::goopy_provisioner::GoopyProvisioner;
     use crate::goopy_registry::GoopyRegistry;
     use crate::goopy_registry::sqlite_registry::SqliteRegistry;
+    use crate::instance_event::*;
     use crate::storage_allocator::{PlainDirAllocator, StorageAllocator};
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
@@ -521,6 +522,24 @@ mod tests {
         /// behaviour this double exists to exercise still applies.
         fn save_within_caps(&self, gp: &Goopy, _: u32, _: u32) -> Result<(), Error> {
             self.save(gp)
+        }
+
+        // The event log is irrelevant to the slug-collision retry this double
+        // exists for, so it accepts writes and reads back nothing.
+        fn record_event(&self, _event: &InstanceEvent) -> Result<(), Error> {
+            Ok(())
+        }
+        fn fail_with_event(&self, _slug: &str, _event: &InstanceEvent) -> Result<(), Error> {
+            Ok(())
+        }
+        fn delete_with_event(&self, _slug: &str, _event: &InstanceEvent) -> Result<(), Error> {
+            Ok(())
+        }
+        fn prune_events_before(&self, _cutoff: chrono::DateTime<Utc>) -> Result<u32, Error> {
+            Ok(0)
+        }
+        fn events(&self, _slug: Option<&str>, _limit: u32) -> Result<Vec<InstanceEvent>, Error> {
+            Ok(vec![])
         }
     }
 
@@ -740,6 +759,23 @@ mod tests {
             }
             fn save_within_caps(&self, gp: &Goopy, mp: u32, ma: u32) -> Result<(), Error> {
                 self.0.save_within_caps(gp, mp, ma)
+            }
+            /// Fails for the same reason `update_status` does: this double
+            /// refuses every status write, whichever door it comes through.
+            fn fail_with_event(&self, _: &str, _: &InstanceEvent) -> Result<(), Error> {
+                Err(Error::Invalid)
+            }
+            fn record_event(&self, event: &InstanceEvent) -> Result<(), Error> {
+                self.0.record_event(event)
+            }
+            fn delete_with_event(&self, slug: &str, event: &InstanceEvent) -> Result<(), Error> {
+                self.0.delete_with_event(slug, event)
+            }
+            fn prune_events_before(&self, cutoff: chrono::DateTime<Utc>) -> Result<u32, Error> {
+                self.0.prune_events_before(cutoff)
+            }
+            fn events(&self, slug: Option<&str>, limit: u32) -> Result<Vec<InstanceEvent>, Error> {
+                self.0.events(slug, limit)
             }
         }
 
