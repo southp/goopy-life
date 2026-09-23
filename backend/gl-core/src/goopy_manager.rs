@@ -1,6 +1,7 @@
 use crate::goopy::*;
 use crate::goopy_provisioner::*;
 use crate::goopy_registry::*;
+use crate::instance_event::*;
 use crate::shared_types::*;
 
 use chrono::{Duration, Utc};
@@ -207,7 +208,11 @@ where
                     if let Err(e) = registry.release_port(port) {
                         tracing::error!("spawn: release port {} error: {:?}", port, e);
                     }
-                    if let Err(e) = registry.update_status(&goopy_clone.slug, Status::Failed) {
+                    // This is the one moment the reason exists in full. The
+                    // sweep will reap the `Failed` row and the log will rotate,
+                    // so if it is not written down here it is gone (#118).
+                    let event = InstanceEvent::failed(&goopy_clone.slug, EventPhase::Spawn, &err);
+                    if let Err(e) = registry.fail_with_event(&goopy_clone.slug, &event) {
                         tracing::error!("spawning: update {} error: {:?}", goopy_clone.slug, e);
                     }
                 }
@@ -239,8 +244,9 @@ where
         std::thread::spawn(move || {
             let _guard = span.enter();
             // The caller was already told `Ok`, so a failure here can only be
-            // reported through the log and the row's restored `Failed` status.
-            let _ = Self::teardown(&registry, &provisioner, &goopy);
+            // reported through the log, the row's restored `Failed` status and
+            // the event `teardown` records against it.
+            let _ = Self::teardown(&registry, &provisioner, &goopy, EventPhase::Despawn);
         });
 
         Ok(slug)
@@ -259,8 +265,23 @@ where
     /// [`sweep`]: GoopyManager::sweep
     #[tracing::instrument(skip(self))]
     pub fn despawn_blocking(&self, slug: &str) -> Result<(), Error> {
+        self.despawn_blocking_as(slug, EventPhase::Despawn)
+    }
+
+    /// [`despawn_blocking`], recording its events under `phase`.
+    ///
+    /// The teardown is identical whoever asked for it, but the event log's
+    /// readers care who did: "what did the sweeper reclaim" and "what did
+    /// somebody tear down by hand" are different questions, and once the row is
+    /// gone the log is the only thing that can still tell them apart. So
+    /// [`sweep`] goes through here with [`EventPhase::Sweep`] while the public
+    /// entry point keeps [`EventPhase::Despawn`].
+    ///
+    /// [`despawn_blocking`]: GoopyManager::despawn_blocking
+    /// [`sweep`]: GoopyManager::sweep
+    fn despawn_blocking_as(&self, slug: &str, phase: EventPhase) -> Result<(), Error> {
         let goopy = self.begin_despawn(slug)?;
-        Self::teardown(&self.registry, &self.provisioner, &goopy)
+        Self::teardown(&self.registry, &self.provisioner, &goopy, phase)
     }
 
     /// Check that `slug` may be despawned and claim it by marking it
@@ -304,10 +325,14 @@ where
         registry: &Registry,
         provisioner: &Provisioner,
         goopy: &Goopy,
+        phase: EventPhase,
     ) -> Result<(), Error> {
-        let torn_down = provisioner
-            .deprovision(goopy)
-            .and_then(|()| registry.delete(&goopy.slug));
+        // The `reaped` event and the delete commit together, so the event is
+        // written exactly when the row actually leaves the registry — the same
+        // signal `Ok(())` stands for, rather than a second, weaker one (#117).
+        let torn_down = provisioner.deprovision(goopy).and_then(|()| {
+            registry.delete_with_event(&goopy.slug, &InstanceEvent::reaped(&goopy.slug, phase))
+        });
 
         match torn_down {
             Ok(()) => {
@@ -321,6 +346,31 @@ where
                         error = ?e,
                         "despawn: releasing the port failed",
                     );
+
+                    // Recorded rather than only logged because this is the
+                    // quietest failure in the codebase: the sweep still counts
+                    // the row as swept, correctly, while the port range shrinks
+                    // by one with nothing left pointing at it. The row it
+                    // belonged to no longer exists, so the event log is the
+                    // only place the leak can be attributed to a slug.
+                    //
+                    // `NotFound` is excluded because it is the *ordinary* case,
+                    // not a leak: a spawn that failed released its own port
+                    // before going `Failed`, so the sweep that later reaps that
+                    // row finds nothing to release. Recording it would fill the
+                    // log with leaks that never happened, which is the one
+                    // thing a forensic record may not do.
+                    if !matches!(e, Error::NotFound) {
+                        let event = InstanceEvent::failed(&goopy.slug, phase, &e)
+                            .during(format!("releasing port {}", goopy.port));
+                        if let Err(record_err) = registry.record_event(&event) {
+                            tracing::error!(
+                                slug = %goopy.slug,
+                                error = ?record_err,
+                                "despawn: recording the leaked port failed",
+                            );
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -331,7 +381,13 @@ where
                     "despawn: teardown failed, instance left Failed",
                 );
 
-                if let Err(e) = registry.update_status(&goopy.slug, Status::Failed) {
+                // Since #117 a failed delete puts the row back to `Failed`
+                // rather than leaving it `Despawning`, where the sweep would
+                // skip it forever. That made the failure visible; this makes it
+                // legible, and keeps it legible after the retry that eventually
+                // succeeds reaps the row.
+                let event = InstanceEvent::failed(&goopy.slug, phase, &err);
+                if let Err(e) = registry.fail_with_event(&goopy.slug, &event) {
                     tracing::error!(
                         slug = %goopy.slug,
                         error = ?e,
@@ -349,6 +405,21 @@ where
 
     pub fn list(&self) -> Result<Vec<Goopy>, Error> {
         self.registry.list()
+    }
+
+    /// Read up to `limit` recorded events, newest first, for one `slug` or for
+    /// every instance.
+    ///
+    /// Unlike [`list`], this answers questions about instances that no longer
+    /// exist — which is most of the interesting ones (#118).
+    ///
+    /// The results carry `detail`, which is operator-only: see
+    /// [`InstanceEvent`]. Anything that renders these for a visitor must show
+    /// `code` and nothing else.
+    ///
+    /// [`list`]: GoopyManager::list
+    pub fn events(&self, slug: Option<&str>, limit: u32) -> Result<Vec<InstanceEvent>, Error> {
+        self.registry.events(slug, limit)
     }
 
     /// Read the current usage of both caps.
@@ -433,7 +504,7 @@ where
             };
 
             if should_reap {
-                match self.despawn_blocking(&gp.slug) {
+                match self.despawn_blocking_as(&gp.slug, EventPhase::Sweep) {
                     Ok(()) => swept += 1,
                     Err(e) => {
                         tracing::error!(
@@ -468,7 +539,6 @@ mod tests {
     use crate::goopy_provisioner::GoopyProvisioner;
     use crate::goopy_registry::GoopyRegistry;
     use crate::goopy_registry::sqlite_registry::SqliteRegistry;
-    use crate::instance_event::*;
     use crate::storage_allocator::{PlainDirAllocator, StorageAllocator};
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
@@ -1099,12 +1169,15 @@ mod tests {
     /// The one place a test `GoopyManager` is built. `manager_with_provisioner`
     /// and `manager_with_caps` are the two narrow views onto it — every test
     /// varies either the provisioner or the caps, never both.
-    fn manager_with<P: GoopyProvisioner + Send + Sync + 'static>(
-        registry: SqliteRegistry,
+    fn manager_with<
+        R: GoopyRegistry + Send + Sync + 'static,
+        P: GoopyProvisioner + Send + Sync + 'static,
+    >(
+        registry: R,
         provisioner: P,
         max_active: u32,
         max_provisioned: u32,
-    ) -> GoopyManager<SqliteRegistry, P> {
+    ) -> GoopyManager<R, P> {
         GoopyManager::new(
             GoopyManagerConfig {
                 base_dir: PathBuf::from("/tmp"),
@@ -1303,6 +1376,316 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "despawn timed out");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    // ── the failure outlives the instance (#118) ──────────────────────────
+
+    /// A provisioner whose `provision` always fails, reproducing a spawn that
+    /// ends `Failed` — the state the June droplet was stuck in ten times over.
+    struct UnprovisionableProvisioner;
+
+    impl GoopyProvisioner for UnprovisionableProvisioner {
+        fn provision(&self, _goopy: &Goopy) -> Result<(), Error> {
+            Err(Error::Subprocess(
+                "ghost install: EACCES /opt/goopy-life/data".into(),
+            ))
+        }
+        fn deprovision(&self, _goopy: &Goopy) -> Result<(), Error> {
+            Ok(())
+        }
+        fn kind(&self) -> ProvisionerKind {
+            ProvisionerKind::Hello
+        }
+        fn service_version(&self) -> &str {
+            "9.9.9-mock"
+        }
+    }
+
+    /// Block until `slug` leaves `Spawning`, so the spawn thread's writes are
+    /// visible before the assertions run.
+    fn wait_for_spawn_to_settle<R, P>(gm: &GoopyManager<R, P>, slug: &str)
+    where
+        R: GoopyRegistry + Send + Sync + 'static,
+        P: GoopyProvisioner + Send + Sync + 'static,
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match gm.get(slug).unwrap() {
+                Some(g) if g.status != Status::Spawning => break,
+                _ => {}
+            }
+            assert!(std::time::Instant::now() < deadline, "spawn timed out");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn a_failed_spawn_records_the_reason() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let gm = manager_with_provisioner(registry, UnprovisionableProvisioner);
+
+        let (slug, _) = gm.spawn().unwrap();
+        wait_for_spawn_to_settle(&gm, &slug);
+
+        assert_eq!(gm.get(&slug).unwrap().unwrap().status, Status::Failed);
+
+        let events = gm.events(Some(&slug), 10).unwrap();
+        assert_eq!(events.len(), 1, "expected one event, got {events:?}");
+        assert_eq!(events[0].phase, EventPhase::Spawn);
+        assert_eq!(events[0].outcome, EventOutcome::Failed);
+        assert_eq!(events[0].code, "subprocess");
+        assert!(
+            events[0]
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("EACCES")),
+            "the operator-only detail must keep the stderr: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_teardown_records_the_reason() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_row(&registry, "stuck", 9000, Status::Failed);
+
+        let gm = manager_with_provisioner(
+            registry,
+            UndeprovisionableProvisioner {
+                deprovision_calls: Arc::new(Mutex::new(0)),
+            },
+        );
+
+        gm.despawn_blocking("stuck").unwrap_err();
+
+        let events = gm.events(Some("stuck"), 10).unwrap();
+        assert_eq!(events.len(), 1, "expected one event, got {events:?}");
+        assert_eq!(events[0].phase, EventPhase::Despawn);
+        assert_eq!(events[0].outcome, EventOutcome::Failed);
+        assert_eq!(events[0].code, "subprocess");
+        assert_eq!(
+            gm.get("stuck").unwrap().unwrap().status,
+            Status::Failed,
+            "the row goes back to Failed, and now says why"
+        );
+    }
+
+    /// The sweep's `reaped` event hangs off `despawn_blocking`'s completion
+    /// signal — the one #117 added — so it can only be written when the row
+    /// really left the registry.
+    #[test]
+    fn the_sweeper_records_what_it_reaped() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let expired = make_goopy("reaped-one", 10, 9000, Status::Done);
+        registry.save(&expired).unwrap();
+        registry.acquire_port("reaped-one", 9000, 9001).unwrap();
+
+        let gm = manager_with_provisioner(registry, NoopProvisioner);
+
+        let (swept, errors) = gm.sweep().unwrap();
+        assert_eq!(swept, 1);
+        assert!(errors.is_empty());
+        assert!(gm.get("reaped-one").unwrap().is_none());
+
+        let events = gm.events(Some("reaped-one"), 10).unwrap();
+        assert_eq!(events.len(), 1, "expected one event, got {events:?}");
+        assert_eq!(events[0].outcome, EventOutcome::Reaped);
+        assert_eq!(events[0].phase, EventPhase::Sweep);
+        assert_eq!(events[0].code, InstanceEvent::NO_ERROR);
+    }
+
+    /// A sweep that removed nothing must record nothing — the same guarantee
+    /// #117 gave the log line, now for the durable copy.
+    #[test]
+    fn a_sweep_that_reclaims_nothing_records_no_reap() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_row(&registry, "stuck", 9000, Status::Failed);
+
+        let gm = manager_with_provisioner(
+            registry,
+            UndeprovisionableProvisioner {
+                deprovision_calls: Arc::new(Mutex::new(0)),
+            },
+        );
+
+        let (swept, errors) = gm.sweep().unwrap();
+        assert_eq!(swept, 0);
+        assert_eq!(errors.len(), 1);
+
+        let events = gm.events(Some("stuck"), 10).unwrap();
+        assert!(
+            events.iter().all(|e| e.outcome != EventOutcome::Reaped),
+            "nothing was reclaimed, so no reap may be recorded: {events:?}"
+        );
+    }
+
+    /// The sweeper and a hand-driven despawn run the same teardown, and only
+    /// the phase can tell them apart once the row is gone.
+    #[test]
+    fn a_despawn_is_recorded_as_a_despawn_not_a_sweep() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_row(&registry, "by-hand", 9000, Status::Done);
+
+        let gm = manager_with_provisioner(registry, NoopProvisioner);
+        gm.despawn_blocking("by-hand").unwrap();
+
+        let events = gm.events(Some("by-hand"), 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].phase, EventPhase::Despawn);
+        assert_eq!(events[0].outcome, EventOutcome::Reaped);
+    }
+
+    /// A registry that cannot give a port back, standing in for a write that
+    /// fails for a reason other than the allocation already being gone.
+    struct UnreleasablePortRegistry(SqliteRegistry);
+
+    impl GoopyRegistry for UnreleasablePortRegistry {
+        fn release_port(&self, _port: u32) -> Result<(), Error> {
+            Err(Error::Registry {
+                context: "release port",
+                source: RegistrySource::WalModeUnavailable("delete".into()),
+            })
+        }
+        fn save(&self, gp: &Goopy) -> Result<(), Error> {
+            self.0.save(gp)
+        }
+        fn load(&self, slug: &str) -> Result<Option<Goopy>, Error> {
+            self.0.load(slug)
+        }
+        fn delete(&self, slug: &str) -> Result<(), Error> {
+            self.0.delete(slug)
+        }
+        fn list(&self) -> Result<Vec<Goopy>, Error> {
+            self.0.list()
+        }
+        fn update_status(&self, slug: &str, status: Status) -> Result<(), Error> {
+            self.0.update_status(slug, status)
+        }
+        fn acquire_port(&self, slug: &str, s: u32, e: u32) -> Result<u32, Error> {
+            self.0.acquire_port(slug, s, e)
+        }
+        fn count_provisioned(&self) -> Result<u32, Error> {
+            self.0.count_provisioned()
+        }
+        fn count_active(&self) -> Result<u32, Error> {
+            self.0.count_active()
+        }
+        fn save_within_caps(&self, gp: &Goopy, mp: u32, ma: u32) -> Result<(), Error> {
+            self.0.save_within_caps(gp, mp, ma)
+        }
+        fn record_event(&self, event: &InstanceEvent) -> Result<(), Error> {
+            self.0.record_event(event)
+        }
+        fn fail_with_event(&self, slug: &str, event: &InstanceEvent) -> Result<(), Error> {
+            self.0.fail_with_event(slug, event)
+        }
+        fn delete_with_event(&self, slug: &str, event: &InstanceEvent) -> Result<(), Error> {
+            self.0.delete_with_event(slug, event)
+        }
+        fn prune_events_before(&self, cutoff: chrono::DateTime<Utc>) -> Result<u32, Error> {
+            self.0.prune_events_before(cutoff)
+        }
+        fn events(&self, slug: Option<&str>, limit: u32) -> Result<Vec<InstanceEvent>, Error> {
+            self.0.events(slug, limit)
+        }
+    }
+
+    /// A port that fails to return to the pool is the quietest loss in the
+    /// codebase: the sweep counts the row as swept, correctly, and the range
+    /// shrinks by one with the owning row already deleted. The event is the
+    /// only thing left that names the slug (#117).
+    #[test]
+    fn a_leaked_port_is_recorded_against_the_slug_that_leaked_it() {
+        let inner = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_row(&inner, "leaky", 9000, Status::Done);
+
+        let gm = manager_with(UnreleasablePortRegistry(inner), NoopProvisioner, 100, 100);
+        gm.despawn_blocking("leaky")
+            .expect("the row still left the registry, so the teardown succeeded");
+
+        let events = gm.events(Some("leaky"), 10).unwrap();
+        assert_eq!(events.len(), 2, "expected reap + leak, got {events:?}");
+
+        let leak = events
+            .iter()
+            .find(|e| e.outcome == EventOutcome::Failed)
+            .expect("the leaked port must be recorded");
+        assert_eq!(leak.code, "registry");
+        assert!(
+            leak.detail
+                .as_deref()
+                .is_some_and(|d| d.contains("releasing port 9000")),
+            "the detail must say what was being attempted: {leak:?}"
+        );
+    }
+
+    /// The trap on the other side: a spawn that failed released its own port,
+    /// so the sweep that later reaps the row finds nothing to release. That is
+    /// the normal path, and recording it would put leaks that never happened
+    /// into the one log that has to be trustworthy.
+    #[test]
+    fn a_port_already_released_by_a_failed_spawn_is_not_recorded_as_a_leak() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        // Saved without `acquire_port`, exactly as a failed spawn leaves it.
+        registry
+            .save(&make_goopy("already-released", 0, 9000, Status::Failed))
+            .unwrap();
+
+        let gm = manager_with_provisioner(registry, NoopProvisioner);
+        gm.despawn_blocking("already-released").unwrap();
+
+        let events = gm.events(Some("already-released"), 10).unwrap();
+        assert_eq!(events.len(), 1, "only the reap belongs here: {events:?}");
+        assert_eq!(events[0].outcome, EventOutcome::Reaped);
+    }
+
+    /// June 2026, reconstructed: an instance fails, the sweep reaps it, and
+    /// months later somebody asks why. Before #118 the answer was a deleted
+    /// row and a rotated journal.
+    #[test]
+    fn the_reason_a_reaped_instance_failed_is_still_queryable() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let gm = manager_with_provisioner(registry, UnprovisionableProvisioner);
+
+        let (slug, _) = gm.spawn().unwrap();
+        wait_for_spawn_to_settle(&gm, &slug);
+        assert_eq!(gm.get(&slug).unwrap().unwrap().status, Status::Failed);
+
+        // The sweep reaps `Failed` rows unconditionally, taking the only
+        // evidence with it — that was the whole problem.
+        let (swept, errors) = gm.sweep().unwrap();
+        assert_eq!(swept, 1);
+        assert!(errors.is_empty());
+        assert!(
+            gm.get(&slug).unwrap().is_none(),
+            "the instance must really be gone"
+        );
+
+        let events = gm.events(Some(&slug), 10).unwrap();
+        assert_eq!(events.len(), 2, "failure and reap, got {events:?}");
+
+        let failure = events
+            .iter()
+            .find(|e| e.outcome == EventOutcome::Failed)
+            .expect("the failure must have survived the reap");
+        assert_eq!(failure.phase, EventPhase::Spawn);
+        assert_eq!(failure.code, "subprocess");
+        assert!(
+            failure
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("EACCES")),
+            "{failure:?}"
+        );
+
+        let reap = events
+            .iter()
+            .find(|e| e.outcome == EventOutcome::Reaped)
+            .expect("the reap must close the story");
+        assert_eq!(reap.phase, EventPhase::Sweep);
+        assert!(
+            reap.occurred_at >= failure.occurred_at,
+            "failed at T, reaped at T+n: {events:?}"
+        );
     }
 
     // ── capacity caps ─────────────────────────────────────────────────────
