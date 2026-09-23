@@ -68,7 +68,7 @@ There is no step for `config.toml`: it is version-controlled under [`deploy/conf
 ./deploy/deploy.sh goopy@droplet <env> [ssh-port]   # e.g. goopy@droplet dev
 ```
 
-This cross-compiles `gl-serv` to a fully static musl binary, uploads it to the droplet along with `deploy/config/<env>.toml`, restarts the `gl-serv` systemd service, and verifies the service came back up.
+This cross-compiles `gl-serv` and `gl-cli` to fully static musl binaries from one build, uploads both to the droplet along with `deploy/config/<env>.toml`, restarts the `gl-serv` systemd service, and verifies the service came back up.
 
 The environment is required and has no default: the config is shipped to the host, so a default would quietly reconfigure one environment with another's settings. Edit `deploy/config/<env>.toml` and deploy — a hand-edit on the droplet is overwritten by the next run.
 

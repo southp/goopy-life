@@ -25,8 +25,9 @@ a code change:
 it to `deploy/push-binary.sh` — the same script the manual production deploy
 uses, so the two paths cannot drift apart.
 
-The workflow ships the **binary and the config**. The systemd unit, the nginx
-configs and the ZFS pool are still one-time manual setup (see the
+The workflow ships **both binaries and the config** — `gl-serv` and `gl-cli`,
+see [The maintenance CLI on the host](#the-maintenance-cli-on-the-host). The
+systemd unit, the nginx configs and the ZFS pool are still one-time manual setup (see the
 [droplet setup](../README.md#droplet-setup-one-time) steps); change one of those
 and you still have to apply it by hand.
 
@@ -116,6 +117,55 @@ To run it by hand against a config before deploying it (from `backend/`):
 cargo run -q -p gl-serv -- --check-config --config ../deploy/config/prod.toml
 ```
 
+## The maintenance CLI on the host
+
+`gl-serv` exposes no despawn route, so tearing down one instance by hand,
+listing what exists and running `alloc`/`dealloc` need `gl-cli`. The deploy
+installs it at `/opt/goopy-life/bin/gl-cli` from the same `cargo build` as
+`gl-serv`.
+
+**From the same build, on purpose.** `gl-cli` links `gl-core`, so it shares the
+registry schema and the provisioner with `gl-serv`. Shipping it on a path of its
+own is how a host ends up with a `gl-cli` older than the `gl-serv` it shares a
+database with — the moment a maintenance tool is most dangerous. It is also why
+a failed `gl-cli` install aborts the deploy rather than being skipped.
+
+```bash
+sudo -u goopy /opt/goopy-life/bin/gl-cli \
+    --config /opt/goopy-life/config.toml --prod list
+```
+
+Two arguments, both load-bearing:
+
+- **`--config /opt/goopy-life/config.toml`** — the default is `./config.toml`,
+  which does not exist in the directory an operator is likely standing in.
+- **`--prod`** — without it the CLI runs in **dev mode whatever the config
+  says**, and a dev-mode despawn kills a detached process instead of removing
+  the systemd unit and the nginx sites. The instance disappears from the
+  registry and its real resources stay behind. `gl-cli --help` repeats this.
+
+Run it as `goopy`: that account owns the registry, the working directories and
+the `sudoers` rules the provisioner needs. As any other user it either cannot
+write the database or cannot tear an instance down.
+
+### Running it beside a live gl-serv
+
+Safe by design, not by luck. `SqliteRegistry::new` opens every connection with
+`PRAGMA busy_timeout = 5000` and requires `journal_mode=WAL` — it returns an
+error rather than falling back if WAL is unavailable. In WAL mode a reader never
+blocks the writer, and a second writer waits out the busy timeout instead of
+failing with `SQLITE_BUSY`. Both processes also run the same schema migration,
+each step inside an `IMMEDIATE` transaction that re-reads `user_version` under
+the write lock, so two of them starting at once cannot double-apply a step.
+
+Racing the two on one *instance* is refused rather than corrupted: `despawn` on
+a slug the sweeper has already claimed sees status `Despawning` and fails as
+`Invalid`.
+
+The exception is `alloc` and `dealloc`. They take a raw path, consult no
+registry and check nothing — never aim them at a live instance's working
+directory.
+
 ## Frontend — Vercel Git integration
 
 The frontend deploys through Vercel's native GitHub integration, not a workflow:
@@ -164,8 +214,9 @@ to diff against.
 ./deploy/deploy.sh goopy@droplet prod [ssh-port]
 ```
 
-Cross-compiles `gl-serv` to a static musl binary with `cargo-zigbuild`, uploads
-it with `deploy/config/prod.toml`, and restarts the service. Requires the
+Cross-compiles `gl-serv` and `gl-cli` to static musl binaries with
+`cargo-zigbuild`, uploads them with `deploy/config/prod.toml`, and restarts the
+service. Requires the
 one-time local toolchain setup in the
 [README](../README.md#cross-compilation-setup-one-time-on-macos).
 

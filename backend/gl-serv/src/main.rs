@@ -25,7 +25,7 @@ use tower_http::trace::TraceLayer;
 
 #[derive(Parser)]
 #[command(name = "gl-serv")]
-#[command(version = "0.1")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Goopy.Life API server")]
 struct Cli {
     /// Path to the config file

@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
-# Usage: push-binary.sh <user@host> <path-to-gl-serv> <path-to-config> [ssh-port]
+# Usage: push-binary.sh <user@host> <gl-serv> <gl-cli> <config> [ssh-port]
 #
-# Uploads an already-built gl-serv binary together with the configuration it
-# should run with, installs both over the running ones, restarts the systemd
-# service and verifies it came back up.
+# Uploads the already-built gl-serv and gl-cli binaries together with the
+# configuration they should run with, installs all three over the ones on the
+# host, restarts the systemd service and verifies it came back up.
+#
+# gl-cli is the droplet's maintenance CLI: despawning one instance by hand,
+# listing what exists and driving alloc/dealloc have no route on gl-serv. It
+# ships from this same deploy rather than a path of its own because it links
+# gl-core, so it shares the registry schema and the provisioner with gl-serv --
+# a separate path is how a host ends up with a gl-cli older than the gl-serv it
+# shares a database with, which is when a maintenance tool is most dangerous.
 #
 # This is the single source of truth for the remote half of a deploy. Both
 # callers share it on purpose:
@@ -24,21 +31,26 @@
 # Set DRY_RUN=1 to print the scp/ssh commands instead of running them.
 set -euo pipefail
 
-TARGET=${1:?"Usage: push-binary.sh <user@host> <path-to-gl-serv> <path-to-config> [ssh-port]"}
-BINARY=${2:?"Usage: push-binary.sh <user@host> <path-to-gl-serv> <path-to-config> [ssh-port]"}
-CONFIG=${3:?"Usage: push-binary.sh <user@host> <path-to-gl-serv> <path-to-config> [ssh-port]"}
-PORT=${4:-22}
+USAGE="Usage: push-binary.sh <user@host> <gl-serv> <gl-cli> <config> [ssh-port]"
+
+TARGET=${1:?"$USAGE"}
+SERV_BINARY=${2:?"$USAGE"}
+CLI_BINARY=${3:?"$USAGE"}
+CONFIG=${4:?"$USAGE"}
+PORT=${5:-22}
 DRY_RUN=${DRY_RUN:-0}
 
 # Must match the --config path in deploy/gl-serv.service's ExecStart.
 REMOTE_CONFIG=/opt/goopy-life/config.toml
 
 if [[ "$DRY_RUN" != "1" ]]; then
-    if [[ ! -f "$BINARY" ]]; then
-        echo "push-binary.sh: no such binary: $BINARY" >&2
-        echo "push-binary.sh: build it first, or check the --target path." >&2
-        exit 1
-    fi
+    for binary in "$SERV_BINARY" "$CLI_BINARY"; do
+        if [[ ! -f "$binary" ]]; then
+            echo "push-binary.sh: no such binary: $binary" >&2
+            echo "push-binary.sh: build it first, or check the --target path." >&2
+            exit 1
+        fi
+    done
     if [[ ! -f "$CONFIG" ]]; then
         echo "push-binary.sh: no such config: $CONFIG" >&2
         echo "push-binary.sh: expected one of deploy/config/*.toml." >&2
@@ -55,7 +67,8 @@ run() {
 }
 
 # scp spells the port -P, ssh spells it -p.
-run scp -P "$PORT" "$BINARY" "$TARGET:/tmp/gl-serv"
+run scp -P "$PORT" "$SERV_BINARY" "$TARGET:/tmp/gl-serv"
+run scp -P "$PORT" "$CLI_BINARY" "$TARGET:/tmp/gl-cli"
 
 # Staged next to its destination rather than in /tmp so the swap below is a
 # rename within one directory, which is atomic: gl-serv is restarted moments
@@ -94,7 +107,15 @@ run ssh -p "$PORT" "$TARGET" "chmod +x /tmp/gl-serv && /tmp/gl-serv --check-conf
 # a service whose binary it never replaced -- green run, stale API. A sudo
 # denial (the usual cause: /etc/sudoers.d/goopy missing, or the deploy running
 # as an account the drop-in does not name) has to stop the deploy here.
-run ssh -p "$PORT" "$TARGET" "sudo install -m 755 /tmp/gl-serv /opt/goopy-life/bin/gl-serv && chmod 644 $REMOTE_CONFIG.new && mv $REMOTE_CONFIG.new $REMOTE_CONFIG && rm /tmp/gl-serv"
+#
+# Each install is pinned as its own line in deploy/sudoers.goopy, and gl-cli
+# goes first on purpose: it is the artifact nothing else in the deploy depends
+# on, so a host whose drop-in predates it is denied while gl-serv's binary and
+# config are still untouched and still serving. Installing it last would leave
+# a half-applied deploy -- new binary and config on disk, old process running --
+# to fail on the same missing rule. Anything added later belongs ahead of
+# gl-serv for the same reason.
+run ssh -p "$PORT" "$TARGET" "sudo install -m 755 /tmp/gl-cli /opt/goopy-life/bin/gl-cli && sudo install -m 755 /tmp/gl-serv /opt/goopy-life/bin/gl-serv && chmod 644 $REMOTE_CONFIG.new && mv $REMOTE_CONFIG.new $REMOTE_CONFIG && rm /tmp/gl-serv /tmp/gl-cli"
 
 run ssh -p "$PORT" "$TARGET" sudo systemctl restart gl-serv
 
