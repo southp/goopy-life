@@ -11,6 +11,13 @@ SCRIPT_UNDER_TEST="$(cd "$(dirname "$0")/.." && pwd)/push-binary.sh"
 FAILURES=0
 CASES=0
 
+# The script requires the commit its binaries were built from, so every case
+# below has to supply one. A single case runs without it, to assert that the
+# requirement is real: without it the identity check at the end of a deploy
+# would have nothing to compare against.
+BUILT_SHA=c50c932ab1d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8
+export GL_GIT_SHA="$BUILT_SHA"
+
 # Runs push-binary.sh in dry-run mode and asserts the output contains a line.
 assert_emits() {
     local name=$1 expected=$2
@@ -262,6 +269,94 @@ STUB
     fi
 }
 
+# Asserts the identity check sits after the restart and after `is-active`:
+# asking a process that has not been replaced yet, or one that is still
+# starting, answers a question about the wrong binary.
+assert_identity_check_is_last() {
+    local name=$1 serv=$2 cli=$3 config=$4
+    CASES=$((CASES + 1))
+    local output restart is_active version
+    output=$(DRY_RUN=1 "$SCRIPT_UNDER_TEST" goopy@dev.example.com "$serv" "$cli" "$config")
+    restart=$(printf '%s\n' "$output" | grep -n 'systemctl restart' | head -1 | cut -d: -f1)
+    is_active=$(printf '%s\n' "$output" | grep -n 'is-active' | head -1 | cut -d: -f1)
+    version=$(printf '%s\n' "$output" | grep -n '/version' | head -1 | cut -d: -f1)
+
+    if [[ -n "$restart" && -n "$is_active" && -n "$version" \
+        && "$restart" -lt "$is_active" && "$is_active" -lt "$version" ]]; then
+        echo "ok   — $name"
+    else
+        echo "FAIL — $name"
+        echo "       restart:   ${restart:-<none>}"
+        echo "       is-active: ${is_active:-<none>}"
+        echo "       /version:  ${version:-<none>}"
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
+# Extracts the identity check the script would run on the host and drives it
+# locally against a stub gl-serv and a stub curl. The comparison runs in the
+# remote shell, so asserting only on the ssh line would leave the part that
+# decides whether a deploy passes or fails entirely untested.
+#
+# `built` is the commit the deploy claims to have built, `expect` is `pass` or
+# `fail`, and `curl_status` lets the /version fetch itself be failed — which is
+# a different outcome from a fetch that returns the wrong sha.
+assert_identity_check() {
+    local name=$1 built=$2 expect=$3 served_body=$4 curl_status=$5 serv=$6 cli=$7 config=$8
+    CASES=$((CASES + 1))
+    local remote stub local_cmd status
+    remote=$(GL_GIT_SHA="$built" DRY_RUN=1 "$SCRIPT_UNDER_TEST" goopy@dev.example.com "$serv" "$cli" "$config" \
+        | grep -F '/version' \
+        | sed 's|^ssh -p [0-9]* [^ ]* ||')
+    if [[ -z "$remote" ]]; then
+        echo "FAIL — $name (no /version check found in the dry run)"
+        FAILURES=$((FAILURES + 1))
+        return
+    fi
+
+    stub=$(mktemp -d)
+    mkdir -p "$stub/bin"
+    # Stands in for the installed gl-serv, printing the one line of the
+    # --check-config summary the check reads.
+    cat >"$stub/bin/gl-serv" <<'STUB'
+#!/bin/sh
+echo "  bind_address  127.0.0.1:3000"
+echo "  api_address   127.0.0.1:3000"
+STUB
+    cat >"$stub/curl" <<STUB
+#!/bin/sh
+printf '%s' '$served_body'
+exit $curl_status
+STUB
+    chmod +x "$stub/bin/gl-serv" "$stub/curl"
+
+    # The installed binary is named by absolute path, which no PATH entry can
+    # stand in for, so it is rewritten to the stub.
+    local_cmd=$(printf '%s' "$remote" | sed "s|/opt/goopy-life/bin/gl-serv|$stub/bin/gl-serv|")
+    PATH="$stub:$PATH" sh -c "$local_cmd" >/dev/null 2>&1
+    status=$?
+    /bin/rm -rf "$stub"
+
+    local ok=0
+    if [[ "$expect" == "pass" && "$status" -eq 0 ]]; then
+        ok=1
+    fi
+    if [[ "$expect" == "fail" && "$status" -ne 0 ]]; then
+        ok=1
+    fi
+
+    if [[ "$ok" -eq 1 ]]; then
+        echo "ok   — $name"
+    else
+        echo "FAIL — $name"
+        echo "       expected: $expect"
+        echo "       exit status: $status"
+        echo "       built:       $built"
+        echo "       served body: $served_body"
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
 # Asserts that outside dry-run a non-existent input file aborts before any
 # command runs. Takes the binary and config paths so either can be the missing
 # one.
@@ -362,6 +457,69 @@ assert_config_swap_is_atomic push_binary_swaps_the_config_atomically "$SERV" "$C
 assert_emits push_binary_verifies_the_service_is_active_after_restart \
     "ssh -p 22 goopy@dev.example.com sleep 8; systemctl is-active --quiet gl-serv" \
     goopy@dev.example.com "$SERV" "$CLI" "$CFG"
+
+# `is-active` says *something* is running, which stays green through an install
+# that did not replace the binary, a restart that raced, or a rollback that
+# silently did not take. The identity check closes that gap — but only if it
+# runs after the process it is asking about has actually been replaced.
+assert_identity_check_is_last push_binary_verifies_identity_after_the_restart "$SERV" "$CLI" "$CFG"
+
+# The commit is compared against the full sha in the /version body, so the check
+# needs no JSON parser on the droplet.
+assert_emits push_binary_asks_the_host_which_commit_is_serving \
+    "ssh -p 22 goopy@dev.example.com api=\$($SERV_DEST --check-config --config $REMOTE_CFG | awk '\$1 == \"api_address\" { print \$2 }'); [ -n \"\$api\" ] || { echo 'push-binary.sh: could not read api_address from the installed config' >&2; exit 1; }; serving=\$(curl -fsS --max-time 10 \"http://\$api/version\") || { echo \"push-binary.sh: GET /version failed on \$api\" >&2; exit 1; }; case \"\$serving\" in *'\"sha_full\":\"$BUILT_SHA\"'*) echo \"push-binary.sh: verified $BUILT_SHA is serving\" ;; *) echo \"push-binary.sh: deployed the wrong commit -- built $BUILT_SHA, /version says: \$serving\" >&2; exit 1 ;; esac" \
+    goopy@dev.example.com "$SERV" "$CLI" "$CFG"
+
+# The deploy passes when the host reports the commit this run built.
+assert_identity_check push_binary_accepts_the_commit_it_built "$BUILT_SHA" pass \
+    "{\"sha\":\"c50c932\",\"sha_full\":\"$BUILT_SHA\",\"built_at\":\"2026-09-23T10:00:00Z\",\"version\":\"0.1.0\"}" 0 \
+    "$SERV" "$CLI" "$CFG"
+
+# And fails when it reports a different one — an install that did not take, or
+# a restart that raced. This is the whole reason the endpoint is worth building.
+assert_identity_check push_binary_fails_when_a_different_commit_is_serving "$BUILT_SHA" fail \
+    '{"sha":"3db4f20","sha_full":"3db4f20aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","built_at":"2026-09-01T10:00:00Z","version":"0.1.0"}' 0 \
+    "$SERV" "$CLI" "$CFG"
+
+# A build made by neither deploy path reports `unknown`. Reaching a host that
+# says so means the binary that is serving was not built by this deploy.
+assert_identity_check push_binary_fails_when_the_host_reports_an_unknown_commit "$BUILT_SHA" fail \
+    '{"sha":"unknown","sha_full":"unknown","built_at":"unknown","version":"0.1.0"}' 0 \
+    "$SERV" "$CLI" "$CFG"
+
+# A prefix match would accept any commit whose id merely starts with the built
+# one, so the comparison includes the closing quote.
+assert_identity_check push_binary_rejects_a_merely_prefixed_commit "$BUILT_SHA" fail \
+    "{\"sha\":\"c50c932\",\"sha_full\":\"${BUILT_SHA}99\",\"version\":\"0.1.0\"}" 0 \
+    "$SERV" "$CLI" "$CFG"
+
+# A dirty build stamps `-dirty` on both sides, so it matches. The suffix says
+# what is running; it does not forbid deploying it.
+assert_identity_check push_binary_accepts_a_dirty_build_that_matches "$BUILT_SHA-dirty" pass \
+    "{\"sha\":\"c50c932-dirty\",\"sha_full\":\"$BUILT_SHA-dirty\",\"version\":\"0.1.0\"}" 0 \
+    "$SERV" "$CLI" "$CFG"
+
+# ...and a dirty binary must not pass as the clean commit it was made from. That
+# is the failure the suffix exists to catch, so the check has to act on it.
+assert_identity_check push_binary_rejects_a_dirty_host_against_a_clean_build "$BUILT_SHA" fail \
+    "{\"sha_full\":\"$BUILT_SHA-dirty\",\"version\":\"0.1.0\"}" 0 \
+    "$SERV" "$CLI" "$CFG"
+
+# An unreachable /version fails the deploy rather than being read as agreement.
+# A check that passes when it could not ask is not a check.
+assert_identity_check push_binary_fails_when_version_is_unreachable "$BUILT_SHA" fail \
+    '' 7 \
+    "$SERV" "$CLI" "$CFG"
+
+# The commit is required, not defaulted: a default would make the check above
+# compare a value against itself and pass on every deploy.
+CASES=$((CASES + 1))
+if env -u GL_GIT_SHA DRY_RUN=1 "$SCRIPT_UNDER_TEST" goopy@dev.example.com "$SERV" "$CLI" "$CFG" >/dev/null 2>&1; then
+    echo "FAIL — push_binary_requires_the_built_commit_id (expected non-zero exit, got 0)"
+    FAILURES=$((FAILURES + 1))
+else
+    echo "ok   — push_binary_requires_the_built_commit_id"
+fi
 
 # All four positional arguments are mandatory — a missing one must not
 # half-deploy, and must not shift the config into a binary's position.

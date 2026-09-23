@@ -3,7 +3,10 @@
 #
 # Uploads the already-built gl-serv and gl-cli binaries together with the
 # configuration they should run with, installs all three over the ones on the
-# host, restarts the systemd service and verifies it came back up.
+# host, restarts the systemd service, verifies it came back up -- and then
+# verifies that what came back up is the commit this run built, by asking
+# `GET /version` on the host. Set GL_GIT_SHA to that commit; it is required,
+# because a defaulted one would turn the assertion into one that always passes.
 #
 # gl-cli is the droplet's maintenance CLI: despawning one instance by hand,
 # listing what exists and driving alloc/dealloc have no route on gl-serv. It
@@ -40,8 +43,18 @@ CONFIG=${4:?"$USAGE"}
 PORT=${5:-22}
 DRY_RUN=${DRY_RUN:-0}
 
+# The commit the binaries being pushed were built from, stamped into them via
+# gl-core/build.rs. Required rather than defaulted: it is the value the identity
+# check at the end compares against, and a default would turn a real assertion
+# into one that always passes. Both callers export it.
+SHA_HINT="push-binary.sh: GL_GIT_SHA must name the commit the binaries were built from"
+GIT_SHA=${GL_GIT_SHA:?"$SHA_HINT (deploy/deploy.sh and .github/workflows/backend-deploy.yml set it)"}
+
 # Must match the --config path in deploy/gl-serv.service's ExecStart.
 REMOTE_CONFIG=/opt/goopy-life/config.toml
+
+# Must match the install destination below, and gl-serv.service's ExecStart.
+REMOTE_SERV=/opt/goopy-life/bin/gl-serv
 
 if [[ "$DRY_RUN" != "1" ]]; then
     for binary in "$SERV_BINARY" "$CLI_BINARY"; do
@@ -126,3 +139,39 @@ run ssh -p "$PORT" "$TARGET" sudo systemctl restart gl-serv
 # --quiet rejects; sleep past the first restart window before asking so a
 # genuinely healthy unit is not caught mid-start.
 run ssh -p "$PORT" "$TARGET" "sleep 8; systemctl is-active --quiet gl-serv"
+
+# And then the question `is-active` cannot answer: is the process that came back
+# the one this run built? `is-active` says *something* is running, which stays
+# green through an install that did not replace the binary, a restart that
+# raced, or a rollback that silently did not take -- the class of failure that
+# left #117's fix undeployed for three weeks with nothing surfacing the gap.
+#
+# Three steps, as one remote command so the tests can extract and drive it:
+#
+#   1. Ask the *installed* binary where gl-serv can be reached, rather than
+#      parsing the TOML here. `api_address` is the field that already answers
+#      "an address a client can connect to" -- it resolves a wildcard
+#      bind_address to loopback (#149) -- and re-deriving that in awk is how the
+#      two drift. This re-reads the config that is actually installed, not the
+#      staged copy the gate upstream checked.
+#   2. `GET /version`, which gl-serv answers with the commit it was compiled
+#      from. Loopback, so it bypasses nginx and reaches the process directly;
+#      `--max-time` keeps a wedged socket from hanging the deploy forever. curl
+#      is the one host tool this step assumes.
+#   3. Compare. The match is on the full sha inside the JSON body rather than
+#      via a parser, so the check needs no jq on the droplet.
+#
+# There is no `set -e` in the remote shell, so every step ends its own failure
+# explicitly, and the mismatch branch prints what /version actually said -- a
+# deploy that failed here is one where knowing the served sha is the whole
+# diagnosis.
+#
+# A dirty build reports `<sha>-dirty` on both sides and matches; that is the
+# point of the suffix, not an exception to it.
+VERIFY_IDENTITY="api=\$($REMOTE_SERV --check-config --config $REMOTE_CONFIG | awk '\$1 == \"api_address\" { print \$2 }'); "
+VERIFY_IDENTITY+="[ -n \"\$api\" ] || { echo 'push-binary.sh: could not read api_address from the installed config' >&2; exit 1; }; "
+VERIFY_IDENTITY+="serving=\$(curl -fsS --max-time 10 \"http://\$api/version\") || { echo \"push-binary.sh: GET /version failed on \$api\" >&2; exit 1; }; "
+VERIFY_IDENTITY+="case \"\$serving\" in *'\"sha_full\":\"$GIT_SHA\"'*) echo \"push-binary.sh: verified $GIT_SHA is serving\" ;; "
+VERIFY_IDENTITY+="*) echo \"push-binary.sh: deployed the wrong commit -- built $GIT_SHA, /version says: \$serving\" >&2; exit 1 ;; esac"
+
+run ssh -p "$PORT" "$TARGET" "$VERIFY_IDENTITY"
