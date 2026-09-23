@@ -44,6 +44,37 @@ if [[ ! -f "$CONFIG" ]]; then
     exit 1
 fi
 
+# Stamp the build with the commit it is made from, so `GET /version` on the
+# droplet can be compared against what this run built (see push-binary.sh) and
+# so "which commit is serving?" has an answer that is not a guess at file
+# mtimes.
+#
+# `--untracked-files=no` on purpose: a build's inputs cannot change without some
+# tracked file changing too (a new module has to be declared in one), while an
+# untracked scratch file in the checkout is not a difference in what ships.
+# Counting those would mark every manual deploy dirty, which makes the suffix
+# mean nothing precisely when it needs to mean something.
+#
+# The suffix is not cosmetic: a hand-deployed working copy that claims to be a
+# clean commit is the exact failure this stamp exists to eliminate, reproduced
+# inside the fix.
+if GIT_SHA=$(git -C "$HERE" rev-parse HEAD 2>/dev/null); then
+    if [[ -n "$(git -C "$HERE" status --porcelain --untracked-files=no)" ]]; then
+        GIT_SHA="$GIT_SHA-dirty"
+        echo "deploy.sh: working tree is dirty; deploying as $GIT_SHA" >&2
+    fi
+else
+    echo "deploy.sh: not a git checkout; the deploy will report an unknown commit" >&2
+    GIT_SHA=unknown
+fi
+
+# Exported rather than passed per-command: the same value has to reach both the
+# build below and push-binary.sh's identity assertion, and a second derivation
+# there could disagree with this one.
+BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+export GL_GIT_SHA="$GIT_SHA"
+export GL_BUILT_AT="$BUILT_AT"
+
 cd "$HERE/../backend"
 cargo zigbuild --release --target x86_64-unknown-linux-musl -p gl-serv -p gl-cli
 "$HERE/push-binary.sh" "$TARGET" \
