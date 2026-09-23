@@ -1,3 +1,4 @@
+pub mod build_info;
 pub mod config;
 mod goopy;
 mod goopy_manager;
