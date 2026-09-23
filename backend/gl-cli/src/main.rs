@@ -128,7 +128,7 @@ fn main() {
     }
 
     println!(
-        "Config: {path}\n  db:                {db}\n  base_dir:          {base_dir}\n  domain:            {domain}\n  life_in_days:      {life_in_days}\n  provisioner:       {provisioner}\n  port range:        {port_start}–{port_end}\n  allocator:         {alloc_kind}\n  allocator pool:    {alloc_pool}\n  allocator quota:   {alloc_quota} MB\n  cors_origin:       {cors_origin}\n  bind_address:      {bind_address}\n  sweep_interval:    {sweep}s\n  mode:              {mode}",
+        "Config: {path}\n  db:                {db}\n  base_dir:          {base_dir}\n  domain:            {domain}\n  life_in_days:      {life_in_days}\n  provisioner:       {provisioner}\n  port range:        {port_start}–{port_end}\n  allocator:         {alloc_kind}\n  allocator pool:    {alloc_pool}\n  allocator quota:   {alloc_quota} MB\n  cors_origin:       {cors_origin}\n  bind_address:      {bind_address}\n  api_address:       {api_address}\n  sweep_interval:    {sweep}s\n  mode:              {mode}",
         path = cli.config.display(),
         db = cfg.registry.path.display(),
         base_dir = cfg.base_dir.display(),
@@ -142,6 +142,7 @@ fn main() {
         alloc_quota = cfg.allocator.quota_mb,
         cors_origin = cfg.cors_origin,
         bind_address = cfg.bind_address,
+        api_address = cfg.resolved_api_address(),
         sweep = cfg.sweep_interval_secs,
         mode = if dev_mode { "dev" } else { "production" },
     );

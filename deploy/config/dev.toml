@@ -33,10 +33,21 @@ dev_mode = false
 # Allowed CORS origin: the Vercel frontend.
 cors_origin = "https://southp.dev"
 
-# Address and port for gl-serv to bind; also used by nginx auth_request
-# subrequests. Note that 0.0.0.0 exposes gl-serv directly alongside nginx; see
-# the note in docs/DEPLOYMENT.md before narrowing it to 127.0.0.1.
-bind_address = "0.0.0.0:3000"
+# Address and port gl-serv listens on. Loopback on purpose (#149): nginx is the
+# only thing that should reach gl-serv, and a caller arriving any other way
+# bypasses TLS and sets its own X-Real-IP — the header the per-IP rate limiter
+# keys on (#21, #105). That does not weaken the limiter, it defeats it: forge a
+# fresh IP per request and every bucket, including the tight POST /goopies one,
+# becomes unlimited.
+bind_address = "127.0.0.1:3000"
+
+# Where nginx connects to reach gl-serv — the auth_request alive-check baked
+# into every per-instance site. Deliberately a separate key from bind_address:
+# a wildcard is a sensible thing to listen on and a meaningless thing to connect
+# to, and until #149 the one string did both jobs. Unset it takes bind_address's
+# port on loopback, which is exactly this host's arrangement, so it stays
+# commented out. Uncomment only if nginx must reach gl-serv somewhere else.
+#   api_address = "127.0.0.1:3000"
 
 # How often to sweep expired and Failed instances (seconds; 3600 = 1h).
 #

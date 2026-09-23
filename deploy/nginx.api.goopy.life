@@ -26,8 +26,11 @@ server {
         proxy_set_header Host $host;
         # gl-serv's per-IP rate limiter keys on X-Real-IP, so this must always
         # overwrite whatever the client sent. That only holds as long as nginx
-        # is the sole path to gl-serv — keep bind_address on 127.0.0.1 (or
-        # firewall port 3000), otherwise the limiter is trivially bypassed.
+        # is the sole path to gl-serv, which is why deploy/config/*.toml set
+        # bind_address = "127.0.0.1:3000" and a CI test fails any deployed
+        # config that widens it (#149). Widen it here and the limiter is
+        # trivially bypassed; a firewall on port 3000 is belt and braces, but it
+        # is host state no deploy manages (#139).
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;

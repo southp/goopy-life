@@ -70,8 +70,12 @@ use crate::sys_utils::SysRunner;
 
 /// Renders the nginx site for one instance.
 ///
-/// `api_address` is where gl-serv listens; the `auth_request` subrequest is
-/// proxied there to ask whether the instance is still alive.
+/// `api_address` is where nginx **connects** to reach gl-serv; the
+/// `auth_request` subrequest is proxied there to ask whether the instance is
+/// still alive. It is deliberately not gl-serv's listen address: it comes from
+/// [`crate::config::Config::resolved_api_address`], which never yields a
+/// wildcard, because `proxy_pass http://0.0.0.0:3000/...` is a destination only
+/// by the accident of how Linux resolves it (#149).
 fn render_site(slug: &str, domain: &str, port: u32, api_address: &str) -> String {
     format!(
         r#"server {{
@@ -345,6 +349,57 @@ mod tests {
         assert!(
             subrequest.contains("proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;"),
             "alive-check subrequest must forward X-Forwarded-For"
+        );
+    }
+
+    /// The end of the path #149 is about: a config that listens on a wildcard
+    /// must still render an alive-check nginx can connect to.
+    ///
+    /// Asserted from the config rather than by calling [`render_site`] with a
+    /// hand-picked address, because the bug was never in the template — it was
+    /// in one field answering both "where do I listen" and "where do I connect"
+    /// on the way here. A regression would reintroduce exactly that, and only a
+    /// test spanning both halves would see it.
+    #[test]
+    fn a_wildcard_bind_address_still_renders_a_connectable_alive_check() {
+        use std::io::Write;
+
+        let toml = r#"
+base_dir = "/tmp/goopy"
+domain = "goopy.life"
+life_in_days = 7
+port_range_start = 9000
+port_range_end = 9100
+dev_mode = false
+cors_origin = "https://goopy.life"
+bind_address = "0.0.0.0:3000"
+[registry]
+path = "/tmp/goopy.db"
+[allocator]
+kind = "PlainDir"
+[provisioner]
+kind = "Hello"
+"#;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(toml.as_bytes()).unwrap();
+        let cfg = crate::config::Config::from_file(f.path()).expect("should parse");
+
+        let rendered = render_site(
+            "tasty-lucky-clover",
+            "goopy.life",
+            9876,
+            &cfg.resolved_api_address(),
+        );
+
+        assert!(
+            rendered.contains("proxy_pass http://127.0.0.1:3000/goopies/tasty-lucky-clover/alive;"),
+            "a wildcard bind_address must render a loopback alive-check, was:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("0.0.0.0"),
+            "no wildcard may reach a rendered site — it is a listen address, \
+             and only Linux's habit of routing a connect to 0.0.0.0 at loopback \
+             ever made it look like a destination"
         );
     }
 
