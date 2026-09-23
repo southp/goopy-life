@@ -267,6 +267,32 @@ struct ConfigResponse {
     domain: String,
 }
 
+/// Body of `GET /version` — which commit this process was built from.
+///
+/// Deliberately separate from [`ConfigResponse`], for the same reason
+/// [`CapacityResponse`] is and then some: the frontend fetches `/config` once
+/// at Vercel build time (`force-static`), and `frontend/vercel.json`'s
+/// `ignoreCommand` skips the Vercel build entirely for backend-only changes. A
+/// backend sha routed through `/config` would therefore freeze at whatever it
+/// was the last time the *frontend* happened to build, and go on being served
+/// as fact through any number of backend deploys. A version display that is
+/// confidently wrong is worse than none, so this is a runtime fetch.
+///
+/// Public on purpose: the repo is public, so the commit id discloses nothing
+/// that is not already readable, and the browser has no other way to be told.
+#[derive(serde::Serialize)]
+struct VersionResponse {
+    /// The abbreviated commit id, for display.
+    sha: String,
+    /// The full commit id, for linking to the commit — and what
+    /// `deploy/push-binary.sh` matches against what it just built.
+    sha_full: &'static str,
+    built_at: &'static str,
+    /// The crate version. Never bumped so far, so it is reported for
+    /// completeness rather than as the answer to "what is running".
+    version: &'static str,
+}
+
 /// Body of `GET /capacity`.
 ///
 /// Deliberately separate from [`ConfigResponse`]: the frontend fetches
@@ -570,6 +596,33 @@ async fn get_capacity(State(state): State<Arc<AppState>>) -> Result<impl IntoRes
     }))
 }
 
+/// `GET /version` — the commit this process was built from.
+///
+/// Answers "is the thing I merged the thing that is running?" without an ssh
+/// session and a guess at file mtimes. Two callers: the frontend footer, and
+/// `deploy/push-binary.sh`, which compares this against the sha it just built
+/// so the post-deploy check is an identity check rather than a liveness check.
+///
+/// `no-store` because the whole point is that it reflects the process that is
+/// answering right now; a cached copy is the stale-version problem again,
+/// moved one hop out.
+///
+/// Takes no state: every value is a compile-time constant of the binary.
+async fn get_version() -> impl IntoResponse {
+    let mut response = Json(VersionResponse {
+        sha: gl_core::build_info::short_git_sha(),
+        sha_full: gl_core::build_info::GIT_SHA,
+        built_at: gl_core::build_info::BUILT_AT,
+        version: env!("CARGO_PKG_VERSION"),
+    })
+    .into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
 async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(ConfigResponse {
         life_in_days: state.cfg.life_in_days,
@@ -772,6 +825,7 @@ fn build_router(
         .route("/goopies/{slug}", get(get_goopy))
         .route("/config", get(get_config))
         .route("/capacity", get(get_capacity))
+        .route("/version", get(get_version))
         .layer(read_layer)
         .with_state(Arc::clone(&state));
 
@@ -1539,6 +1593,171 @@ mod tests {
         assert_eq!(body["domain"], "goopy.life");
         assert_eq!(body["life_in_days"], 7);
         assert_eq!(body["storage_quota_mb"], 0); // PlainDir has no quota
+    }
+
+    /// The backend's commit must never travel on `/config`. That body is
+    /// fetched once at Vercel build time and frozen into a static page, and
+    /// backend-only merges do not rebuild the frontend at all — so a sha here
+    /// would be served as fact long after it stopped being true. This asserts
+    /// the decision rather than trusting it to stay remembered.
+    #[tokio::test]
+    async fn get_config_does_not_carry_the_backend_version() {
+        let app = make_router(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
+                    .uri("/config")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = body_json(resp.into_body()).await;
+        for field in ["sha", "sha_full", "built_at", "version"] {
+            assert!(
+                body.get(field).is_none(),
+                "/config must not carry {field}: it is frozen at frontend build time",
+            );
+        }
+    }
+
+    // ── get_version ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_version_reports_the_build_stamp() {
+        let app = make_router(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
+                    .uri("/version")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp.into_body()).await;
+        // Compared against the constants rather than a literal: the test binary
+        // is stamped by whatever built it, which under `cargo test` is
+        // "unknown" and under a deploy is a real commit. Both must serve.
+        assert_eq!(body["sha_full"], gl_core::build_info::GIT_SHA);
+        assert_eq!(body["sha"], gl_core::build_info::short_git_sha());
+        assert_eq!(body["built_at"], gl_core::build_info::BUILT_AT);
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    /// A build made by neither deploy path says so. The endpoint exists to
+    /// answer "which commit is serving"; inventing one when there is none is
+    /// the failure it was built to remove.
+    #[tokio::test]
+    async fn get_version_reports_unknown_for_an_unstamped_build() {
+        // `cargo test` sets neither GL_GIT_SHA nor GL_BUILT_AT, so this test
+        // binary *is* an unstamped build — unless it was built by a deploy, in
+        // which case there is a real sha to report and nothing to assert.
+        if gl_core::build_info::GIT_SHA != gl_core::build_info::UNKNOWN {
+            return;
+        }
+
+        let app = make_router(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
+                    .uri("/version")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = body_json(resp.into_body()).await;
+        assert_eq!(body["sha"], "unknown");
+        assert_eq!(body["sha_full"], "unknown");
+    }
+
+    /// The answer is about the process replying right now, so a cached copy is
+    /// the stale-version problem moved one hop out.
+    #[tokio::test]
+    async fn get_version_is_never_cached() {
+        let app = make_router(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
+                    .uri("/version")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+        );
+    }
+
+    /// `/version` is a read, not a provisioning request: the deploy polls it
+    /// and every visitor's footer fetches it, so it must sit on the loose read
+    /// limiter. With `provision_burst = 1`, a run of reads that would exhaust
+    /// the provisioning budget must all pass.
+    #[tokio::test]
+    async fn get_version_uses_the_loose_read_rate_limit() {
+        let rl = gl_core::config::RateLimitConfig {
+            provision_burst: 1,
+            provision_period_secs: 60,
+            read_burst: 100,
+            read_period_secs: 1,
+            alive_burst: 600,
+            alive_period_secs: 1,
+            alive_cache_secs: 5,
+        };
+        let app = make_router_with_rl(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+            rl,
+        );
+
+        for attempt in 0..5 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .header("x-real-ip", "203.0.113.11")
+                        .uri("/version")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "read #{attempt} must not be throttled by the provisioning limit",
+            );
+        }
     }
 
     // ── get_capacity ──────────────────────────────────────────────────────
