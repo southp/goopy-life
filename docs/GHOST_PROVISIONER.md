@@ -227,6 +227,90 @@ they point at.
 
 ---
 
+## Outbound requests: the phone-home keys
+
+A stock Ghost talks to third parties on boot and on a schedule. That is a
+reasonable default for a real, long-lived site and the wrong one here: every
+instance is a throwaway sandbox handed to a stranger, so the traffic scales with
+visitors rather than with deployments, and what it carries — the instance's
+public URL, the email typed at `/ghost/` setup — belongs to whoever is holding
+the sandbox.
+
+`render_ghost_config` therefore writes four keys into each instance's
+`config.production.json` whose only job is to keep that traffic from happening.
+They look like clutter, which is exactly the risk: **an empty string that
+silently disables a feature is the kind of line that gets tidied up.** Each one
+carries a comment in `ghost_provisioner.rs` saying why it is there.
+
+| Key | Stops | Off-switch is clean? |
+| --- | --- | --- |
+| `explore.update_url: ""` | Boot-time POST of the instance URL, site UUID, theme and post counts to `explore.ghost.org` | **Yes** — `ping()` returns early on a falsy URL |
+| `updateCheck.url: ""` | Daily GET to `updates.ghost.org` | **No** — see below |
+| `privacy.useGravatar: false` | Hashing the setup email and fetching it from Gravatar | Yes |
+| `privacy.useIndexNow: false` | Announcing each published post's URL to search engines | Yes |
+
+Two things deliberately left alone: `explore.testimonials_url` (a GET the admin
+UI makes, not a POST of our data) and `useStructuredData` (emits schema.org and
+OG tags, makes no outbound request — a sandbox should render like a real Ghost).
+This is also why the config names the two privacy flags individually instead of
+using `privacy.useTinfoil: true`, which would disable all three at once.
+
+`tinybird` needs no entry: it defaults to `null` upstream, so Ghost's stats
+pipeline is already off.
+
+### The update check is a trade, not a fix
+
+Unlike the explore ping, Ghost has **no guard on an empty `updateCheck.url`**.
+Verified against 6.63.0: `update-check/index.js` returns early only on the
+environment, and `update-check-service.js` goes from `checkEndpoint` straight to
+`await this.request(...)`. So the daily job still runs, the request throws on the
+empty URL, and `updateCheckError` logs `Update check failed` and records the next
+timestamp. `rethrowErrors` defaults to false, so nothing propagates.
+
+The cost is **one error line per instance per day**, in that instance's own
+`content/logs` — no outbound request, no effect on boot, nothing a visitor sees.
+The job is scheduled at a random time in a 24-hour window and instances live
+about a day, so most never reach it. A `Update check failed` line in an
+instance's log is expected, not a symptom.
+
+### These keys are version-sensitive — re-check them on every upgrade
+
+The names above are **not stable across Ghost majors**, and a key that no longer
+bites fails silently: the config still parses, the instance still boots, and the
+traffic quietly comes back. What already changed between 5 and 6:
+
+- `privacy.useUpdateCheck` **is gone in 6**. In 5 it never disabled the update
+  check anyway — it only downgraded the request from POST to GET.
+- The update check itself narrowed: 5 POSTed site stats, 6 sends a GET carrying
+  only `ghost_version`.
+- `services/indexnow-ping` is **new in 6** — a phone-home that did not exist when
+  this was first looked at.
+- The explore ping service moved from `.js` to `.ts`.
+
+So on a Ghost upgrade, re-derive the list rather than assuming it still applies.
+In the new install directory:
+
+```bash
+cd /opt/goopy-life/ghost-<new-version>
+
+# Which privacy flags does this version actually read?
+grep -rn "isPrivacyDisabled(" core/ --include=*.js --include=*.ts
+
+# Which services gate themselves on a config URL, and do they guard an empty one?
+grep -rln "phone home\|update_url\|updateCheck" core/server/services/
+```
+
+Then confirm on dev, not just in a unit test — a unit test proves only that we
+emitted a key, never that Ghost honoured it. Spawn an instance and check its log:
+
+```bash
+tail -f {base_dir}/{slug}/content/logs/*.log | grep -i "pinging explore\|update-check\|gravatar"
+```
+
+No `Pinging Explore with Payload` line should ever appear.
+
+---
+
 ## Readiness: why a spawn waits
 
 A spawn does not report `Done` when the provisioning steps return. It reports
@@ -340,6 +424,12 @@ To upgrade:
 3. Deploy, which installs the edited config and restarts `gl-serv`.
 4. Instances spawned from now on use the new version. Existing instances keep
    running against the old one.
+5. **Re-check the phone-home keys** against the new version — see
+   [Outbound requests](#outbound-requests-the-phone-home-keys). Their names have
+   already changed once between majors, and a key that stops biting fails
+   silently: the config still parses and the instance still boots, but the
+   traffic comes back. Spawn one instance on dev and confirm its log carries no
+   `Pinging Explore` line before letting the upgrade reach production.
 
 > Do not introduce a stable `/opt/goopy-life/ghost` symlink and point
 > `source_dir` at it. The provisioner links each instance at

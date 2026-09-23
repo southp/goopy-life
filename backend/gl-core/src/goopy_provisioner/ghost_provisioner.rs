@@ -266,6 +266,94 @@ impl GhostProvisioner {
             "security": {
                 "staffDeviceVerification": false,
             },
+            // Ghost's own config.production.json points `explore.update_url`
+            // at https://explore.ghost.org/api/update, and on boot
+            // `explore-ping-service` POSTs the instance's public URL, site
+            // UUID, theme and post counts there. For a sandbox that lives a
+            // day, that publishes the address of every instance we hand out to
+            // a third party — and it happens once per instance, so it scales
+            // with traffic rather than with deployments.
+            //
+            // The empty string is load-bearing, not an unset leftover.
+            // Clearing the URL is Ghost's own supported off-switch: `ping()`
+            // opens with
+            //
+            //     const exploreUrl = this.config.get('explore:update_url');
+            //     if (!exploreUrl) { return; }
+            //
+            // Our per-instance config loads after config.production.json, so
+            // this overrides it. Filling the key in — or deleting it as dead
+            // weight — turns the ping back on.
+            //
+            // `explore.testimonials_url` is deliberately not touched: that one
+            // is a GET the admin UI makes, not a POST of our data.
+            "explore": {
+                "update_url": "",
+            },
+            // `privacy` defaults to `false` in Ghost's defaults.json, which
+            // makes `isPrivacyDisabled(flag)` return false for everything, so
+            // every privacy-gated feature is on. Two of them reach third
+            // parties with data that belongs to whoever is holding the
+            // sandbox:
+            //
+            //   useGravatar  — lib/image/gravatar.js and the member avatar
+            //                  service hash an email and fetch it from
+            //                  Gravatar. A visitor types a real address into
+            //                  the /ghost/ setup form, so that address reaches
+            //                  a third party.
+            //   useIndexNow  — services/indexnow-ping announces each published
+            //                  post's absolute URL to search engines. It skips
+            //                  `env == development`, but instances run under
+            //                  NODE_ENV=production, so it is live here. This
+            //                  one leaks the sandbox URL the same way the
+            //                  explore ping does.
+            //
+            // Named individually rather than with `useTinfoil: true`. Tinfoil
+            // is the broader hammer and would also switch off
+            // `useStructuredData`, which emits schema.org and OG tags in
+            // ghost_head and makes no outbound request at all. Stripping those
+            // would quietly change what a sandbox renders — the goal here is
+            // to stop instances phoning home, not to hand out a degraded Ghost.
+            //
+            // These are the only privacy flags 6.63.0 reads in `core/`; a
+            // Ghost upgrade can add more, which is why docs/GHOST_PROVISIONER.md
+            // calls this list out for re-checking.
+            "privacy": {
+                "useGravatar": false,
+                "useIndexNow": false,
+            },
+            // Ghost's defaults.json ships
+            // `updateCheck: {"url": "https://updates.ghost.org"}` and registers
+            // a daily job for it. Emptying the URL stops the request, but —
+            // unlike the explore ping — it is NOT a clean off-switch, and the
+            // difference is worth knowing before anyone "fixes" this line.
+            //
+            // Checked against the 6.63.0 source. `update-check/index.js`
+            // returns early only on the environment, never on an empty URL, and
+            // `update-check-service.js` goes straight from
+            // `const checkEndpoint = this.config.checkEndpoint;` to
+            // `await this.request(checkEndpoint, reqObj)` with no guard. So the
+            // job still runs; the request throws on the empty URL and lands in
+            // `updateCheckError`, which records the next check timestamp and
+            // logs "Update check failed". `rethrowErrors` defaults to false, so
+            // nothing propagates.
+            //
+            // The cost is therefore one error line per instance per day, in the
+            // instance's own content/logs — no outbound request, no effect on
+            // boot, nothing the visitor sees. The job is scheduled at a random
+            // time in a 24h window and instances live about a day, so most
+            // never reach it at all. That is the better end of the trade: the
+            // alternative is leaving the default and letting every sandbox make
+            // a daily call to a third party.
+            //
+            // Note the 6.x payload is narrower than 5.x's: it is now a GET
+            // carrying only `ghost_version`, not a POST of site stats. Ghost 5's
+            // `privacy.useUpdateCheck` is gone in 6 and only ever downgraded
+            // POST to GET — it never disabled the check — so there is no
+            // privacy flag to use here instead.
+            "updateCheck": {
+                "url": "",
+            },
             "logging": {
                 "transports": ["file", "stdout"],
                 "level": "info",
@@ -663,6 +751,188 @@ mod tests {
             "staff device verification must be disabled, or no one can log in \
              to an instance: Ghost 6 defaults it on and mails a code that a \
              sandbox with no mail transport can never deliver"
+        );
+    }
+
+    /// The explore ping POSTs the instance's public URL and site stats to
+    /// explore.ghost.org on every boot. Ghost gates it on the URL being
+    /// truthy, so the empty string is the off-switch — and it is exactly the
+    /// kind of line that reads like an oversight and gets "tidied up", which
+    /// is why it is pinned by a test.
+    #[test]
+    fn prod_config_disables_the_explore_ping() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let p = provisioner(false, &source, Arc::new(MockSysRunner::new()));
+        let raw = p
+            .render_ghost_config(&test_goopy(&working_dir, 9876))
+            .unwrap();
+        let cfg: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(
+            cfg["explore"]["update_url"],
+            serde_json::Value::String(String::new()),
+            "an empty explore update_url is what stops Ghost POSTing this \
+             sandbox's public URL to explore.ghost.org on boot"
+        );
+        assert!(
+            cfg["explore"].get("testimonials_url").is_none(),
+            "testimonials_url is a GET the admin UI makes, not a POST of our \
+             data, so we deliberately leave it at Ghost's default"
+        );
+    }
+
+    /// Gravatar sends the email a visitor typed at setup to a third party, and
+    /// the IndexNow ping announces the sandbox's post URLs to search engines.
+    /// Ghost reads these as `config.get('privacy')[flag] === false`, so they
+    /// must be present and must be real booleans, not the string "false".
+    #[test]
+    fn prod_config_disables_the_privacy_gated_phone_homes() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let p = provisioner(false, &source, Arc::new(MockSysRunner::new()));
+        let raw = p
+            .render_ghost_config(&test_goopy(&working_dir, 9876))
+            .unwrap();
+        let cfg: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(
+            cfg["privacy"]["useGravatar"],
+            serde_json::Value::Bool(false),
+            "the email a visitor types at /ghost/ setup must not be hashed and \
+             sent to Gravatar"
+        );
+        assert_eq!(
+            cfg["privacy"]["useIndexNow"],
+            serde_json::Value::Bool(false),
+            "instances run under NODE_ENV=production, where the IndexNow ping \
+             is live and would announce this sandbox's post URLs to search \
+             engines"
+        );
+    }
+
+    /// `useTinfoil` would disable every privacy-gated feature in one line,
+    /// including `useStructuredData`, which only emits schema.org and OG tags
+    /// and makes no outbound request. A sandbox should render like a real
+    /// Ghost, so the flags are named individually on purpose.
+    #[test]
+    fn prod_config_leaves_render_only_privacy_features_alone() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let p = provisioner(false, &source, Arc::new(MockSysRunner::new()));
+        let raw = p
+            .render_ghost_config(&test_goopy(&working_dir, 9876))
+            .unwrap();
+        let cfg: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        assert!(
+            cfg["privacy"].get("useTinfoil").is_none(),
+            "useTinfoil is the blanket switch and would also strip structured \
+             data from the rendered pages"
+        );
+        assert!(
+            cfg["privacy"].get("useStructuredData").is_none(),
+            "structured data makes no outbound request, so it stays at Ghost's \
+             default"
+        );
+    }
+
+    /// Emptying the update-check URL stops the outbound call, but Ghost 6.63.0
+    /// has no guard on it, so the daily job still runs and logs a failure. That
+    /// is a deliberate trade, not an oversight — the assertion exists so the
+    /// key is not silently dropped, and the comment on it survives with it.
+    #[test]
+    fn prod_config_clears_the_update_check_url() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let p = provisioner(false, &source, Arc::new(MockSysRunner::new()));
+        let raw = p
+            .render_ghost_config(&test_goopy(&working_dir, 9876))
+            .unwrap();
+        let cfg: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(
+            cfg["updateCheck"]["url"],
+            serde_json::Value::String(String::new()),
+            "an empty update-check URL is what stops the daily call to \
+             updates.ghost.org"
+        );
+        assert!(
+            cfg["updateCheck"].get("forceUpdate").is_none(),
+            "forceUpdate would schedule an extra check at boot on top of the \
+             daily job"
+        );
+    }
+
+    /// Every instance is handed to a stranger for a day, so none of these may
+    /// regress independently of the others. Reading them off one rendered
+    /// config is what makes "this sandbox is not reported to anyone" checkable
+    /// in one place rather than spread across four tests.
+    #[test]
+    fn prod_config_leaves_no_third_party_endpoint_enabled() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let p = provisioner(false, &source, Arc::new(MockSysRunner::new()));
+        let raw = p
+            .render_ghost_config(&test_goopy(&working_dir, 9876))
+            .unwrap();
+        let cfg: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(cfg["explore"]["update_url"], "");
+        assert_eq!(cfg["updateCheck"]["url"], "");
+        assert_eq!(
+            cfg["privacy"]["useGravatar"],
+            serde_json::Value::Bool(false)
+        );
+        assert_eq!(
+            cfg["privacy"]["useIndexNow"],
+            serde_json::Value::Bool(false)
+        );
+
+        // Ghost's stats pipeline is off only because `tinybird` defaults to
+        // null. If a future Ghost ships a default endpoint for it, this catches
+        // the day the default changes rather than the day someone notices the
+        // traffic.
+        assert!(
+            cfg.get("tinybird").is_none(),
+            "tinybird defaults to null upstream; if that stops being true this \
+             config has to set it explicitly"
+        );
+    }
+
+    /// Dev instances are just as exposed as production ones — they run on a
+    /// public droplet under a real hostname — so the same keys apply.
+    #[test]
+    fn dev_config_also_disables_the_phone_homes() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let p = provisioner(true, &source, Arc::new(MockSysRunner::new()));
+        let raw = p
+            .render_ghost_config(&test_goopy(&working_dir, 9876))
+            .unwrap();
+        let cfg: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(cfg["explore"]["update_url"], "");
+        assert_eq!(cfg["updateCheck"]["url"], "");
+        assert_eq!(
+            cfg["privacy"]["useGravatar"],
+            serde_json::Value::Bool(false)
+        );
+        assert_eq!(
+            cfg["privacy"]["useIndexNow"],
+            serde_json::Value::Bool(false)
         );
     }
 
