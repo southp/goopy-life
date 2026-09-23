@@ -57,6 +57,18 @@ bind_address = "127.0.0.1:3000"
 # being deliberate about on the box that runs at a cap of 10.
 sweep_interval_secs = 3600
 
+# How many days of instance events to keep (#118).
+#
+# The event log records why a spawn or a teardown failed and when the row was
+# reaped, and outlives the instance — which is the point: the ten failures that
+# wedged this droplet in June 2026 left nothing behind once the sweep reaped the
+# rows and journald rotated. It is append-only, so the sweep drops anything past
+# this window on every run.
+#
+# 30 days matches the shipped default. Volume is negligible here: only failures
+# and reaps are recorded, at a cap of 10 instances.
+event_retention_days = 30
+
 # Instance caps (#106). max_active is RAM-bound: ~200 MB per Ghost process on a
 # 2 GB droplet leaves room for about 10. max_provisioned is disk-bound and is
 # kept equal to max_active until scale-to-zero (#96) lands, which means the RAM

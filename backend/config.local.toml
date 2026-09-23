@@ -53,6 +53,12 @@ bind_address = "127.0.0.1:3001"
 # a sweep happen. The first one runs at startup (#117).
 sweep_interval_secs = 300
 
+# How long to keep instance events — the record of why a spawn or teardown
+# failed, kept after the instance is reaped (#118). The sweep drops anything
+# older on every run. Matches the shipped default; shorten it locally if you
+# want to watch retention actually delete something.
+event_retention_days = 30
+
 # Instance caps, matching the shipped defaults. Drop these to 1 to exercise the
 # `server_full` 503 path by hand.
 max_active = 10

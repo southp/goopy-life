@@ -19,6 +19,9 @@ pub struct GoopyManagerConfig {
     pub max_active: u32,
     /// Disk-bound cap on total provisioned instances. See [`Config::max_provisioned`].
     pub max_provisioned: u32,
+    /// How long an instance event is kept before the sweep drops it. See
+    /// [`Config::event_retention_days`].
+    pub event_retention_days: u32,
 }
 
 /// A point-in-time reading of both instance caps and how much of each is used.
@@ -88,6 +91,7 @@ pub struct GoopyManager<
     pub port_range_end: u32,
     pub max_active: u32,
     pub max_provisioned: u32,
+    pub event_retention_days: u32,
 
     registry: Arc<Registry>,
     provisioner: Arc<Provisioner>,
@@ -107,6 +111,7 @@ where
             port_range_end: config.port_range_end,
             max_active: config.max_active,
             max_provisioned: config.max_provisioned,
+            event_retention_days: config.event_retention_days,
             registry: Arc::new(registry),
             provisioner: Arc::new(provisioner),
         }
@@ -437,6 +442,43 @@ where
         })
     }
 
+    /// Drop instance events older than `event_retention_days`.
+    ///
+    /// The event log is append-only, so without this it grows for the life of
+    /// the host. The sweep enforces it because the sweep is already the
+    /// periodic maintenance task; a second timer would be a second thing to
+    /// configure, restart and forget.
+    ///
+    /// Deliberately not part of [`sweep`]'s `(swept, errors)` result. Those
+    /// errors are per-instance reap failures, and gl-serv logs a sweep as
+    /// failed when any are present — a housekeeping delete that could not run
+    /// would then make a run that reclaimed everything read as a bad one. A
+    /// prune that fails is logged and the sweep carries on; the only cost of
+    /// missing one is a larger table at the next attempt.
+    ///
+    /// [`sweep`]: GoopyManager::sweep
+    fn prune_events(&self, now: chrono::DateTime<Utc>) {
+        let cutoff = now - Duration::days(self.event_retention_days as i64);
+
+        match self.registry.prune_events_before(cutoff) {
+            Ok(0) => {}
+            Ok(pruned) => {
+                tracing::info!(
+                    pruned,
+                    retention_days = self.event_retention_days,
+                    "sweep: dropped expired instance events"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = ?e,
+                    retention_days = self.event_retention_days,
+                    "sweep: pruning instance events failed",
+                );
+            }
+        }
+    }
+
     /// Despawn all expired goopy instances and reap all `Failed` instances.
     ///
     /// **Expired instances** are those where `now > created_at + life_in_days`.
@@ -466,13 +508,19 @@ where
     /// `nginx -t` and a reload. That cost is what #109 (batch the reloads) buys
     /// back; until then a sweep over a full registry is the slow case to watch.
     ///
+    /// Also enforces retention on the instance event log — see
+    /// [`prune_events`], which is deliberately outside the returned counts.
+    ///
     /// Meant to be called periodically (e.g. via `tokio::time::interval` in
     /// `gl-serv`), from a context where blocking is acceptable.
+    ///
+    /// [`prune_events`]: GoopyManager::prune_events
     ///
     /// [`despawn_blocking`]: GoopyManager::despawn_blocking
     #[tracing::instrument(skip(self))]
     pub fn sweep(&self) -> Result<(u32, Vec<Error>), Error> {
         let now = Utc::now();
+        self.prune_events(now);
         let goopies = self.list()?;
         let mut swept = 0u32;
         let mut errors: Vec<Error> = Vec::new();
@@ -642,6 +690,7 @@ mod tests {
                 port_range_end: 9100,
                 max_active: 100,
                 max_provisioned: 100,
+                event_retention_days: 30,
             },
             registry,
             NoopProvisioner,
@@ -673,6 +722,7 @@ mod tests {
                     port_range_end: 9100,
                     max_active: 100,
                     max_provisioned: 100,
+                    event_retention_days: 30,
                 },
                 SqliteRegistry::new(Path::new(":memory:")).unwrap(),
                 NoopProvisioner,
@@ -697,6 +747,7 @@ mod tests {
                 port_range_end: 9080,
                 max_active: 100,
                 max_provisioned: 100,
+                event_retention_days: 30,
             },
             CollideOnceRegistry {
                 save_calls: Mutex::new(0),
@@ -863,6 +914,7 @@ mod tests {
                 port_range_end: 9100,
                 max_active: 100,
                 max_provisioned: 100,
+                event_retention_days: 30,
             },
             FailingUpdateRegistry(inner),
             NoopProvisioner,
@@ -1026,6 +1078,7 @@ mod tests {
                 port_range_end: 9051,
                 max_active: 100,
                 max_provisioned: 100,
+                event_retention_days: 30,
             },
             registry,
             DirCleaningProvisioner,
@@ -1090,6 +1143,7 @@ mod tests {
                 port_range_end: 9062,
                 max_active: 100,
                 max_provisioned: 100,
+                event_retention_days: 30,
             },
             registry,
             NoopProvisioner,
@@ -1187,6 +1241,7 @@ mod tests {
                 port_range_end: 9100,
                 max_active,
                 max_provisioned,
+                event_retention_days: 30,
             },
             registry,
             provisioner,
@@ -1686,6 +1741,45 @@ mod tests {
             reap.occurred_at >= failure.occurred_at,
             "failed at T, reaped at T+n: {events:?}"
         );
+    }
+
+    /// Append-only means unbounded unless something trims it, and the sweep is
+    /// the only periodic task there is.
+    #[test]
+    fn sweep_drops_events_past_the_retention_window() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+
+        let mut stale = InstanceEvent::reaped("long-gone", EventPhase::Sweep);
+        stale.occurred_at = Utc::now() - Duration::days(31);
+        registry.record_event(&stale).unwrap();
+
+        let fresh = InstanceEvent::reaped("recent", EventPhase::Sweep);
+        registry.record_event(&fresh).unwrap();
+
+        // 30-day window, as `manager_with` configures.
+        let gm = manager_with_provisioner(registry, NoopProvisioner);
+        gm.sweep().unwrap();
+
+        let left = gm.events(None, 10).unwrap();
+        assert_eq!(left.len(), 1, "only the stale event should go: {left:?}");
+        assert_eq!(left[0].slug, "recent");
+    }
+
+    /// Retention is housekeeping, not a reap: a prune must not show up in the
+    /// numbers gl-serv reads to decide whether a sweep went well.
+    #[test]
+    fn pruning_events_does_not_count_as_sweeping_an_instance() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let mut stale = InstanceEvent::reaped("long-gone", EventPhase::Sweep);
+        stale.occurred_at = Utc::now() - Duration::days(400);
+        registry.record_event(&stale).unwrap();
+
+        let gm = manager_with_provisioner(registry, NoopProvisioner);
+        let (swept, errors) = gm.sweep().unwrap();
+
+        assert_eq!(swept, 0, "no instance was reclaimed");
+        assert!(errors.is_empty(), "a prune is not a per-instance failure");
+        assert!(gm.events(None, 10).unwrap().is_empty(), "but it did prune");
     }
 
     // ── capacity caps ─────────────────────────────────────────────────────
