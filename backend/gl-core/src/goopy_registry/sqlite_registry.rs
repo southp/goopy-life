@@ -4,7 +4,7 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use super::GoopyRegistry;
 use crate::goopy::Goopy;
@@ -457,6 +457,44 @@ fn insert_event_in(conn: &Connection, event: &InstanceEvent) -> Result<(), Error
     Ok(())
 }
 
+/// Whether `event` says nothing the slug's newest event does not already say:
+/// same phase, outcome, code and detail. The timestamp is deliberately not
+/// compared, because a retry that fails the same way differs only in that.
+///
+/// Uses the same ordering as `events()`, so "newest" means what a reader of
+/// `gl-cli events` sees at the top.
+fn newest_event_repeats(conn: &Connection, event: &InstanceEvent) -> Result<bool, Error> {
+    let newest = conn
+        .query_row(
+            "SELECT phase, outcome, code, detail
+             FROM instance_events
+             WHERE slug = ?1
+             ORDER BY occurred_at DESC, id DESC
+             LIMIT 1",
+            params![event.slug],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| Error::Registry {
+            context: "newest event",
+            source: e.into(),
+        })?;
+
+    Ok(newest.is_some_and(|(phase, outcome, code, detail)| {
+        phase == event.phase.to_string()
+            && outcome == event.outcome.to_string()
+            && code == event.code
+            && detail == event.detail
+    }))
+}
+
 /// Rebuild an [`InstanceEvent`] from its stored columns.
 fn parse_event_row(
     slug: String,
@@ -877,6 +915,13 @@ impl GoopyRegistry for SqliteRegistry {
     fn fail_with_event(&self, slug: &str, event: &InstanceEvent) -> Result<(), Error> {
         self.in_write_transaction("fail_with_event", |tx| {
             set_status_in(tx, slug, Status::Failed)?;
+            // The sweep retries every `Failed` row, so an instance that cannot
+            // be torn down fails the same way on every run. One row per reason
+            // keeps `gl-cli events` about what is new rather than about the
+            // one slug that is stuck.
+            if newest_event_repeats(tx, event)? {
+                return Ok(());
+            }
             insert_event_in(tx, event)
         })
     }
@@ -1412,6 +1457,59 @@ mod tests {
 
         assert_eq!(r.load("e-fail").unwrap().unwrap().status, Status::Failed);
         assert_eq!(r.events(Some("e-fail"), 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn fail_with_event_does_not_repeat_an_identical_reason() {
+        let r = registry();
+        r.save(&make_goopy("e-stuck")).unwrap();
+
+        for _ in 0..3 {
+            r.fail_with_event(
+                "e-stuck",
+                &failure("e-stuck", EventPhase::Sweep, &Error::Invalid),
+            )
+            .unwrap();
+        }
+
+        assert_eq!(r.load("e-stuck").unwrap().unwrap().status, Status::Failed);
+        assert_eq!(
+            r.events(Some("e-stuck"), 10).unwrap().len(),
+            1,
+            "the same failure, retried, is one reason and not three"
+        );
+    }
+
+    #[test]
+    fn fail_with_event_records_a_changed_reason() {
+        let r = registry();
+        r.save(&make_goopy("e-changed")).unwrap();
+
+        r.fail_with_event(
+            "e-changed",
+            &failure("e-changed", EventPhase::Sweep, &Error::Invalid),
+        )
+        .unwrap();
+        r.fail_with_event(
+            "e-changed",
+            &failure("e-changed", EventPhase::Sweep, &Error::NotFound),
+        )
+        .unwrap();
+        // Back to the first reason: it is new again relative to the newest
+        // event, so it is recorded — the log shows the instance flip-flopping.
+        r.fail_with_event(
+            "e-changed",
+            &failure("e-changed", EventPhase::Sweep, &Error::Invalid),
+        )
+        .unwrap();
+
+        let codes: Vec<_> = r
+            .events(Some("e-changed"), 10)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.code)
+            .collect();
+        assert_eq!(codes, ["invalid", "not_found", "invalid"]);
     }
 
     /// The discriminating half of "in one transaction": the row operation

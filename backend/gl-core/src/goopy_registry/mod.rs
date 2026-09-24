@@ -82,6 +82,14 @@ pub trait GoopyRegistry {
     /// the event says *why*. Splitting them across two writes would let a crash
     /// in between produce the exact state #118 exists to abolish — a `Failed`
     /// row with no reason attached.
+    ///
+    /// The event is skipped when it repeats the slug's newest one — same
+    /// phase, outcome, code and detail. The sweep retries every `Failed` row,
+    /// so an instance that cannot be torn down would otherwise add the same
+    /// reason on every run and bury everything else in the log. The status is
+    /// still set, and `Failed` alone already says the instance is stuck. If
+    /// retention has since dropped the earlier event, the next failure writes
+    /// a fresh one.
     fn fail_with_event(&self, slug: &str, event: &InstanceEvent) -> Result<(), Error>;
 
     /// Delete `slug` and append `event`, in one transaction.

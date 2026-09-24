@@ -1522,6 +1522,32 @@ mod tests {
         );
     }
 
+    /// The sweep retries every `Failed` row, so an instance that cannot be torn
+    /// down fails on every run. Recording each attempt would bury every other
+    /// instance's failures under this one slug.
+    #[test]
+    fn a_stuck_instance_is_recorded_once_across_sweeps() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_row(&registry, "stuck", 9000, Status::Failed);
+
+        let deprovision_calls = Arc::new(Mutex::new(0));
+        let gm = manager_with_provisioner(
+            registry,
+            UndeprovisionableProvisioner {
+                deprovision_calls: deprovision_calls.clone(),
+            },
+        );
+
+        gm.sweep().unwrap();
+        gm.sweep().unwrap();
+
+        assert_eq!(*deprovision_calls.lock().unwrap(), 2, "both sweeps retried");
+        let events = gm.events(Some("stuck"), 10).unwrap();
+        assert_eq!(events.len(), 1, "one reason, not one per sweep: {events:?}");
+        assert_eq!(events[0].phase, EventPhase::Sweep);
+        assert_eq!(gm.get("stuck").unwrap().unwrap().status, Status::Failed);
+    }
+
     /// The sweep's `reaped` event hangs off `despawn_blocking`'s completion
     /// signal — the one #117 added — so it can only be written when the row
     /// really left the registry.
