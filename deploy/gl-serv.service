@@ -1,3 +1,7 @@
+# Installed by deploy/push-binary.sh at /etc/systemd/system/gl-serv.service on
+# every deploy. Edit it here, not there — a hand-edit on the host is overwritten
+# by the next deploy.
+
 [Unit]
 Description=Goopy.Life API server
 After=network.target
@@ -8,7 +12,10 @@ ExecStart=/opt/goopy-life/bin/gl-serv --config /opt/goopy-life/config.toml
 Restart=on-failure
 RestartSec=5
 WorkingDirectory=/opt/goopy-life
-Environment=RUST_LOG=debug
+# Nothing environment-specific belongs in this file: it is installed verbatim on
+# every host. RUST_LOG and anything else that varies lives in the per-environment
+# drop-in, deploy/config/<env>.gl-serv.conf, which the deploy installs at
+# /etc/systemd/system/gl-serv.service.d/deploy.conf (#139).
 # No filesystem sandboxing here, deliberately.
 #
 # PrivateTmp/ProtectSystem/ProtectHome each give this unit a private mount

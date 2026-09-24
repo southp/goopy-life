@@ -7,7 +7,11 @@
 # lines it would have run. No droplet, no network, no ssh key required.
 set -uo pipefail
 
-SCRIPT_UNDER_TEST="$(cd "$(dirname "$0")/.." && pwd)/push-binary.sh"
+DEPLOY_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_UNDER_TEST="$DEPLOY_DIR/push-binary.sh"
+# A real environment, for the cases that run the script outside dry-run: its
+# host artifacts are found beside it and must exist.
+REAL_CONFIG="$DEPLOY_DIR/config/dev.toml"
 FAILURES=0
 CASES=0
 
@@ -105,35 +109,47 @@ STUB
 }
 
 
-# Asserts every `sudo install` the script would run is pinned verbatim in
+# Asserts every command the script would run under sudo is pinned verbatim in
 # deploy/sudoers.goopy. That drop-in whitelists exact command lines, so a mode,
 # path or argument-order change on one side alone is a bare sudo denial on the
 # droplet rather than anything self-explanatory. The commands are read out of
 # the script's own dry run instead of being restated here, so an artifact added
 # to the deploy later is covered without editing this test.
-assert_sudoers_pins_every_install() {
+assert_sudoers_pins_every_sudo_command() {
     local name=$1 serv=$2 cli=$3 config=$4
     CASES=$((CASES + 1))
-    local sudoers output installs unpinned=""
-    sudoers="$(cd "$(dirname "$0")/.." && pwd)/sudoers.goopy"
+    local output commands rules unpinned=""
     output=$(DRY_RUN=1 "$SCRIPT_UNDER_TEST" goopy@dev.example.com "$serv" "$cli" "$config")
 
-    # Each install is one link of an && chain, so stop at the next operator.
-    installs=$(printf '%s\n' "$output" | grep -o 'sudo install [^&]*' | sed 's/ *$//')
-    if [[ -z "$installs" ]]; then
-        echo "FAIL — $name (no install command found in the dry run)"
+    # Each command ends at the next shell operator or redirection. The trailing
+    # `2>` of a redirect is stripped with the whitespace before it.
+    commands=$(printf '%s\n' "$output" | grep -o 'sudo [^&;|>]*' | sed -e 's/ *2*$//' | sort -u)
+    if [[ -z "$commands" ]]; then
+        echo "FAIL — $name (no sudo command found in the dry run)"
         FAILURES=$((FAILURES + 1))
         return
     fi
 
+    # One rule per line, without the indentation, the separating comma and the
+    # line continuation.
+    rules=$(sed -n 's/^[[:space:]]*\(\/[^,]*\),*[[:space:]]*\\*$/\1/p' "$DEPLOY_DIR/sudoers.goopy")
+
     while IFS= read -r command; do
-        # sudo resolves a bare `install` through PATH to /usr/bin/install,
-        # which is the absolute path the drop-in has to spell.
-        local pinned="/usr/bin/${command#sudo }"
-        if ! grep -Fq -- "$pinned" "$sudoers"; then
-            unpinned+="       missing from sudoers.goopy: $pinned"$'\n'
+        # sudo resolves a bare `install` through PATH, so the drop-in spells
+        # an absolute path in front of the very same arguments. Matching the
+        # whole rule rather than a substring: a rule that merely *contains*
+        # the command, with more after it, does not permit it.
+        local wanted="${command#sudo }" rule found=0
+        while IFS= read -r rule; do
+            if [[ "$rule" == */"$wanted" && "${rule%%/"$wanted"}" != *" "* ]]; then
+                found=1
+                break
+            fi
+        done <<<"$rules"
+        if [[ "$found" -eq 0 ]]; then
+            unpinned+="       missing from sudoers.goopy: $wanted"$'\n'
         fi
-    done <<<"$installs"
+    done <<<"$commands"
 
     if [[ -z "$unpinned" ]]; then
         echo "ok   — $name"
@@ -152,7 +168,7 @@ assert_config_swap_is_atomic() {
     CASES=$((CASES + 1))
     local output staged destination
     output=$(DRY_RUN=1 "$SCRIPT_UNDER_TEST" goopy@dev.example.com "$serv" "$cli" "$config")
-    staged=$(printf '%s\n' "$output" | grep '^scp ' | grep -v -e ':/tmp/gl-serv$' -e ':/tmp/gl-cli$' | sed 's/.*://')
+    staged=$(printf '%s\n' "$output" | grep '^scp ' | grep -v ':/tmp/' | sed 's/.*://')
     destination=$(printf '%s\n' "$output" | sed -n 's/.* mv [^ ]* \([^ ]*\) .*/\1/p')
 
     if [[ -n "$staged" && -n "$destination" && "$(dirname "$staged")" == "$(dirname "$destination")" ]]; then
@@ -212,7 +228,7 @@ STUB
     # Any three existing files stand in for the binaries and the config: the
     # transfer is stubbed, only the existence check ahead of it is real.
     PATH="$stub:$PATH" DRY_RUN=0 "$SCRIPT_UNDER_TEST" goopy@dev.example.com \
-        "$SCRIPT_UNDER_TEST" "$SCRIPT_UNDER_TEST" "$SCRIPT_UNDER_TEST" >/dev/null 2>&1
+        "$SCRIPT_UNDER_TEST" "$SCRIPT_UNDER_TEST" "$REAL_CONFIG" >/dev/null 2>&1
     status=$?
 
     local installed="" restarted=""
@@ -245,14 +261,14 @@ assert_failed_install_aborts_before_restart() {
 #!/bin/sh
 echo "\$*" >>"$log"
 case "\$*" in
-    *"sudo install"*) exit 1 ;;
+    *"sudo install -m 755 /tmp/gl-cli"*) exit 1 ;;
 esac
 exit 0
 STUB
     chmod +x "$stub/scp" "$stub/ssh"
 
     PATH="$stub:$PATH" DRY_RUN=0 "$SCRIPT_UNDER_TEST" goopy@dev.example.com \
-        "$SCRIPT_UNDER_TEST" "$SCRIPT_UNDER_TEST" "$SCRIPT_UNDER_TEST" >/dev/null 2>&1
+        "$SCRIPT_UNDER_TEST" "$SCRIPT_UNDER_TEST" "$REAL_CONFIG" >/dev/null 2>&1
     status=$?
 
     local restarted=""
@@ -371,12 +387,142 @@ assert_missing_file_rejected() {
     fi
 }
 
+# Drives the script for real against stub scp/ssh, with the stub failing every
+# remote command that matches `fail_on`. Asserts the deploy stops there: none of
+# the commands matching `must_not_reach` ran, and gl-serv was not restarted.
+assert_failed_step_stops_the_deploy() {
+    local name=$1 fail_on=$2 must_not_reach=$3
+    CASES=$((CASES + 1))
+    local stub log status
+    stub=$(mktemp -d)
+    log="$stub/calls"
+    printf '#!/bin/sh\nexit 0\n' >"$stub/scp"
+    cat >"$stub/ssh" <<STUB
+#!/bin/sh
+echo "\$*" >>"$log"
+case "\$*" in
+    *"$fail_on"*) exit 1 ;;
+esac
+exit 0
+STUB
+    chmod +x "$stub/scp" "$stub/ssh"
+
+    PATH="$stub:$PATH" DRY_RUN=0 "$SCRIPT_UNDER_TEST" goopy@dev.example.com \
+        "$SCRIPT_UNDER_TEST" "$SCRIPT_UNDER_TEST" "$REAL_CONFIG" >/dev/null 2>&1
+    status=$?
+
+    local reached="" restarted="" attempted=""
+    attempted=$(grep -cF -- "$fail_on" "$log" 2>/dev/null || true)
+    reached=$(grep -cF -- "$must_not_reach" "$log" 2>/dev/null || true)
+    restarted=$(grep -c 'systemctl restart' "$log" 2>/dev/null || true)
+    /bin/rm -rf "$stub"
+
+    # `attempted` guards against a vacuous pass: a deploy that stopped earlier
+    # for some unrelated reason never reaches the step, and never reaches what
+    # follows it either.
+    if [[ "$status" -ne 0 && "${attempted:-0}" -gt 0 && "${reached:-0}" -eq 0 && "${restarted:-0}" -eq 0 ]]; then
+        echo "ok   — $name"
+    else
+        echo "FAIL — $name"
+        echo "       exit status: $status (expected non-zero)"
+        echo "       failing step run: ${attempted:-0} (expected > 0)"
+        echo "       later step run: ${reached:-0}, restart calls: ${restarted:-0} (expected 0)"
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
+# Asserts the remote steps run in the given order, each named by a fixed
+# substring of its command line in the dry run.
+assert_steps_in_order() {
+    local name=$1 serv=$2 cli=$3 config=$4
+    shift 4
+    CASES=$((CASES + 1))
+    local output previous=0 line step detail=""
+    output=$(DRY_RUN=1 "$SCRIPT_UNDER_TEST" goopy@dev.example.com "$serv" "$cli" "$config")
+    local ordered=1
+    for step in "$@"; do
+        line=$(printf '%s\n' "$output" | grep -nF -- "$step" | head -1 | cut -d: -f1)
+        detail+="       ${line:-<none>}: $step"$'\n'
+        if [[ -z "$line" || "$line" -le "$previous" ]]; then
+            ordered=0
+        fi
+        previous=${line:-0}
+    done
+    if [[ "$ordered" -eq 1 ]]; then
+        echo "ok   — $name"
+    else
+        echo "FAIL — $name"
+        printf '%s' "$detail"
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
+# Extracts the api-site step from the dry run and runs it against a scratch
+# root: the real install/ln/cp, a sudo that simply runs its command, and a stub
+# nginx whose `-t` answers `verdict` (0 accepts, 1 rejects). `previous` is the
+# content already installed, or empty for a host that has never had the site.
+# Asserts on the exit status, the site left on disk, the link, and whether
+# nginx was reloaded.
+assert_nginx_site_step() {
+    local name=$1 verdict=$2 previous=$3 want_status=$4 want_site=$5 want_link=$6 want_reload=$7
+    CASES=$((CASES + 1))
+    local remote root status
+    remote=$(DRY_RUN=1 "$SCRIPT_UNDER_TEST" goopy@dev.example.com s c "$REAL_CONFIG" \
+        | grep -F 'nginx -t' \
+        | sed 's|^ssh -p [0-9]* [^ ]* ||')
+    if [[ -z "$remote" ]]; then
+        echo "FAIL — $name (no nginx step found in the dry run)"
+        FAILURES=$((FAILURES + 1))
+        return
+    fi
+
+    root=$(mktemp -d)
+    mkdir -p "$root/bin" "$root/tmp" "$root/etc/nginx/sites-available" "$root/etc/nginx/sites-enabled"
+    printf 'incoming site\n' >"$root/tmp/gl-serv-api.nginx"
+    if [[ -n "$previous" ]]; then
+        printf '%s\n' "$previous" >"$root/etc/nginx/sites-available/gl-serv-api"
+        ln -s "$root/etc/nginx/sites-available/gl-serv-api" "$root/etc/nginx/sites-enabled/gl-serv-api"
+    fi
+    printf '#!/bin/sh\nexec "$@"\n' >"$root/bin/sudo"
+    printf '#!/bin/sh\nexit %s\n' "$verdict" >"$root/bin/nginx"
+    printf '#!/bin/sh\necho "$*" >>"%s/reloads"\n' "$root" >"$root/bin/systemctl"
+    chmod +x "$root/bin/sudo" "$root/bin/nginx" "$root/bin/systemctl"
+
+    PATH="$root/bin:$PATH" sh -c "$(printf '%s' "$remote" | sed -e "s|/etc/|$root/etc/|g" -e "s|/tmp/|$root/tmp/|g")" >/dev/null 2>&1
+    status=$?
+
+    local site="" link=absent reloaded=no
+    if [[ -f "$root/etc/nginx/sites-available/gl-serv-api" ]]; then
+        site=$(cat "$root/etc/nginx/sites-available/gl-serv-api")
+    fi
+    if [[ -L "$root/etc/nginx/sites-enabled/gl-serv-api" ]]; then
+        link=present
+    fi
+    if [[ -s "$root/reloads" ]]; then
+        reloaded=yes
+    fi
+    /bin/rm -rf "$root"
+
+    if [[ "$status" -eq "$want_status" && "$site" == "$want_site" && "$link" == "$want_link" && "$reloaded" == "$want_reload" ]]; then
+        echo "ok   — $name"
+    else
+        echo "FAIL — $name"
+        echo "       exit status: $status (expected $want_status)"
+        echo "       site: '$site' (expected '$want_site')"
+        echo "       link: $link (expected $want_link)"
+        echo "       reloaded: $reloaded (expected $want_reload)"
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
 SERV=target/x86_64-unknown-linux-musl/release/gl-serv
 CLI=target/x86_64-unknown-linux-musl/release/gl-cli
 CFG=deploy/config/dev.toml
 REMOTE_CFG=/opt/goopy-life/config.toml
 SERV_DEST=/opt/goopy-life/bin/gl-serv
 CLI_DEST=/opt/goopy-life/bin/gl-cli
+UNIT_DEST=/etc/systemd/system/gl-serv.service
+DROPIN_DEST=/etc/systemd/system/gl-serv.service.d/deploy.conf
 
 echo "== push-binary.sh =="
 
@@ -423,16 +569,18 @@ assert_failed_gate_aborts_before_install push_binary_aborts_the_deploy_when_the_
 
 # The install substrings are whitelisted in deploy/sudoers.goopy — any drift
 # there (a different mode, path, or argument order) becomes a sudo denial on
-# deploy. gl-cli is installed first so a host whose drop-in predates it is
-# denied while gl-serv's binary and config are still untouched and serving.
+# deploy. gl-serv's binary and config go last so a host whose drop-in predates
+# any earlier rule is denied while they are still untouched and serving; the
+# unit and its drop-in are followed by daemon-reload so the restart picks them
+# up, and by enable so a freshly installed unit also starts on boot.
 assert_emits push_binary_pins_the_sudoers_install_command \
-    "ssh -p 22 goopy@dev.example.com sudo install -m 755 /tmp/gl-cli $CLI_DEST && sudo install -m 755 /tmp/gl-serv $SERV_DEST && chmod 644 $REMOTE_CFG.new && mv $REMOTE_CFG.new $REMOTE_CFG && rm /tmp/gl-serv /tmp/gl-cli" \
+    "ssh -p 22 goopy@dev.example.com sudo install -m 644 /tmp/gl-serv.service $UNIT_DEST && sudo install -D -m 644 /tmp/gl-serv.deploy.conf $DROPIN_DEST && sudo systemctl daemon-reload && sudo systemctl enable gl-serv && sudo install -m 755 /tmp/gl-cli $CLI_DEST && sudo install -m 755 /tmp/gl-serv $SERV_DEST && chmod 644 $REMOTE_CFG.new && mv $REMOTE_CFG.new $REMOTE_CFG && rm /tmp/gl-serv /tmp/gl-cli /tmp/gl-serv.service /tmp/gl-serv.deploy.conf /tmp/sudoers.goopy" \
     goopy@dev.example.com "$SERV" "$CLI" "$CFG"
 
 # The same pinning, checked against the drop-in itself rather than a literal
 # repeated here: the assertion above catches a change to the script, this one
 # catches a change to either side that the other did not follow.
-assert_sudoers_pins_every_install push_binary_installs_only_commands_sudoers_allows "$SERV" "$CLI" "$CFG"
+assert_sudoers_pins_every_sudo_command push_binary_runs_only_commands_sudoers_allows "$SERV" "$CLI" "$CFG"
 
 # A ';' in that chain would report rm's exit status instead of install's, so a
 # sudo denial would leave the deploy green while the old binary kept running.
@@ -452,6 +600,92 @@ assert_failed_install_aborts_before_restart push_binary_aborts_the_deploy_when_a
 # rename. Staging in /tmp instead would make it a cross-filesystem copy, and
 # gl-serv restarts moments later — it must never read a half-written file.
 assert_config_swap_is_atomic push_binary_swaps_the_config_atomically "$SERV" "$CLI" "$CFG"
+
+# The host artifacts travel with every deploy (#139): the unit and the
+# environment's drop-in and api site are installed, and the sudoers drop-in is
+# uploaded only to be compared. Each goes to the /tmp path the drop-in pins.
+assert_emits push_binary_uploads_the_shared_unit \
+    "scp -P 22 $DEPLOY_DIR/gl-serv.service goopy@dev.example.com:/tmp/gl-serv.service" \
+    goopy@dev.example.com "$SERV" "$CLI" "$CFG"
+assert_emits push_binary_uploads_the_environments_drop_in \
+    "scp -P 22 deploy/config/dev.gl-serv.conf goopy@dev.example.com:/tmp/gl-serv.deploy.conf" \
+    goopy@dev.example.com "$SERV" "$CLI" "$CFG"
+assert_emits push_binary_uploads_the_environments_api_site \
+    "scp -P 22 deploy/config/dev.api.nginx goopy@dev.example.com:/tmp/gl-serv-api.nginx" \
+    goopy@dev.example.com "$SERV" "$CLI" "$CFG"
+assert_emits push_binary_uploads_sudoers_for_comparison \
+    "scp -P 22 $DEPLOY_DIR/sudoers.goopy goopy@dev.example.com:/tmp/sudoers.goopy" \
+    goopy@dev.example.com "$SERV" "$CLI" "$CFG"
+
+# The artifacts are picked by environment, from the config's own name: a prod
+# deploy must never install dev's site.
+assert_emits push_binary_picks_the_artifacts_of_the_configs_environment \
+    "scp -P 22 deploy/config/prod.api.nginx goopy@dev.example.com:/tmp/gl-serv-api.nginx" \
+    goopy@dev.example.com "$SERV" "$CLI" deploy/config/prod.toml
+
+# The sudoers drop-in is compared and never installed: shipping the file that
+# grants the deploy its rights would let one bad push revoke them.
+CASES=$((CASES + 1))
+dry_run=$(DRY_RUN=1 "$SCRIPT_UNDER_TEST" goopy@dev.example.com "$SERV" "$CLI" "$CFG")
+if grep -q 'sudo cmp -s /tmp/sudoers.goopy /etc/sudoers.d/goopy' <<<"$dry_run" \
+    && ! grep -Eq '(install|tee|cp|mv|ln) [^;&]*/etc/sudoers' <<<"$dry_run"; then
+    echo "ok   — push_binary_compares_sudoers_but_never_installs_it"
+else
+    echo "FAIL — push_binary_compares_sudoers_but_never_installs_it"
+    FAILURES=$((FAILURES + 1))
+fi
+
+# The drift check runs before anything changes on the host, the config gate
+# before anything is installed, and the api site ahead of the binaries.
+assert_steps_in_order push_binary_checks_the_host_before_changing_anything "$SERV" "$CLI" "$CFG" \
+    "scp -P 22 $DEPLOY_DIR/sudoers.goopy" \
+    'sudo cmp -s /tmp/sudoers.goopy /etc/sudoers.d/goopy' \
+    '--check-config --config /opt/goopy-life/config.toml.new' \
+    'sudo nginx -t' \
+    'sudo install -m 644 /tmp/gl-serv.service' \
+    'systemctl restart gl-serv'
+
+# A host whose sudoers drop-in has drifted stops the deploy before a single
+# file changes — the site and the binaries alike.
+assert_failed_step_stops_the_deploy push_binary_stops_when_sudoers_has_drifted \
+    'sudo cmp -s /tmp/sudoers.goopy' 'sudo install'
+
+# A rejected api site stops the deploy before gl-serv's binary is replaced.
+assert_failed_step_stops_the_deploy push_binary_stops_when_nginx_rejects_the_site \
+    'sudo nginx -t' 'sudo install -m 755'
+
+# A denied unit install has to stop the chain before the config is swapped,
+# like a denied binary install.
+assert_install_failure_propagates push_binary_propagates_a_failed_unit_install \
+    "$UNIT_DEST" "$SERV" "$CLI" "$CFG"
+
+# The api site step against a scratch root. Accepted: installed, linked, nginx
+# reloaded.
+assert_nginx_site_step push_binary_installs_and_reloads_an_accepted_site \
+    0 'previous site' 0 'incoming site' present yes
+# Rejected with a site already in place: the previous one is put back, and
+# nginx is not reloaded, so it goes on serving what it had. Leaving the rejected
+# one would fail `nginx -t` for every per-instance provision after it.
+assert_nginx_site_step push_binary_restores_the_previous_site_when_nginx_rejects_it \
+    1 'previous site' 1 'previous site' present no
+# Rejected on a host that never had one: unlinked, so nginx never loads it.
+assert_nginx_site_step push_binary_unlinks_a_first_site_nginx_rejects \
+    1 '' 1 'incoming site' absent no
+
+# Outside dry-run each environment's host artifacts must exist beside its
+# config: a deploy that went ahead without them would install the binary and
+# leave the host on whatever unit and site it had.
+CASES=$((CASES + 1))
+lonely=$(mktemp -d)
+printf 'domain = "x"\n' >"$lonely/lonely.toml"
+if DRY_RUN=0 "$SCRIPT_UNDER_TEST" goopy@dev.example.com \
+    "$SCRIPT_UNDER_TEST" "$SCRIPT_UNDER_TEST" "$lonely/lonely.toml" >/dev/null 2>&1; then
+    echo "FAIL — push_binary_rejects_a_config_without_its_host_artifacts (expected non-zero exit, got 0)"
+    FAILURES=$((FAILURES + 1))
+else
+    echo "ok   — push_binary_rejects_a_config_without_its_host_artifacts"
+fi
+/bin/rm -rf "$lonely"
 
 # A deploy that does not verify the restart reports success while the API is down.
 assert_emits push_binary_verifies_the_service_is_active_after_restart \

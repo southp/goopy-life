@@ -3,11 +3,12 @@ name: Backend build
 on:
   push:
     branches: ['trunk']
-    paths: ['backend/**', 'deploy/config/**']
+    paths: ['backend/**', 'deploy/config/**', 'deploy/gl-serv.service']
   pull_request:
-    # deploy/config/** is in scope because tests/committed_configs.rs parses those
-    # files: a config edit can fail the build just as a code edit can.
-    paths: ['backend/**', 'deploy/config/**']
+    # deploy/config/** and deploy/gl-serv.service are in scope because
+    # tests/committed_configs.rs reads those files: a config edit can fail the
+    # build just as a code edit can.
+    paths: ['backend/**', 'deploy/config/**', 'deploy/gl-serv.service']
 
 env:
   CARGO_TERM_COLOR: always

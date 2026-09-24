@@ -25,11 +25,14 @@ a code change:
 it to `deploy/push-binary.sh` — the same script the manual production deploy
 uses, so the two paths cannot drift apart.
 
-The workflow ships **both binaries and the config** — `gl-serv` and `gl-cli`,
-see [The maintenance CLI on the host](#the-maintenance-cli-on-the-host). The
-systemd unit, the nginx configs and the ZFS pool are still one-time manual setup (see the
+The workflow ships **both binaries, the config and the host artifacts** —
+`gl-serv` and `gl-cli` (see [The maintenance CLI on the
+host](#the-maintenance-cli-on-the-host)), and the systemd unit, its drop-in and
+the api nginx site (see [Host artifacts](#host-artifacts)). The sudoers drop-in,
+the nginx cache zone and the ZFS pool are still one-time manual setup (see the
 [droplet setup](../README.md#droplet-setup-one-time) steps); change one of those
-and you still have to apply it by hand.
+and you still have to apply it by hand — the deploy checks the sudoers drop-in
+and fails until you do.
 
 ### One-time setup
 
@@ -262,8 +265,10 @@ to diff against.
 ```
 
 Cross-compiles `gl-serv` and `gl-cli` to static musl binaries with
-`cargo-zigbuild`, uploads them with `deploy/config/prod.toml`, and restarts the
-service. Requires the
+`cargo-zigbuild`, uploads them with `deploy/config/prod.toml` and production's
+[host artifacts](#host-artifacts), and restarts the service. Run
+`./deploy/check-host.sh goopy@droplet prod` first to see what it is about to
+replace. Requires the
 one-time local toolchain setup in the
 [README](../README.md#cross-compilation-setup-one-time-on-macos).
 
@@ -306,7 +311,8 @@ Two rules keep it that way:
 
 - **No secrets in these files.** They are tracked in git and world-readable on
   the host. When gl-serv needs a credential, add it to a root-owned
-  `EnvironmentFile` referenced from `deploy/gl-serv.service`.
+  `EnvironmentFile` referenced from the environment's drop-in,
+  `deploy/config/<env>.gl-serv.conf`, and create that file on the host by hand.
 - **The schema is checked in CI.** `backend/gl-core/tests/committed_configs.rs`
   parses every file in `deploy/config/` with `Config::from_file` on each run, so
   a newly required field fails the PR that introduces it rather than the deploy
@@ -347,6 +353,94 @@ loopback regardless, which is why nobody noticed the wildcard in the first
 place. No migration is needed — it is worth knowing only when reading
 `sites-available` mid-transition and finding both forms.
 
+## Host artifacts
+
+Beside the config, every deploy ships the files that decide how gl-serv runs and
+how it is reached, and it is the only writer of each (#139):
+
+| Tracked | Installed at | |
+|---|---|---|
+| `deploy/gl-serv.service` | `/etc/systemd/system/gl-serv.service` | shared by every environment |
+| `deploy/config/<env>.gl-serv.conf` | `/etc/systemd/system/gl-serv.service.d/deploy.conf` | systemd drop-in: what differs per environment (`RUST_LOG`) |
+| `deploy/config/<env>.api.nginx` | `/etc/nginx/sites-available/gl-serv-api`, linked from `sites-enabled` | the api site |
+| `deploy/sudoers.goopy` | `/etc/sudoers.d/goopy` | **compared, never installed** — see below |
+
+They used to be tracked and never installed, and the dev droplet ran an api
+site named `api.goopy.life` that served `api.southp.dev` from a different
+certificate — a file with the right name and the wrong contents, which nothing
+noticed.
+
+**Per environment, tied to the config.** `server_name`, the certificate path and
+`proxy_pass` in `<env>.api.nginx` must agree with `domain` and `api_address` in
+`<env>.toml`; `committed_configs.rs` fails a PR that changes one side only. The
+shared unit may carry no `Environment=` line — anything that varies goes in the
+drop-in.
+
+**The api site is checked before anything else is installed.** `nginx -t` checks
+the whole configuration, and every per-instance provision runs it too, so a
+rejected site left in place would fail every spawn after it. The deploy puts
+the previous site back (or, on a first install, unlinks the new one) and stops;
+nginx never reloaded, so it keeps serving what it had.
+
+**The sudoers drop-in is verify-only, and must stay that way.** It grants the
+deploy its own rights, so a deploy that installed it could revoke them with one
+bad push, recoverable only from a console. Every deploy instead compares the
+host's copy with `deploy/sudoers.goopy` — through a pinned `sudo cmp`, since the
+file is `0440 root` — and stops **before changing anything** if they differ.
+Changing it is a manual act, done before the deploy that needs it:
+
+```bash
+# as an admin on the host, from a checkout of the commit about to deploy
+sudo visudo -cf deploy/sudoers.goopy
+sudo install -m 0440 -o root -g root deploy/sudoers.goopy /etc/sudoers.d/goopy
+```
+
+This is also why a host's *first* deploy never creates the drop-in: the deploy
+needs its rules before it can install anything. A new host gets it by hand in
+the [droplet setup](../README.md#droplet-setup-one-time), and the first deploy
+is what verifies it.
+
+Two more things stop a deploy, because it cannot fix either: a file in
+`gl-serv.service.d/` other than `deploy.conf` (a `systemctl edit` override
+changes the unit without appearing in any tracked file), and the pre-#139
+`sites-enabled/api.goopy.life` still enabled (it claims the same `server_name`,
+sorts first, and wins).
+
+### Checking a host for drift
+
+```bash
+./deploy/check-host.sh goopy@<host> <env> [ssh-port]
+```
+
+Read-only. Compares each artifact above, plus the installed config, with what
+the repo holds for `<env>`, prints `ok` or `DRIFT` per file with a diff, and
+exits non-zero on any difference. Run it before a manual production deploy to
+see what the deploy is about to replace, and after any hand-edit on a host to
+see what the next deploy will undo. It needs no sudo rule beyond the `cmp` the
+deploy already uses.
+
+### Migrating a host from before #139
+
+A host set up before #139 fails its first deploy, by design: its sudoers drop-in
+lacks the new rules, and its api site is enabled as `api.goopy.life`. As an
+admin on the host, from a checkout of the commit about to deploy — this order
+keeps the API up throughout:
+
+```bash
+# 1. The new rules, so the deploy can install the rest.
+sudo visudo -cf deploy/sudoers.goopy
+sudo install -m 0440 -o root -g root deploy/sudoers.goopy /etc/sudoers.d/goopy
+
+# 2. The api site under its new name, then retire the old one in the same reload.
+sudo install -m 644 deploy/config/<env>.api.nginx /etc/nginx/sites-available/gl-serv-api
+sudo ln -sf /etc/nginx/sites-available/gl-serv-api /etc/nginx/sites-enabled/gl-serv-api
+sudo rm /etc/nginx/sites-enabled/api.goopy.life /etc/nginx/sites-available/api.goopy.life
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Then deploy. It installs the unit without `RUST_LOG` and the drop-in that now
+carries it, and `check-host.sh` should report the host clean.
+
 ## Testing the deploy scripts
 
 `deploy/push-binary.sh` supports `DRY_RUN=1`, which prints the `scp`/`ssh`
@@ -355,4 +449,9 @@ droplet, network or key needed:
 
 ```bash
 ./deploy/tests/push-binary.test.sh
+./deploy/tests/check-host.test.sh
 ```
+
+`check-host.test.sh` also covers the drift comparison both scripts share
+(`deploy/host-artifacts.sh`), by running it against a scratch directory that
+stands in for the host's filesystem.
