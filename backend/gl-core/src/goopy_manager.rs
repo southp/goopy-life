@@ -217,9 +217,7 @@ where
                     // sweep will reap the `Failed` row and the log will rotate,
                     // so if it is not written down here it is gone (#118).
                     let event = InstanceEvent::failed(&goopy_clone.slug, EventPhase::Spawn, &err);
-                    if let Err(e) = registry.fail_with_event(&goopy_clone.slug, &event) {
-                        tracing::error!("spawning: update {} error: {:?}", goopy_clone.slug, e);
-                    }
+                    Self::record_failure(&registry, &event);
                 }
             }
         });
@@ -392,15 +390,43 @@ where
                 // legible, and keeps it legible after the retry that eventually
                 // succeeds reaps the row.
                 let event = InstanceEvent::failed(&goopy.slug, phase, &err);
-                if let Err(e) = registry.fail_with_event(&goopy.slug, &event) {
-                    tracing::error!(
-                        slug = %goopy.slug,
-                        error = ?e,
-                        "despawn: restoring the Failed status failed",
-                    );
-                }
+                Self::record_failure(registry, &event);
                 Err(err)
             }
+        }
+    }
+
+    /// Mark `event.slug` `Failed` and record why, keeping the why even when
+    /// the status write is what fails.
+    ///
+    /// `fail_with_event` commits both or neither, so if the status flip errors
+    /// — `SQLITE_BUSY` past the busy timeout while gl-cli holds the write lock,
+    /// say — the reason is rolled back with it and survives only in a journal
+    /// nobody can read (#116). The event is retried on its own: a lock that
+    /// timed out may have cleared, and a reason next to a stale status beats a
+    /// stale status with no reason.
+    ///
+    /// Not on `NotFound`: that means the row is gone, and the registry already
+    /// refuses to record a failure against an instance that no longer exists.
+    fn record_failure(registry: &Registry, event: &InstanceEvent) {
+        let Err(e) = registry.fail_with_event(&event.slug, event) else {
+            return;
+        };
+        tracing::error!(
+            slug = %event.slug,
+            phase = %event.phase,
+            error = ?e,
+            "marking the instance Failed failed",
+        );
+        if matches!(e, Error::NotFound) {
+            return;
+        }
+        if let Err(e) = registry.record_event(event) {
+            tracing::error!(
+                slug = %event.slug,
+                error = ?e,
+                "recording the failure reason failed too; it is in this log only",
+            );
         }
     }
 
@@ -1666,6 +1692,95 @@ mod tests {
         fn events(&self, slug: Option<&str>, limit: u32) -> Result<Vec<InstanceEvent>, Error> {
             self.0.events(slug, limit)
         }
+    }
+
+    /// A registry whose status flip always fails, standing in for a
+    /// `fail_with_event` that times out on the write lock.
+    struct StuckStatusRegistry(SqliteRegistry);
+
+    impl GoopyRegistry for StuckStatusRegistry {
+        fn fail_with_event(&self, _slug: &str, _event: &InstanceEvent) -> Result<(), Error> {
+            Err(Error::Registry {
+                context: "fail_with_event",
+                source: RegistrySource::WalModeUnavailable("busy".into()),
+            })
+        }
+        fn release_port(&self, port: u32) -> Result<(), Error> {
+            self.0.release_port(port)
+        }
+        fn save(&self, gp: &Goopy) -> Result<(), Error> {
+            self.0.save(gp)
+        }
+        fn load(&self, slug: &str) -> Result<Option<Goopy>, Error> {
+            self.0.load(slug)
+        }
+        fn delete(&self, slug: &str) -> Result<(), Error> {
+            self.0.delete(slug)
+        }
+        fn list(&self) -> Result<Vec<Goopy>, Error> {
+            self.0.list()
+        }
+        fn update_status(&self, slug: &str, status: Status) -> Result<(), Error> {
+            self.0.update_status(slug, status)
+        }
+        fn acquire_port(&self, slug: &str, s: u32, e: u32) -> Result<u32, Error> {
+            self.0.acquire_port(slug, s, e)
+        }
+        fn count_provisioned(&self) -> Result<u32, Error> {
+            self.0.count_provisioned()
+        }
+        fn count_active(&self) -> Result<u32, Error> {
+            self.0.count_active()
+        }
+        fn save_within_caps(&self, gp: &Goopy, mp: u32, ma: u32) -> Result<(), Error> {
+            self.0.save_within_caps(gp, mp, ma)
+        }
+        fn record_event(&self, event: &InstanceEvent) -> Result<(), Error> {
+            self.0.record_event(event)
+        }
+        fn delete_with_event(&self, slug: &str, event: &InstanceEvent) -> Result<(), Error> {
+            self.0.delete_with_event(slug, event)
+        }
+        fn prune_events_before(&self, cutoff: chrono::DateTime<Utc>) -> Result<u32, Error> {
+            self.0.prune_events_before(cutoff)
+        }
+        fn events(&self, slug: Option<&str>, limit: u32) -> Result<Vec<InstanceEvent>, Error> {
+            self.0.events(slug, limit)
+        }
+    }
+
+    /// The spawn thread is the one moment the reason exists in full. A status
+    /// flip that fails must not take the reason down with it.
+    #[test]
+    fn a_reason_survives_a_failed_status_flip() {
+        let inner = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let gm = manager_with(
+            StuckStatusRegistry(inner),
+            UnprovisionableProvisioner,
+            100,
+            100,
+        );
+
+        let (slug, _) = gm.spawn().unwrap();
+
+        // The row never leaves Spawning here — that is the failure being
+        // simulated — so wait on the event rather than on the status.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let events = loop {
+            let events = gm.events(Some(&slug), 10).unwrap();
+            if !events.is_empty() {
+                break events;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no event was recorded"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+
+        assert_eq!(events.len(), 1, "expected one event, got {events:?}");
+        assert_eq!(events[0].phase, EventPhase::Spawn);
+        assert_eq!(events[0].code, "subprocess");
     }
 
     /// A port that fails to return to the pool is the quietest loss in the
