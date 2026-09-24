@@ -50,6 +50,18 @@ export interface CapacityResponse {
 	max_provisioned: number;
 }
 
+// The commit gl-serv was built from, served at `GET /version`.
+// Fetched from the browser, never through the build-time config fetch: the
+// frontend does not rebuild on a backend-only deploy, so a sha frozen into the
+// static page would go stale while looking authoritative.
+export interface VersionResponse {
+	sha: string;
+	// A full commit id, `<commit>-dirty`, or `unknown`.
+	sha_full: string;
+	built_at: string;
+	version: string;
+}
+
 // State machine for the interactive "Ghost now!" CTA.
 export type AppState =
 	| { kind: "idle" }
