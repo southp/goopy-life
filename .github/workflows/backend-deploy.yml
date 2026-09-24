@@ -30,6 +30,11 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Stamped into the binaries below and re-read by push-binary.sh, which asserts
+  # that the commit it just built is the commit `GET /version` reports once the
+  # service is back up. Set once at job level rather than per step so the build
+  # and the assertion cannot disagree about which commit this run is.
+  GL_GIT_SHA: ${{ github.sha }}
 
 jobs:
   deploy:
@@ -83,7 +88,12 @@ jobs:
         # different commits.
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
-        run: cargo build --release --target x86_64-unknown-linux-musl -p gl-serv -p gl-cli
+        # GL_BUILT_AT is computed here rather than declared at job level because
+        # it has no `${{ }}` form; GL_GIT_SHA comes from the job environment so
+        # the deploy step below stamps and asserts the same commit.
+        run: |
+          export GL_BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cargo build --release --target x86_64-unknown-linux-musl -p gl-serv -p gl-cli
 
       - name: Configure SSH
         env:
