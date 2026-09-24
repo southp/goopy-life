@@ -271,6 +271,11 @@ running. Untracked files are not counted: a build's inputs cannot change without
 some tracked file changing too, and counting scratch files would mark every
 manual deploy dirty, which is the same as not marking any.
 
+Outside a git checkout it refuses to deploy at all rather than stamping
+`unknown`: the identity check would then compare `unknown` against `unknown`
+and pass without having verified anything. `push-binary.sh` rejects
+`GL_GIT_SHA=unknown` for the same reason, whoever calls it.
+
 ## Configuration
 
 Each environment's configuration is version-controlled in

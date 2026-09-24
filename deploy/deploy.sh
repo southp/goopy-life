@@ -64,8 +64,11 @@ if GIT_SHA=$(git -C "$HERE" rev-parse HEAD 2>/dev/null); then
         echo "deploy.sh: working tree is dirty; deploying as $GIT_SHA" >&2
     fi
 else
-    echo "deploy.sh: not a git checkout; the deploy will report an unknown commit" >&2
-    GIT_SHA=unknown
+    # Refused rather than stamped `unknown`: the deploy's identity check would
+    # then compare `unknown` against `unknown` and pass without verifying
+    # anything. A deploy that cannot name its commit cannot be verified either.
+    echo "deploy.sh: not a git checkout; cannot tell which commit is being deployed" >&2
+    exit 1
 fi
 
 # Exported rather than passed per-command: the same value has to reach both the

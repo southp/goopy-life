@@ -50,6 +50,15 @@ DRY_RUN=${DRY_RUN:-0}
 SHA_HINT="push-binary.sh: GL_GIT_SHA must name the commit the binaries were built from"
 GIT_SHA=${GL_GIT_SHA:?"$SHA_HINT (deploy/deploy.sh and .github/workflows/backend-deploy.yml set it)"}
 
+# `unknown` is what gl-core/build.rs stamps into a build handed no commit, so a
+# caller passing it through would build a binary that reports `unknown` and then
+# compare that against `unknown` -- the always-passing check again, arrived at
+# by a sentinel rather than a default.
+if [[ "$GIT_SHA" == unknown ]]; then
+    echo "$SHA_HINT; 'unknown' is the unstamped sentinel, not a commit" >&2
+    exit 1
+fi
+
 # Must match the --config path in deploy/gl-serv.service's ExecStart.
 REMOTE_CONFIG=/opt/goopy-life/config.toml
 

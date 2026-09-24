@@ -521,6 +521,16 @@ else
     echo "ok   — push_binary_requires_the_built_commit_id"
 fi
 
+# Nor may the sentinel stand in for one: a binary stamped `unknown` reports
+# `unknown`, so accepting it would make the check pass against itself.
+CASES=$((CASES + 1))
+if GL_GIT_SHA=unknown DRY_RUN=1 "$SCRIPT_UNDER_TEST" goopy@dev.example.com "$SERV" "$CLI" "$CFG" >/dev/null 2>&1; then
+    echo "FAIL — push_binary_rejects_the_unknown_sentinel (expected non-zero exit, got 0)"
+    FAILURES=$((FAILURES + 1))
+else
+    echo "ok   — push_binary_rejects_the_unknown_sentinel"
+fi
+
 # All four positional arguments are mandatory — a missing one must not
 # half-deploy, and must not shift the config into a binary's position.
 assert_fails push_binary_requires_a_target goopy@dev.example.com
