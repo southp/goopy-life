@@ -146,6 +146,13 @@ gl-cli from one build print matching lines:
 /opt/goopy-life/bin/gl-cli --version    # gl-cli 0.1.0 (c50c932, built 2026-09-04T11:57:00Z)
 ```
 
+Each instance also records the commit of the binary that provisioned it, which
+outlives any number of later deploys. `gl-cli list` (invoked as in
+[the maintenance CLI](#the-maintenance-cli-on-the-host)) prints it per instance
+as `build_sha`, next to `service_version` (the Ghost version, a separate fact).
+`(not recorded)` means the row predates #119, not that the build was unstamped;
+an unstamped build records `unknown`.
+
 Nothing has to be checked by hand on a normal deploy: `push-binary.sh` makes the
 comparison itself. After the restart and the `is-active` check it asks the host
 for `/version` and fails the run unless the sha matches what it just built. That
