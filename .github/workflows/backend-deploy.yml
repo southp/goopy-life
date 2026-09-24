@@ -14,8 +14,15 @@ on:
       # runs on it — that is what parses it.
       - '!backend/config.local.toml'
       - 'deploy/push-binary.sh'
-      # The dev config is shipped by the deploy, so editing it is a deploy.
-      - 'deploy/config/dev.toml'
+      - 'deploy/host-artifacts.sh'
+      # Everything the deploy ships for dev is a deploy when it changes: the
+      # config, its systemd drop-in and api site, and the shared unit.
+      - 'deploy/config/dev.*'
+      - 'deploy/gl-serv.service'
+      # Not shipped — compared. A merged change to it redeploys so the dev host
+      # is checked against it at once: the run fails until the drop-in has been
+      # applied there by hand, which is the reminder to do so.
+      - 'deploy/sudoers.goopy'
       - '.github/workflows/backend-deploy.yml'
   # Lets a maintainer re-run a deploy without an empty commit, e.g. after
   # rotating the deploy key or rebuilding the droplet.
@@ -146,5 +153,5 @@ jobs:
         env:
           DEV_DEPLOY_HOST: ${{ vars.DEV_DEPLOY_HOST }}
         run: |
-          echo "\`gl-serv\` + \`gl-cli\` @ ${GITHUB_SHA::7} → \`$DEV_DEPLOY_HOST\` — ${{ job.status }}." \
+          echo "\`gl-serv\` + \`gl-cli\` + host artifacts @ ${GITHUB_SHA::7} → \`$DEV_DEPLOY_HOST\` — ${{ job.status }}." \
             >> "$GITHUB_STEP_SUMMARY"

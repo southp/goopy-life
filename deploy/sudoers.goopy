@@ -1,7 +1,25 @@
 # Drop this file at /etc/sudoers.d/goopy (mode 0440, owned root:root).
 # Allows the 'goopy' service account to manage per-instance systemd services
 # and nginx configs without a password prompt.
+#
+# NO DEPLOY INSTALLS THIS FILE, and none should (#139). It grants the deploy
+# its own rights, so a deploy that shipped it could revoke them with one bad
+# push, and the only way back would be a console. Apply it by hand, with
+# `visudo -cf` first. Every deploy compares the host's copy against this one
+# (the `cmp` rule below) and stops before changing anything if they differ.
+#
+# Every rule is a literal command line. Keep it that way for anything the
+# deploy runs: a `*` in an argument also matches extra arguments, spaces
+# included, which for `install` means extra sources and a different
+# destination.
 goopy ALL=(root) NOPASSWD: \
+    /usr/bin/cmp -s /tmp/sudoers.goopy /etc/sudoers.d/goopy, \
+    /usr/bin/install -m 644 /tmp/gl-serv.service /etc/systemd/system/gl-serv.service, \
+    /usr/bin/install -D -m 644 /tmp/gl-serv.deploy.conf /etc/systemd/system/gl-serv.service.d/deploy.conf, \
+    /usr/bin/install -m 644 /tmp/gl-serv-api.nginx /etc/nginx/sites-available/gl-serv-api, \
+    /usr/bin/install -m 644 /tmp/gl-serv-api.nginx.prev /etc/nginx/sites-available/gl-serv-api, \
+    /usr/bin/ln -sf /etc/nginx/sites-available/gl-serv-api /etc/nginx/sites-enabled/gl-serv-api, \
+    /usr/bin/rm -f /etc/nginx/sites-enabled/gl-serv-api, \
     /usr/bin/install -m 755 /tmp/gl-serv /opt/goopy-life/bin/gl-serv, \
     /usr/bin/install -m 755 /tmp/gl-cli /opt/goopy-life/bin/gl-cli, \
     /usr/sbin/zfs create -o quota=* zpool_ghost/*, \
