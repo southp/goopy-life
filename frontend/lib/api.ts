@@ -7,7 +7,12 @@
 // Presence of NEXT_PUBLIC_GL_API_URL is enforced at build time in next.config.ts, so
 // by the time this runs in the browser the value is always the baked-in literal.
 
-import type { ApiError, CapacityResponse, GoopyResponse } from "./types";
+import type {
+	ApiError,
+	CapacityResponse,
+	GoopyResponse,
+	VersionResponse,
+} from "./types";
 
 export function apiBase(): string {
 	return process.env.NEXT_PUBLIC_GL_API_URL ?? "";
@@ -69,6 +74,17 @@ export async function getCapacity(
 	signal?: AbortSignal,
 ): Promise<CapacityResponse> {
 	const res = await fetch(`${apiBase()}/capacity`, { signal });
+	if (!res.ok) {
+		throw await toApiError(res);
+	}
+	return res.json();
+}
+
+// The commit the backend is running right now. Runtime, from the browser, for the
+// same reason as getCapacity: a build-time fetch would freeze it at the last
+// frontend build.
+export async function getVersion(signal?: AbortSignal): Promise<VersionResponse> {
+	const res = await fetch(`${apiBase()}/version`, { signal });
 	if (!res.ok) {
 		throw await toApiError(res);
 	}

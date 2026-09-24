@@ -381,3 +381,24 @@ body {
 	font-style: italic;
 	color: #666;
 }
+
+/* ── Version footer ─────────────────────────────────────────────────────── */
+
+/*
+ * For whoever is asking "is what I merged what is running" — present, but quiet
+ * enough that a visitor reads past it.
+ */
+.version-footer {
+	padding: 0 1.25rem 2rem;
+	font-size: 0.75rem;
+	color: #555;
+	font-family: var(--font-geist-mono), monospace;
+}
+
+.version-sha {
+	color: #666;
+}
+
+a.version-sha:hover {
+	color: #aaa;
+}

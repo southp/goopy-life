@@ -157,12 +157,40 @@ means the restart did not produce the binary the install put down. Check in this
 order: that the install actually replaced `/opt/goopy-life/bin/gl-serv`, that
 `systemctl restart gl-serv` took, and that no other gl-serv is bound to the port.
 
-The frontend half of the answer — a footer showing the deployed commit for both
-halves — is deferred to a follow-up PR on #119. The backend's sha is deliberately
-**not** served from `GET /config`: the frontend fetches that once at Vercel build
-time into a `force-static` page, and `ignoreCommand` skips the Vercel build for
-backend-only changes, so a sha carried there would go stale and stay stale while
-looking authoritative.
+### What frontend commit is running, and the footer
+
+The landing page's footer answers the question for both halves at once:
+
+```
+web a1b2c3d · api c50c932
+```
+
+Each sha links to its commit on GitHub. The two come from two places on purpose:
+
+| | Source | When |
+|---|---|---|
+| `web` | `VERCEL_GIT_COMMIT_SHA` → `NEXT_PUBLIC_GL_BUILD_SHA`, in `frontend/next.config.ts` | build time — correct, the bundle *is* the build |
+| `api` | `GET /version`, fetched by the browser | runtime |
+
+The backend's sha is deliberately **not** served from `GET /config`: the frontend
+fetches that once at Vercel build time into a `force-static` page, and
+`ignoreCommand` skips the Vercel build for backend-only changes, so a sha carried
+there would go stale and stay stale while looking authoritative.
+
+What the footer shows, and what it means:
+
+- **`api` missing** — `/version` did not answer (backend down, CORS, network). It
+  is omitted rather than replaced by a placeholder that would imply a version.
+- **`unknown`, unlinked** — the build was stamped by neither path: a local build
+  of either half.
+- **`<sha>-dirty`, unlinked** — the backend was hand-deployed from a tree with
+  uncommitted changes; linking the commit would claim code that is not running.
+
+Vercel exposes `VERCEL_GIT_COMMIT_SHA` to the build only while *Automatically
+expose System Environment Variables* is on (the default). If the footer reads
+`web unknown` on a Vercel deployment, check that setting first. Without the
+footer, the Vercel dashboard's *Deployments* tab shows the commit each deployment
+was built from.
 
 ## The maintenance CLI on the host
 
