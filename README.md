@@ -37,30 +37,23 @@ The service runs as a dedicated `goopy` account, which is also the account you d
 sudo useradd --system --create-home --shell /bin/bash goopy
 ssh-copy-id goopy@<droplet>
 
-# 1. Install the systemd unit and sudoers drop-in
-sudo cp deploy/gl-serv.service /etc/systemd/system/gl-serv.service
-sudo cp deploy/sudoers.goopy /etc/sudoers.d/goopy
-sudo chmod 0440 /etc/sudoers.d/goopy
-sudo systemctl daemon-reload
-sudo systemctl enable gl-serv
+# 1. Install the sudoers drop-in. No deploy ever installs it — it grants the
+#    deploy its rights — so it goes on by hand, and every deploy checks it.
+sudo visudo -cf deploy/sudoers.goopy
+sudo install -m 0440 -o root -g root deploy/sudoers.goopy /etc/sudoers.d/goopy
 
-# 2. Install the nginx reverse-proxy config
-sudo cp deploy/nginx.api.goopy.life /etc/nginx/sites-available/api.goopy.life
-sudo ln -s /etc/nginx/sites-available/api.goopy.life /etc/nginx/sites-enabled/api.goopy.life
-sudo nginx -t && sudo systemctl reload nginx
-
-# 3. Set the ZFS pool mountpoint to match base_dir in config.toml (default: /opt/goopy-life/data).
+# 2. Set the ZFS pool mountpoint to match base_dir in config.toml (default: /opt/goopy-life/data).
 #    gl-serv creates/destroys child datasets via sudo (sudoers rules restrict to zpool_ghost/*).
 #    NoNewPrivileges is intentionally omitted from the unit to allow this; see issue #90 for
 #    the long-term fix (privilege-separated ZFS helper).
 sudo zfs set mountpoint=/opt/goopy-life/data zpool_ghost
 
-# 4. Give the deploy account ownership of the service directory. The deploy
+# 3. Give the deploy account ownership of the service directory. The deploy
 #    writes /opt/goopy-life/config.toml directly, so this must not be root-owned.
 sudo install -d -o goopy -g goopy /opt/goopy-life /opt/goopy-life/bin
 ```
 
-There is no step for `config.toml`: it is version-controlled under [`deploy/config/`](deploy/config/) and installed by the deploy itself.
+There is no step for `config.toml`, the systemd unit or the api nginx site: they are version-controlled — the unit at [`deploy/gl-serv.service`](deploy/gl-serv.service), the rest per environment under [`deploy/config/`](deploy/config/) — and installed by the deploy itself. After the first deploy, `./deploy/check-host.sh goopy@<droplet> <env>` confirms the host matches the repo. See [Host artifacts](docs/DEPLOYMENT.md#host-artifacts).
 
 ### Deploying
 
@@ -68,7 +61,7 @@ There is no step for `config.toml`: it is version-controlled under [`deploy/conf
 ./deploy/deploy.sh goopy@droplet <env> [ssh-port]   # e.g. goopy@droplet dev
 ```
 
-This cross-compiles `gl-serv` and `gl-cli` to fully static musl binaries from one build, uploads both to the droplet along with `deploy/config/<env>.toml`, restarts the `gl-serv` systemd service, and verifies the service came back up.
+This cross-compiles `gl-serv` and `gl-cli` to fully static musl binaries from one build, uploads both to the droplet along with `deploy/config/<env>.toml` and the environment's host artifacts, restarts the `gl-serv` systemd service, and verifies the service came back up.
 
 The environment is required and has no default: the config is shipped to the host, so a default would quietly reconfigure one environment with another's settings. Edit `deploy/config/<env>.toml` and deploy — a hand-edit on the droplet is overwritten by the next run.
 
