@@ -22,7 +22,8 @@ use crate::shared_types::*;
 /// of databases created before versioning existed, whose `user_version` is
 /// still 0 even though the tables are already present.
 ///
-/// Version 2 adds `instance_events` (#118).  A fresh database is fully
+/// Version 2 adds `instance_events` (#118).  Version 3 adds
+/// `goopies.build_sha` (#119).  A fresh database is fully
 /// initialised by walking every step in order, so new steps append here rather
 /// than editing an existing one — an already-migrated database never re-runs a
 /// step it has passed.
@@ -80,6 +81,21 @@ const MIGRATIONS: &[(u32, &str)] = &[
         ON instance_events(slug);
     CREATE INDEX IF NOT EXISTS idx_instance_events_occurred_at
         ON instance_events(occurred_at);
+    ",
+    ),
+    (
+        3,
+        // The gl commit that provisioned each instance (#119), alongside
+        // `service_version`, which is the provisioned service's own version
+        // and stays exactly that.
+        //
+        // Nullable with no default on purpose: rows that predate this step
+        // were made by a binary that recorded nothing, and NULL says so.
+        // Backfilling `'unknown'` would claim an unstamped build made them.
+        // Not idempotent — `ADD COLUMN` fails if re-run — which the
+        // `user_version` guard in [`migrate`] makes safe.
+        "
+    ALTER TABLE goopies ADD COLUMN build_sha TEXT;
     ",
     ),
 ];
@@ -295,6 +311,7 @@ fn parse_row(
     port: i64,
     provisioner_kind_str: String,
     service_version: String,
+    build_sha: Option<String>,
 ) -> Result<Goopy, Error> {
     let created_at = created_at_str.parse::<DateTime<Utc>>().map_err(|e| {
         tracing::error!(
@@ -343,6 +360,7 @@ fn parse_row(
         port: port as u32,
         provisioner_kind,
         service_version,
+        build_sha,
     })
 }
 
@@ -558,8 +576,8 @@ fn insert_goopy(conn: &Connection, gp: &Goopy) -> Result<(), Error> {
     let result = conn.execute(
         "INSERT OR FAIL INTO goopies
          (slug, life_in_days, created_at, status, working_dir, port,
-          provisioner_kind, service_version)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+          provisioner_kind, service_version, build_sha)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             gp.slug,
             gp.life_in_days as i64,
@@ -569,6 +587,7 @@ fn insert_goopy(conn: &Connection, gp: &Goopy) -> Result<(), Error> {
             gp.port as i64,
             gp.provisioner_kind.to_string(),
             gp.service_version,
+            gp.build_sha,
         ],
     );
 
@@ -616,7 +635,7 @@ impl GoopyRegistry for SqliteRegistry {
 
         let result = conn.query_row(
             "SELECT slug, life_in_days, created_at, status, working_dir,
-                    port, provisioner_kind, service_version
+                    port, provisioner_kind, service_version, build_sha
              FROM goopies WHERE slug = ?1",
             params![slug],
             |row| {
@@ -629,6 +648,7 @@ impl GoopyRegistry for SqliteRegistry {
                     row.get::<_, i64>("port")?,
                     row.get::<_, String>("provisioner_kind")?,
                     row.get::<_, String>("service_version")?,
+                    row.get::<_, Option<String>>("build_sha")?,
                 ))
             },
         );
@@ -648,6 +668,7 @@ impl GoopyRegistry for SqliteRegistry {
                 port,
                 provisioner_kind_str,
                 service_version,
+                build_sha,
             )) => {
                 let gp = parse_row(
                     slug,
@@ -658,6 +679,7 @@ impl GoopyRegistry for SqliteRegistry {
                     port,
                     provisioner_kind_str,
                     service_version,
+                    build_sha,
                 )?;
                 tracing::debug!(slug = %gp.slug, "loaded goopy");
                 Ok(Some(gp))
@@ -695,7 +717,7 @@ impl GoopyRegistry for SqliteRegistry {
         let mut stmt = conn
             .prepare(
                 "SELECT slug, life_in_days, created_at, status, working_dir,
-                        port, provisioner_kind, service_version
+                        port, provisioner_kind, service_version, build_sha
                  FROM goopies ORDER BY created_at",
             )
             .map_err(|e| Error::Registry {
@@ -714,6 +736,7 @@ impl GoopyRegistry for SqliteRegistry {
                     row.get::<_, i64>("port")?,
                     row.get::<_, String>("provisioner_kind")?,
                     row.get::<_, String>("service_version")?,
+                    row.get::<_, Option<String>>("build_sha")?,
                 ))
             })
             .map_err(|e| Error::Registry {
@@ -730,6 +753,7 @@ impl GoopyRegistry for SqliteRegistry {
                     port,
                     provisioner_kind_str,
                     service_version,
+                    build_sha,
                 ) = r.map_err(|e| Error::Registry {
                     context: "list row",
                     source: e.into(),
@@ -743,6 +767,7 @@ impl GoopyRegistry for SqliteRegistry {
                     port,
                     provisioner_kind_str,
                     service_version,
+                    build_sha,
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1025,6 +1050,7 @@ mod tests {
             status: Status::Spawning,
             provisioner_kind: ProvisionerKind::Hello,
             service_version: "0.1.0".to_string(),
+            build_sha: Some("c50c932aa1b2c3d4e5f60718293a4b5c6d7e8f90".to_string()),
         }
     }
 
@@ -1661,6 +1687,68 @@ mod tests {
         r.record_event(&InstanceEvent::reaped("e-upgraded", EventPhase::Sweep))
             .unwrap();
         assert_eq!(r.events(Some("e-upgraded"), 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn build_sha_round_trips_through_save_load_and_list() {
+        let r = registry();
+        let stamped = make_goopy("stamped");
+        let dirty = Goopy {
+            build_sha: Some("c50c932aa1b2c3d4e5f60718293a4b5c6d7e8f90-dirty".to_string()),
+            ..make_goopy("dirty")
+        };
+        r.save(&stamped).unwrap();
+        r.save(&dirty).unwrap();
+
+        assert_eq!(
+            r.load("stamped").unwrap().unwrap().build_sha,
+            stamped.build_sha
+        );
+        assert_eq!(r.load("dirty").unwrap().unwrap().build_sha, dirty.build_sha);
+
+        let listed: Vec<_> = r.list().unwrap().into_iter().map(|g| g.build_sha).collect();
+        assert!(listed.contains(&stamped.build_sha));
+        assert!(listed.contains(&dirty.build_sha));
+    }
+
+    /// Rows provisioned before #119 must read back as "not recorded", not as
+    /// the recorded answer `unknown` — the two mean different things.
+    #[test]
+    fn migration_adds_build_sha_leaving_existing_rows_unrecorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("v2.db");
+
+        // Reproduce a pre-#119 database holding one instance: steps 1-2, stamped at 2.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(MIGRATIONS[0].1).unwrap();
+            conn.execute_batch(MIGRATIONS[1].1).unwrap();
+            conn.execute_batch("PRAGMA user_version = 2;").unwrap();
+            conn.execute(
+                "INSERT INTO goopies (slug, life_in_days, created_at, status, working_dir, port, provisioner_kind, service_version) \
+                 VALUES ('old-row', 7, '2026-06-01T00:00:00Z', 'Done', '/tmp/old-row', 8080, 'Hello', '0.1.0')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let r = SqliteRegistry::new(&db_path).unwrap();
+        assert_eq!(
+            user_version(&rusqlite::Connection::open(&db_path).unwrap()),
+            LATEST_VERSION
+        );
+
+        let old = r
+            .load("old-row")
+            .unwrap()
+            .expect("old row survives migration");
+        assert_eq!(old.build_sha, None);
+        assert_eq!(old.service_version, "0.1.0", "service_version is untouched");
+
+        // And the upgraded database records the build for new rows.
+        let new = make_goopy("new-row");
+        r.save(&new).unwrap();
+        assert_eq!(r.load("new-row").unwrap().unwrap().build_sha, new.build_sha);
     }
 
     // -------------------------------------------------------------------------

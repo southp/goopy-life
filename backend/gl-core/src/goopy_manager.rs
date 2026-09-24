@@ -147,6 +147,7 @@ where
                 status: Status::Spawning,
                 provisioner_kind: self.provisioner.kind(),
                 service_version: self.provisioner.service_version().to_string(),
+                build_sha: Some(crate::build_info::GIT_SHA.to_string()),
             };
 
             // Capacity is enforced by the insert itself rather than by a
@@ -731,6 +732,7 @@ mod tests {
             status,
             provisioner_kind: ProvisionerKind::Hello,
             service_version: "0.1.0".to_string(),
+            build_sha: None,
         }
     }
 
@@ -983,6 +985,21 @@ mod tests {
     }
 
     #[test]
+    fn spawn_records_the_build_sha_of_the_provisioning_binary() {
+        let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
+        let (slug, _) = gm.spawn().unwrap();
+        let g = gm.get(&slug).unwrap().expect("should find goopy");
+        // Recorded as-is, `unknown` included: a test build is unstamped, and
+        // that is a fact about the binary rather than a missing value.
+        assert_eq!(g.build_sha.as_deref(), Some(crate::build_info::GIT_SHA));
+        assert_ne!(
+            g.build_sha.as_deref(),
+            Some(g.service_version.as_str()),
+            "build_sha and service_version must stay two different facts"
+        );
+    }
+
+    #[test]
     fn get_missing_returns_none() {
         let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
         assert!(gm.get("no-such-slug").unwrap().is_none());
@@ -1088,6 +1105,7 @@ mod tests {
             status: Status::Failed,
             provisioner_kind: ProvisionerKind::Hello,
             service_version: "0.1.0".to_string(),
+            build_sha: None,
         };
         registry.save(&failed).unwrap();
         // Register the port so we can verify it gets released.
