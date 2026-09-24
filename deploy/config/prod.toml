@@ -13,12 +13,13 @@
 #
 # No secrets belong in this file: it is tracked in git and world-readable on the
 # host. Credentials go in a root-owned EnvironmentFile referenced from
-# deploy/gl-serv.service instead.
+# deploy/config/prod.gl-serv.conf instead.
 
 # Base directory for goopy working directories.
 base_dir = "/opt/goopy-life/data"
 
-# REVIEW: production serves goopy.life, per deploy/nginx.api.goopy.life.
+# REVIEW: production serves goopy.life. deploy/config/prod.api.nginx names this
+# domain too, and CI fails a PR that changes only one of the two.
 # Public domain — instances are served at {slug}.{domain}.
 domain = "southp.dev"
 
