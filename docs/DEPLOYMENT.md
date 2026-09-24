@@ -138,6 +138,14 @@ means something specific:
 | `<commit>-dirty` | built by `deploy.sh` from a tree with uncommitted changes — what is running is *not* that commit |
 | `unknown` | built by neither deploy path (a local `cargo build`), so nothing can be said about which commit it is |
 
+On the host itself, both binaries print the same stamp, so a gl-serv and a
+gl-cli from one build print matching lines:
+
+```bash
+/opt/goopy-life/bin/gl-serv --version   # gl-serv 0.1.0 (c50c932, built 2026-09-04T11:57:00Z)
+/opt/goopy-life/bin/gl-cli --version    # gl-cli 0.1.0 (c50c932, built 2026-09-04T11:57:00Z)
+```
+
 Nothing has to be checked by hand on a normal deploy: `push-binary.sh` makes the
 comparison itself. After the restart and the `is-active` check it asks the host
 for `/version` and fails the run unless the sha matches what it just built. That

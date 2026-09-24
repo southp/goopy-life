@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
 use gl_core::sys_utils::RealSysRunner;
 use gl_core::*;
@@ -8,9 +8,6 @@ use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "gl-cli")]
-// Read from Cargo rather than hand-written: the installed binary is how an
-// operator tells which build a host is running.
-#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Maintenance CLI for a Goopy.Life host.")]
 #[command(long_about = "\
 Maintenance CLI for a Goopy.Life host.
@@ -96,7 +93,17 @@ fn main() {
         )
         .init();
 
-    let cli = Cli::parse();
+    // The installed binary is how an operator tells which build a host is
+    // running, so `--version` names the commit, in the same form as
+    // `gl-serv --version`. Set at runtime rather than via `#[command(version)]`,
+    // which takes only a `&'static str`: the commit stamp lives in gl-core's
+    // build environment, not this crate's.
+    let cli = Cli::from_arg_matches(
+        &Cli::command()
+            .version(gl_core::build_info::describe(env!("CARGO_PKG_VERSION")))
+            .get_matches(),
+    )
+    .unwrap_or_else(|e| e.exit());
 
     // Config file is required — no silent fallback.
     if !cli.config.exists() {

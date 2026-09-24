@@ -9,7 +9,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{Duration, Utc};
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use gl_core::config::ProvisionerConfig;
 use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
 use gl_core::{AllocatorKind, CapacityKind, GoopyManager, RealSysRunner};
@@ -25,7 +25,6 @@ use tower_http::trace::TraceLayer;
 
 #[derive(Parser)]
 #[command(name = "gl-serv")]
-#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Goopy.Life API server")]
 struct Cli {
     /// Path to the config file
@@ -954,7 +953,15 @@ async fn main() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let cli = Cli::parse();
+    // The version is set at runtime rather than via `#[command(version)]`,
+    // which takes only a `&'static str`: the commit stamp lives in gl-core's
+    // build environment, not this crate's.
+    let cli = Cli::from_arg_matches(
+        &Cli::command()
+            .version(gl_core::build_info::describe(env!("CARGO_PKG_VERSION")))
+            .get_matches(),
+    )
+    .unwrap_or_else(|e| e.exit());
 
     // Before anything is opened, bound or spawned: --check-config reads the
     // file and the filesystem and nothing else, so it can run against a live

@@ -42,6 +42,29 @@ pub fn short_git_sha() -> String {
     abbreviate(GIT_SHA)
 }
 
+/// The `--version` line both binaries print: `0.1.0 (c50c932, built
+/// 2026-09-23T12:00:00Z)`.
+///
+/// Shared so that `gl-serv --version` and `gl-cli --version` on a host are
+/// comparable at a glance: the deploy installs both from one build, and the
+/// two lines match exactly when that held. `pkg_version` is the caller's own
+/// `CARGO_PKG_VERSION`, since this crate's is not the binary's.
+pub fn describe(pkg_version: &str) -> String {
+    format_version(pkg_version, GIT_SHA, BUILT_AT)
+}
+
+/// [`describe`] with the stamp passed in, so both shapes are testable from a
+/// build that has only one of them.
+fn format_version(pkg_version: &str, sha: &str, built_at: &str) -> String {
+    if sha == UNKNOWN {
+        return format!("{pkg_version} ({UNKNOWN})");
+    }
+    if built_at == UNKNOWN {
+        return format!("{pkg_version} ({})", abbreviate(sha));
+    }
+    format!("{pkg_version} ({}, built {built_at})", abbreviate(sha))
+}
+
 /// Shorten `sha` to [`SHORT_SHA_LEN`] hex digits, preserving a trailing
 /// `-<suffix>` if there is one.
 fn abbreviate(sha: &str) -> String {
@@ -89,6 +112,33 @@ mod tests {
         // not hex, and this asserts the guard is what is doing the work.
         assert_eq!(abbreviate(UNKNOWN), UNKNOWN);
         assert_eq!(abbreviate("unknown-ish"), "unknown-ish");
+    }
+
+    #[test]
+    fn format_version_names_the_commit_and_the_build_time() {
+        assert_eq!(
+            format_version(
+                "0.1.0",
+                "c50c932ab1d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8-dirty",
+                "2026-09-23T12:00:00Z"
+            ),
+            "0.1.0 (c50c932-dirty, built 2026-09-23T12:00:00Z)"
+        );
+    }
+
+    #[test]
+    fn format_version_says_unknown_for_an_unstamped_build() {
+        assert_eq!(format_version("0.1.0", UNKNOWN, UNKNOWN), "0.1.0 (unknown)");
+    }
+
+    #[test]
+    fn format_version_omits_a_missing_build_time() {
+        // A hand build that set only GL_GIT_SHA: say what is known, and do not
+        // print "built unknown" as if it were a time.
+        assert_eq!(
+            format_version("0.1.0", "c50c932ab1d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8", UNKNOWN),
+            "0.1.0 (c50c932)"
+        );
     }
 
     #[test]
