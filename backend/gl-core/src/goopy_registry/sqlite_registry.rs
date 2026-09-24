@@ -4,10 +4,11 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use super::GoopyRegistry;
 use crate::goopy::Goopy;
+use crate::instance_event::{EventOutcome, EventPhase, InstanceEvent};
 use crate::shared_types::*;
 
 /// Ordered list of migration steps.
@@ -16,18 +17,23 @@ use crate::shared_types::*;
 /// `target_version` is greater than the current `user_version`, then sets
 /// `user_version` to `target_version` after each successful step.
 ///
-/// Version 1 establishes the current schema as the baseline: it creates both
-/// tables outright, so a fresh database is fully initialised by running this
-/// step alone.  `IF NOT EXISTS` keeps it tolerant of databases created before
-/// versioning existed, whose `user_version` is still 0 even though the tables
-/// are already present.
+/// Version 1 establishes the pre-versioning schema as the baseline: it creates
+/// `goopies` and `allocated_ports` outright.  `IF NOT EXISTS` keeps it tolerant
+/// of databases created before versioning existed, whose `user_version` is
+/// still 0 even though the tables are already present.
+///
+/// Version 2 adds `instance_events` (#118).  A fresh database is fully
+/// initialised by walking every step in order, so new steps append here rather
+/// than editing an existing one — an already-migrated database never re-runs a
+/// step it has passed.
 ///
 /// Each step runs inside a transaction (see [`migrate`]), which constrains what
 /// its SQL may contain: no explicit `BEGIN`/`COMMIT`, and no statement SQLite
 /// forbids inside a transaction — notably `VACUUM` and `PRAGMA journal_mode`.
-const MIGRATIONS: &[(u32, &str)] = &[(
-    1,
-    "
+const MIGRATIONS: &[(u32, &str)] = &[
+    (
+        1,
+        "
     CREATE TABLE IF NOT EXISTS goopies (
         id               INTEGER PRIMARY KEY AUTOINCREMENT,
         slug             TEXT    UNIQUE NOT NULL,
@@ -45,7 +51,38 @@ const MIGRATIONS: &[(u32, &str)] = &[(
         slug TEXT    NOT NULL UNIQUE
     );
     ",
-)];
+    ),
+    (
+        2,
+        // Append-only record of what happened to an instance, kept after the
+        // instance is gone (#118).
+        //
+        // No foreign key to `goopies` on purpose: the row this describes is
+        // routinely deleted, and outliving it is the whole point. `slug` is
+        // therefore a plain column and may name an instance that no longer
+        // exists — or, once a slug is reused, more than one instance over
+        // time. `occurred_at` is what separates them.
+        //
+        // The `occurred_at` index serves both readers: newest-first listing,
+        // and the sweep's retention delete.
+        "
+    CREATE TABLE IF NOT EXISTS instance_events (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        slug        TEXT    NOT NULL,
+        occurred_at TEXT    NOT NULL,
+        phase       TEXT    NOT NULL,
+        outcome     TEXT    NOT NULL,
+        code        TEXT    NOT NULL,
+        detail      TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_instance_events_slug
+        ON instance_events(slug);
+    CREATE INDEX IF NOT EXISTS idx_instance_events_occurred_at
+        ON instance_events(occurred_at);
+    ",
+    ),
+];
 
 /// The latest schema version understood by this build.
 ///
@@ -206,6 +243,43 @@ impl SqliteRegistry {
 
         Ok(Self { pool })
     }
+
+    /// Run `body` inside one `IMMEDIATE` write transaction, committing only if
+    /// it returns `Ok`.
+    ///
+    /// `Immediate` takes the write lock up front so a concurrent opener —
+    /// gl-serv and gl-cli share the file — waits out `busy_timeout` instead of
+    /// failing a lock upgrade with `SQLITE_BUSY`, the same reason the migration
+    /// runner uses it.
+    ///
+    /// `context` names the operation for the [`Error::Registry`] a failed
+    /// begin or commit carries.
+    fn in_write_transaction<T>(
+        &self,
+        context: &'static str,
+        body: impl FnOnce(&Connection) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let mut conn = self.pool.get().map_err(|e| Error::Registry {
+            context: "pool get",
+            source: e.into(),
+        })?;
+
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| Error::Registry {
+                context,
+                source: e.into(),
+            })?;
+
+        let out = body(&tx)?;
+
+        tx.commit().map_err(|e| Error::Registry {
+            context,
+            source: e.into(),
+        })?;
+
+        Ok(out)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -308,6 +382,174 @@ fn count_active_in(conn: &Connection) -> Result<u32, Error> {
         })?;
 
     Ok(count as u32)
+}
+
+/// Set `slug`'s status, reporting a missing row as [`Error::NotFound`].
+fn set_status_in(conn: &Connection, slug: &str, new_status: Status) -> Result<(), Error> {
+    let n = conn
+        .execute(
+            "UPDATE goopies SET status = ?1 WHERE slug = ?2",
+            params![new_status.to_string(), slug],
+        )
+        .map_err(|e| Error::Registry {
+            context: "update status",
+            source: e.into(),
+        })?;
+
+    if n == 0 {
+        tracing::error!(slug = %slug, "update_status: not found");
+        return Err(Error::NotFound);
+    }
+
+    tracing::debug!(slug = %slug, status = %new_status, "updated status");
+    Ok(())
+}
+
+/// Remove `slug` from `goopies`, reporting a missing row as
+/// [`Error::NotFound`].
+fn delete_goopy_in(conn: &Connection, slug: &str) -> Result<(), Error> {
+    let n = conn
+        .execute("DELETE FROM goopies WHERE slug = ?1", params![slug])
+        .map_err(|e| Error::Registry {
+            context: "delete",
+            source: e.into(),
+        })?;
+
+    if n == 0 {
+        tracing::error!(slug = %slug, "delete: not found");
+        return Err(Error::NotFound);
+    }
+
+    tracing::debug!(slug = %slug, "deleted goopy");
+    Ok(())
+}
+
+/// Append one row to `instance_events`.
+///
+/// Only ever an `INSERT`: nothing in this module updates or deletes an
+/// individual event. The one deletion is retention, which goes by age.
+fn insert_event_in(conn: &Connection, event: &InstanceEvent) -> Result<(), Error> {
+    conn.execute(
+        "INSERT INTO instance_events
+         (slug, occurred_at, phase, outcome, code, detail)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            event.slug,
+            event.occurred_at.to_rfc3339(),
+            event.phase.to_string(),
+            event.outcome.to_string(),
+            event.code,
+            event.detail,
+        ],
+    )
+    .map_err(|e| Error::Registry {
+        context: "record event",
+        source: e.into(),
+    })?;
+
+    tracing::debug!(
+        slug = %event.slug,
+        phase = %event.phase,
+        outcome = %event.outcome,
+        code = %event.code,
+        "recorded instance event"
+    );
+    Ok(())
+}
+
+/// Whether `event` says nothing the slug's newest event does not already say:
+/// same phase, outcome, code and detail. The timestamp is deliberately not
+/// compared, because a retry that fails the same way differs only in that.
+///
+/// Uses the same ordering as `events()`, so "newest" means what a reader of
+/// `gl-cli events` sees at the top.
+fn newest_event_repeats(conn: &Connection, event: &InstanceEvent) -> Result<bool, Error> {
+    let newest = conn
+        .query_row(
+            "SELECT phase, outcome, code, detail
+             FROM instance_events
+             WHERE slug = ?1
+             ORDER BY occurred_at DESC, id DESC
+             LIMIT 1",
+            params![event.slug],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| Error::Registry {
+            context: "newest event",
+            source: e.into(),
+        })?;
+
+    Ok(newest.is_some_and(|(phase, outcome, code, detail)| {
+        phase == event.phase.to_string()
+            && outcome == event.outcome.to_string()
+            && code == event.code
+            && detail == event.detail
+    }))
+}
+
+/// Rebuild an [`InstanceEvent`] from its stored columns.
+fn parse_event_row(
+    slug: String,
+    occurred_at_str: String,
+    phase_str: String,
+    outcome_str: String,
+    code: String,
+    detail: Option<String>,
+) -> Result<InstanceEvent, Error> {
+    let occurred_at = occurred_at_str.parse::<DateTime<Utc>>().map_err(|e| {
+        tracing::error!(
+            slug = %slug,
+            field = "occurred_at",
+            value = %occurred_at_str,
+            error = %e,
+            "event row parse failed"
+        );
+        Error::RowParse {
+            slug: slug.clone(),
+            field: "occurred_at",
+            value: occurred_at_str.clone(),
+        }
+    })?;
+
+    let phase = EventPhase::from_str(&phase_str).map_err(|_| {
+        tracing::error!(slug = %slug, field = "phase", value = %phase_str, "event row parse failed");
+        Error::RowParse {
+            slug: slug.clone(),
+            field: "phase",
+            value: phase_str.clone(),
+        }
+    })?;
+
+    let outcome = EventOutcome::from_str(&outcome_str).map_err(|_| {
+        tracing::error!(
+            slug = %slug,
+            field = "outcome",
+            value = %outcome_str,
+            "event row parse failed"
+        );
+        Error::RowParse {
+            slug: slug.clone(),
+            field: "outcome",
+            value: outcome_str.clone(),
+        }
+    })?;
+
+    Ok(InstanceEvent {
+        slug,
+        occurred_at,
+        phase,
+        outcome,
+        code,
+        detail,
+    })
 }
 
 /// Insert `gp`, mapping a UNIQUE violation on `slug` to [`Error::AlreadyExists`]
@@ -430,23 +672,7 @@ impl GoopyRegistry for SqliteRegistry {
             source: e.into(),
         })?;
 
-        let n = conn
-            .execute(
-                "UPDATE goopies SET status = ?1 WHERE slug = ?2",
-                params![new_status.to_string(), slug],
-            )
-            .map_err(|e| Error::Registry {
-                context: "update status",
-                source: e.into(),
-            })?;
-
-        if n == 0 {
-            tracing::error!(slug = %slug, "update_status: not found");
-            Err(Error::NotFound)
-        } else {
-            tracing::debug!(slug = %slug, status = %new_status, "updated status");
-            Ok(())
-        }
+        set_status_in(&conn, slug, new_status)
     }
 
     #[tracing::instrument(skip(self))]
@@ -456,20 +682,7 @@ impl GoopyRegistry for SqliteRegistry {
             source: e.into(),
         })?;
 
-        let n = conn
-            .execute("DELETE FROM goopies WHERE slug = ?1", params![slug])
-            .map_err(|e| Error::Registry {
-                context: "delete",
-                source: e.into(),
-            })?;
-
-        if n == 0 {
-            tracing::error!(slug = %slug, "delete: not found");
-            Err(Error::NotFound)
-        } else {
-            tracing::debug!(slug = %slug, "deleted goopy");
-            Ok(())
-        }
+        delete_goopy_in(&conn, slug)
     }
 
     #[tracing::instrument(skip(self))]
@@ -684,6 +897,116 @@ impl GoopyRegistry for SqliteRegistry {
             context: "commit save_within_caps transaction",
             source: e.into(),
         })
+    }
+
+    // -- the instance event log (#118) ------------------------------------
+
+    #[tracing::instrument(skip(self))]
+    fn record_event(&self, event: &InstanceEvent) -> Result<(), Error> {
+        let conn = self.pool.get().map_err(|e| Error::Registry {
+            context: "pool get",
+            source: e.into(),
+        })?;
+
+        insert_event_in(&conn, event)
+    }
+
+    #[tracing::instrument(skip(self))]
+    fn fail_with_event(&self, slug: &str, event: &InstanceEvent) -> Result<(), Error> {
+        self.in_write_transaction("fail_with_event", |tx| {
+            set_status_in(tx, slug, Status::Failed)?;
+            // The sweep retries every `Failed` row, so an instance that cannot
+            // be torn down fails the same way on every run. One row per reason
+            // keeps `gl-cli events` about what is new rather than about the
+            // one slug that is stuck.
+            if newest_event_repeats(tx, event)? {
+                return Ok(());
+            }
+            insert_event_in(tx, event)
+        })
+    }
+
+    #[tracing::instrument(skip(self))]
+    fn delete_with_event(&self, slug: &str, event: &InstanceEvent) -> Result<(), Error> {
+        self.in_write_transaction("delete_with_event", |tx| {
+            delete_goopy_in(tx, slug)?;
+            insert_event_in(tx, event)
+        })
+    }
+
+    #[tracing::instrument(skip(self))]
+    fn prune_events_before(&self, cutoff: DateTime<Utc>) -> Result<u32, Error> {
+        let conn = self.pool.get().map_err(|e| Error::Registry {
+            context: "pool get",
+            source: e.into(),
+        })?;
+
+        // Both sides of the comparison are RFC 3339 with a `+00:00` offset, so
+        // the lexicographic comparison SQLite does on TEXT is a chronological
+        // one. That is the same assumption `ORDER BY created_at` has always
+        // made about `goopies`.
+        let n = conn
+            .execute(
+                "DELETE FROM instance_events WHERE occurred_at < ?1",
+                params![cutoff.to_rfc3339()],
+            )
+            .map_err(|e| Error::Registry {
+                context: "prune events",
+                source: e.into(),
+            })?;
+
+        Ok(n as u32)
+    }
+
+    #[tracing::instrument(skip(self))]
+    fn events(&self, slug: Option<&str>, limit: u32) -> Result<Vec<InstanceEvent>, Error> {
+        let conn = self.pool.get().map_err(|e| Error::Registry {
+            context: "pool get",
+            source: e.into(),
+        })?;
+
+        // `id DESC` breaks ties: two events for one instance can land in the
+        // same RFC 3339 instant, and a teardown's order — reaped, then the
+        // port release that failed after it — is the part worth reading.
+        let mut stmt = conn
+            .prepare(
+                "SELECT slug, occurred_at, phase, outcome, code, detail
+                 FROM instance_events
+                 WHERE ?1 IS NULL OR slug = ?1
+                 ORDER BY occurred_at DESC, id DESC
+                 LIMIT ?2",
+            )
+            .map_err(|e| Error::Registry {
+                context: "events prepare",
+                source: e.into(),
+            })?;
+
+        let events = stmt
+            .query_map(params![slug, limit as i64], |row| {
+                Ok((
+                    row.get::<_, String>("slug")?,
+                    row.get::<_, String>("occurred_at")?,
+                    row.get::<_, String>("phase")?,
+                    row.get::<_, String>("outcome")?,
+                    row.get::<_, String>("code")?,
+                    row.get::<_, Option<String>>("detail")?,
+                ))
+            })
+            .map_err(|e| Error::Registry {
+                context: "events query",
+                source: e.into(),
+            })?
+            .map(|r| {
+                let (slug, occurred_at, phase, outcome, code, detail) =
+                    r.map_err(|e| Error::Registry {
+                        context: "events row",
+                        source: e.into(),
+                    })?;
+                parse_event_row(slug, occurred_at, phase, outcome, code, detail)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(events)
     }
 }
 
@@ -1046,6 +1369,298 @@ mod tests {
             matches!(err, Error::RowParse { field, .. } if field == "provisioner_kind"),
             "{err:?}"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // The instance event log (#118)
+    // -------------------------------------------------------------------------
+
+    fn failure(slug: &str, phase: EventPhase, err: &Error) -> InstanceEvent {
+        InstanceEvent::failed(slug, phase, err)
+    }
+
+    #[test]
+    fn record_event_round_trips_every_field() {
+        let r = registry();
+        let err = Error::Subprocess("ghost install: EACCES".into());
+        let event = failure("e-round-trip", EventPhase::Spawn, &err);
+
+        r.record_event(&event).unwrap();
+
+        let read = r.events(Some("e-round-trip"), 10).unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].slug, "e-round-trip");
+        assert_eq!(read[0].phase, EventPhase::Spawn);
+        assert_eq!(read[0].outcome, EventOutcome::Failed);
+        assert_eq!(read[0].code, "subprocess");
+        assert_eq!(
+            read[0].detail.as_deref(),
+            Some("subprocess error: ghost install: EACCES")
+        );
+        assert_eq!(read[0].occurred_at, event.occurred_at);
+    }
+
+    #[test]
+    fn record_event_keeps_a_null_detail_null() {
+        let r = registry();
+        r.record_event(&InstanceEvent::reaped("e-null", EventPhase::Sweep))
+            .unwrap();
+
+        let read = r.events(Some("e-null"), 10).unwrap();
+        assert_eq!(read[0].detail, None);
+        assert_eq!(read[0].code, InstanceEvent::NO_ERROR);
+    }
+
+    /// The point of the whole table: the `goopies` row is reaped and the
+    /// reason is still there afterwards.
+    #[test]
+    fn an_event_outlives_the_instance_it_describes() {
+        let r = registry();
+        r.save(&make_goopy("e-outlives")).unwrap();
+
+        r.fail_with_event(
+            "e-outlives",
+            &failure("e-outlives", EventPhase::Spawn, &Error::PortExhausted),
+        )
+        .unwrap();
+        r.delete_with_event(
+            "e-outlives",
+            &InstanceEvent::reaped("e-outlives", EventPhase::Sweep),
+        )
+        .unwrap();
+
+        assert!(
+            r.load("e-outlives").unwrap().is_none(),
+            "the instance row must be gone"
+        );
+
+        let read = r.events(Some("e-outlives"), 10).unwrap();
+        assert_eq!(read.len(), 2, "both events must survive the deletion");
+        assert!(
+            read.iter()
+                .any(|e| e.outcome == EventOutcome::Failed && e.code == "port_exhausted"),
+            "the reason must still be readable: {read:?}"
+        );
+    }
+
+    #[test]
+    fn fail_with_event_writes_the_status_and_the_event_together() {
+        let r = registry();
+        r.save(&make_goopy("e-fail")).unwrap();
+
+        r.fail_with_event(
+            "e-fail",
+            &failure("e-fail", EventPhase::Despawn, &Error::Invalid),
+        )
+        .unwrap();
+
+        assert_eq!(r.load("e-fail").unwrap().unwrap().status, Status::Failed);
+        assert_eq!(r.events(Some("e-fail"), 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn fail_with_event_does_not_repeat_an_identical_reason() {
+        let r = registry();
+        r.save(&make_goopy("e-stuck")).unwrap();
+
+        for _ in 0..3 {
+            r.fail_with_event(
+                "e-stuck",
+                &failure("e-stuck", EventPhase::Sweep, &Error::Invalid),
+            )
+            .unwrap();
+        }
+
+        assert_eq!(r.load("e-stuck").unwrap().unwrap().status, Status::Failed);
+        assert_eq!(
+            r.events(Some("e-stuck"), 10).unwrap().len(),
+            1,
+            "the same failure, retried, is one reason and not three"
+        );
+    }
+
+    #[test]
+    fn fail_with_event_records_a_changed_reason() {
+        let r = registry();
+        r.save(&make_goopy("e-changed")).unwrap();
+
+        r.fail_with_event(
+            "e-changed",
+            &failure("e-changed", EventPhase::Sweep, &Error::Invalid),
+        )
+        .unwrap();
+        r.fail_with_event(
+            "e-changed",
+            &failure("e-changed", EventPhase::Sweep, &Error::NotFound),
+        )
+        .unwrap();
+        // Back to the first reason: it is new again relative to the newest
+        // event, so it is recorded — the log shows the instance flip-flopping.
+        r.fail_with_event(
+            "e-changed",
+            &failure("e-changed", EventPhase::Sweep, &Error::Invalid),
+        )
+        .unwrap();
+
+        let codes: Vec<_> = r
+            .events(Some("e-changed"), 10)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.code)
+            .collect();
+        assert_eq!(codes, ["invalid", "not_found", "invalid"]);
+    }
+
+    /// The discriminating half of "in one transaction": the row operation
+    /// fails, so the event must not be left behind on its own.
+    #[test]
+    fn fail_with_event_on_a_missing_row_writes_no_event() {
+        let r = registry();
+
+        let err = r
+            .fail_with_event(
+                "e-ghost",
+                &failure("e-ghost", EventPhase::Despawn, &Error::Invalid),
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, Error::NotFound), "{err:?}");
+        assert!(
+            r.events(Some("e-ghost"), 10).unwrap().is_empty(),
+            "a rolled-back status change must roll back its event too"
+        );
+    }
+
+    /// The same guard on the other side: a reap that did not happen must not
+    /// be recorded as one (#117).
+    #[test]
+    fn delete_with_event_on_a_missing_row_writes_no_event() {
+        let r = registry();
+
+        let err = r
+            .delete_with_event(
+                "e-never",
+                &InstanceEvent::reaped("e-never", EventPhase::Sweep),
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, Error::NotFound), "{err:?}");
+        assert!(
+            r.events(Some("e-never"), 10).unwrap().is_empty(),
+            "a rolled-back delete must not leave a `reaped` event"
+        );
+    }
+
+    #[test]
+    fn events_are_newest_first_and_respect_the_limit() {
+        let r = registry();
+        let base = Utc::now();
+        for (i, code) in ["oldest", "middle", "newest"].iter().enumerate() {
+            let mut event = InstanceEvent::reaped("e-order", EventPhase::Sweep);
+            event.occurred_at = base + chrono::Duration::seconds(i as i64);
+            event.detail = Some((*code).to_string());
+            r.record_event(&event).unwrap();
+        }
+
+        let all = r.events(Some("e-order"), 10).unwrap();
+        let order: Vec<_> = all.iter().map(|e| e.detail.clone().unwrap()).collect();
+        assert_eq!(order, vec!["newest", "middle", "oldest"]);
+
+        let capped = r.events(Some("e-order"), 2).unwrap();
+        assert_eq!(capped.len(), 2, "limit must be applied");
+        assert_eq!(capped[0].detail.as_deref(), Some("newest"));
+    }
+
+    #[test]
+    fn events_without_a_slug_returns_every_instance() {
+        let r = registry();
+        r.record_event(&InstanceEvent::reaped("e-one", EventPhase::Sweep))
+            .unwrap();
+        r.record_event(&InstanceEvent::reaped("e-two", EventPhase::Sweep))
+            .unwrap();
+
+        assert_eq!(r.events(None, 10).unwrap().len(), 2);
+        assert_eq!(r.events(Some("e-one"), 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn prune_events_before_drops_only_older_rows() {
+        let r = registry();
+        let now = Utc::now();
+
+        let mut old = InstanceEvent::reaped("e-old", EventPhase::Sweep);
+        old.occurred_at = now - chrono::Duration::days(40);
+        r.record_event(&old).unwrap();
+
+        let mut recent = InstanceEvent::reaped("e-recent", EventPhase::Sweep);
+        recent.occurred_at = now - chrono::Duration::days(2);
+        r.record_event(&recent).unwrap();
+
+        let pruned = r
+            .prune_events_before(now - chrono::Duration::days(30))
+            .unwrap();
+
+        assert_eq!(pruned, 1, "only the 40-day-old event is past the cutoff");
+        let left = r.events(None, 10).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].slug, "e-recent");
+    }
+
+    #[test]
+    fn prune_events_before_a_cutoff_older_than_everything_removes_nothing() {
+        let r = registry();
+        r.record_event(&InstanceEvent::reaped("e-keep", EventPhase::Sweep))
+            .unwrap();
+
+        let pruned = r
+            .prune_events_before(Utc::now() - chrono::Duration::days(365))
+            .unwrap();
+
+        assert_eq!(pruned, 0);
+        assert_eq!(r.events(None, 10).unwrap().len(), 1);
+    }
+
+    /// Existing droplets are at `user_version = 1`, so the table has to arrive
+    /// by migration rather than only on a fresh database.
+    #[test]
+    fn migration_adds_instance_events_to_a_version_1_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("v1.db");
+
+        // Reproduce a pre-#118 database: step 1's schema, stamped at 1.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(MIGRATIONS[0].1).unwrap();
+            conn.execute_batch("PRAGMA user_version = 1;").unwrap();
+            assert!(
+                !table_exists(&conn, "instance_events"),
+                "the fixture must start without the table"
+            );
+        }
+
+        let r = SqliteRegistry::new(&db_path).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        assert_eq!(user_version(&conn), LATEST_VERSION);
+        assert!(table_exists(&conn, "instance_events"));
+        for index in [
+            "idx_instance_events_slug",
+            "idx_instance_events_occurred_at",
+        ] {
+            let found: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
+                    params![index],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(found, 1, "{index} should exist after migration");
+        }
+
+        // And the upgraded database actually takes a write.
+        r.record_event(&InstanceEvent::reaped("e-upgraded", EventPhase::Sweep))
+            .unwrap();
+        assert_eq!(r.events(Some("e-upgraded"), 10).unwrap().len(), 1);
     }
 
     // -------------------------------------------------------------------------

@@ -13,10 +13,10 @@ use std::time::Duration;
 Maintenance CLI for a Goopy.Life host.
 
 gl-serv has no despawn route, so tearing down a single instance, listing what \
-exists, and allocating or releasing storage by hand all happen here. The \
-deploy installs it at /opt/goopy-life/bin/gl-cli from the same build as \
-gl-serv, so the two always share a gl-core -- and therefore a registry schema \
-and a provisioner.
+exists, reading why something failed, and allocating or releasing storage by \
+hand all happen here. The deploy installs it at /opt/goopy-life/bin/gl-cli \
+from the same build as gl-serv, so the two always share a gl-core -- and \
+therefore a registry schema and a provisioner.
 
 On a droplet, run it as the service account and name both the config and the \
 mode:
@@ -67,6 +67,27 @@ enum Cmd {
     },
     /// List all the available goopies
     List {},
+    /// Show recorded failures and reaps, newest first
+    ///
+    /// The instance event log (#118) outlives the instances it describes, so
+    /// this answers questions `list` cannot: why a spawn failed, and when the
+    /// sweep reaped the row. It is the only way to read it on a host —
+    /// journald is unreadable by both the service and admin accounts (#116),
+    /// and the `goopies` row is long gone.
+    ///
+    /// Each event carries a `code`, which is a coarse and stable discriminant,
+    /// and a `detail`, which is the full rendering of the error and is
+    /// OPERATOR-ONLY: it can contain raw command output. Do not paste it
+    /// anywhere a visitor can see.
+    Events {
+        /// Only events for this instance
+        #[arg(long)]
+        slug: Option<String>,
+
+        /// Maximum number of events to show
+        #[arg(long, default_value = "50")]
+        limit: u32,
+    },
     /// Allocate storage at the given path using the configured allocator
     Alloc {
         #[arg(long)]
@@ -135,7 +156,7 @@ fn main() {
     }
 
     println!(
-        "Config: {path}\n  db:                {db}\n  base_dir:          {base_dir}\n  domain:            {domain}\n  life_in_days:      {life_in_days}\n  provisioner:       {provisioner}\n  port range:        {port_start}–{port_end}\n  allocator:         {alloc_kind}\n  allocator pool:    {alloc_pool}\n  allocator quota:   {alloc_quota} MB\n  cors_origin:       {cors_origin}\n  bind_address:      {bind_address}\n  api_address:       {api_address}\n  sweep_interval:    {sweep}s\n  mode:              {mode}",
+        "Config: {path}\n  db:                {db}\n  base_dir:          {base_dir}\n  domain:            {domain}\n  life_in_days:      {life_in_days}\n  provisioner:       {provisioner}\n  port range:        {port_start}–{port_end}\n  allocator:         {alloc_kind}\n  allocator pool:    {alloc_pool}\n  allocator quota:   {alloc_quota} MB\n  cors_origin:       {cors_origin}\n  bind_address:      {bind_address}\n  api_address:       {api_address}\n  sweep_interval:    {sweep}s\n  event_retention:   {retention}d\n  mode:              {mode}",
         path = cli.config.display(),
         db = cfg.registry.path.display(),
         base_dir = cfg.base_dir.display(),
@@ -151,6 +172,7 @@ fn main() {
         bind_address = cfg.bind_address,
         api_address = cfg.resolved_api_address(),
         sweep = cfg.sweep_interval_secs,
+        retention = cfg.event_retention_days,
         mode = if dev_mode { "dev" } else { "production" },
     );
 
@@ -251,6 +273,39 @@ fn main() {
                         std::process::exit(1);
                     }
                 },
+                Cmd::Events { slug, limit } => match gm.events(slug.as_deref(), limit) {
+                    Ok(events) if events.is_empty() => {
+                        println!("No instance events recorded.");
+                    }
+                    Ok(events) => {
+                        for ev in events {
+                            println!(
+                                "{at}  {slug}  {phase}/{outcome}  {code}",
+                                at = ev.occurred_at.format("%Y-%m-%dT%H:%M:%SZ"),
+                                slug = ev.slug,
+                                phase = ev.phase,
+                                outcome = ev.outcome,
+                                code = ev.code,
+                            );
+                            // Indented rather than inline: a rendered
+                            // subprocess error runs to several hundred
+                            // characters and would push the scannable columns
+                            // off the screen. Every line of it, because a
+                            // captured stderr is usually a whole traceback and
+                            // an unindented continuation is indistinguishable
+                            // from the next event.
+                            if let Some(detail) = ev.detail {
+                                for line in detail.lines() {
+                                    println!("    {line}");
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        println!("Events failed: {:?}", e);
+                        std::process::exit(1);
+                    }
+                },
                 Cmd::Alloc { .. } | Cmd::Dealloc { .. } => {
                     unreachable!("Alloc/Dealloc must not reach the provisioner branch")
                 }
@@ -306,6 +361,24 @@ mod tests {
         assert!(
             help.contains("--prod is not optional"),
             "long help should say --prod is required on a droplet:\n{help}"
+        );
+    }
+
+    /// `detail` can carry raw command output, so the one place an operator
+    /// meets it has to say so.
+    #[test]
+    fn events_help_marks_the_detail_as_operator_only() {
+        let help = Cli::command()
+            .get_subcommands()
+            .find(|c| c.get_name() == "events")
+            .expect("the events subcommand should exist")
+            .clone()
+            .render_long_help()
+            .to_string();
+
+        assert!(
+            help.contains("OPERATOR-ONLY"),
+            "events help should warn that detail is not for visitors:\n{help}"
         );
     }
 }

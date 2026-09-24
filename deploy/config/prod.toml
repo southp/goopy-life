@@ -67,6 +67,18 @@ bind_address = "127.0.0.1:3000"
 # cut over.
 sweep_interval_secs = 86400
 
+# REVIEW: 30 days is the shipped default, chosen for a dev droplet where the
+# only reader is whoever is debugging that week. Production may want longer —
+# a public beta's failure rate is a trend worth seeing over a quarter, and the
+# window is also the answer to "how far back can we explain an outage". Size it
+# against real volume and disk before the first production deploy rather than
+# inheriting dev's number.
+#
+# How many days of instance events to keep (#118). The event log records why a
+# spawn or teardown failed and when the row was reaped, and outlives the
+# instance. It is append-only; the sweep drops anything past this window.
+event_retention_days = 30
+
 # REVIEW: size these against the production droplet's RAM and disk, which need
 # not match the dev box.
 # Instance caps (#106). max_active is RAM-bound: ~200 MB per Ghost process on a

@@ -245,6 +245,20 @@ pub struct Config {
     /// removed rather than what it attempted (#117).
     #[serde(default = "default_max_provisioned")]
     pub max_provisioned: u32,
+    /// How many days of instance events to keep (#118).
+    ///
+    /// The event log is append-only and outlives the instances it describes,
+    /// so something has to bound it; the sweep drops anything older than this
+    /// on every run. The window is a trade between how far back an incident
+    /// can be reconstructed and how large the table gets — an event is a few
+    /// hundred bytes and only failures and reaps are recorded, so the table is
+    /// small either way at beta volumes.
+    ///
+    /// Must be `> 0`, which `Config::from_file` enforces: a zero window would
+    /// delete every event on the next sweep, which is indistinguishable from
+    /// the log never having worked.
+    #[serde(default = "default_event_retention_days")]
+    pub event_retention_days: u32,
     pub registry: RegistryConfig,
     pub allocator: AllocatorConfig,
     pub provisioner: ProvisionerConfig,
@@ -267,6 +281,18 @@ fn default_sweep_interval_secs() -> u64 {
 /// Default RAM-bound resident-instance cap. See [`Config::max_active`].
 fn default_max_active() -> u32 {
     10
+}
+
+/// Default instance-event retention: 30 days.
+///
+/// Sized against the incident this exists for. The dev droplet's ten failures
+/// happened on 2026-06-25 and were first looked at on 2026-09-04 — ten weeks
+/// later, which no sane retention window would have covered. What 30 days does
+/// cover is the realistic case: a failure rate worth noticing shows up in the
+/// next week's events, and a month is long enough that a report arriving after
+/// a holiday still finds its evidence.
+fn default_event_retention_days() -> u32 {
+    30
 }
 
 /// Default disk-bound total-instance cap. See [`Config::max_provisioned`].
@@ -355,6 +381,7 @@ impl Config {
             port_range_end: self.port_range_end,
             max_active: self.max_active,
             max_provisioned: self.max_provisioned,
+            event_retention_days: self.event_retention_days,
         }
     }
 
@@ -419,6 +446,12 @@ impl Config {
         // has already swapped the config and restarted the unit.
         if cfg.sweep_interval_secs == 0 {
             return Err(Error::Config("sweep_interval_secs must be > 0".into()));
+        }
+        // A zero window drops every event on the next sweep, so the log would
+        // read empty on a host where everything is being recorded correctly —
+        // the most misleading state a forensic record can be in.
+        if cfg.event_retention_days == 0 {
+            return Err(Error::Config("event_retention_days must be > 0".into()));
         }
         // gl-serv binds this verbatim. Rejecting it here rather than at
         // `TcpListener::bind` is what lets `--check-config` catch it before the
@@ -550,6 +583,7 @@ kind = "PlainDir"
         assert_eq!(cfg.life_in_days, 7);
         assert_eq!(cfg.port_range_start, 9000);
         assert_eq!(cfg.sweep_interval_secs, 3600);
+        assert_eq!(cfg.event_retention_days, 30);
     }
 
     #[test]
@@ -677,6 +711,38 @@ kind = "PlainDir"
         let cfg = write_config(&toml).expect("diverged caps are valid");
         assert_eq!(cfg.max_active, 10);
         assert_eq!(cfg.max_provisioned, 20);
+    }
+
+    #[test]
+    fn event_retention_days_can_be_overridden() {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            with_caps(VALID_BASE, "event_retention_days = 90")
+        );
+        let cfg = write_config(&toml).expect("an explicit retention window is valid");
+        assert_eq!(cfg.event_retention_days, 90);
+    }
+
+    /// Zero is the one value that looks like a setting and behaves like a
+    /// deletion: every event goes on the next sweep, so the log reads empty on
+    /// a host where recording works perfectly.
+    #[test]
+    fn zero_event_retention_rejected() {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            with_caps(VALID_BASE, "event_retention_days = 0")
+        );
+        let err = write_config(&toml).unwrap_err();
+        assert!(
+            matches!(err, Error::Config(ref s) if s.contains("event_retention_days must be > 0")),
+            "got {err:?}"
+        );
     }
 
     #[test]

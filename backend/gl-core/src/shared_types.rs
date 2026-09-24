@@ -198,6 +198,106 @@ mod tests {
         ));
     }
 
+    /// The expected code for every `Error` variant, written out a second time.
+    ///
+    /// Deliberately a duplicate of [`Error::code`] rather than a call to it:
+    /// this match is exhaustive, so adding a variant fails to compile here
+    /// until its code is written down in a test, which is what makes the
+    /// mapping a decision rather than a default.
+    fn expected_code(e: &Error) -> &'static str {
+        match e {
+            Error::NotFound => "not_found",
+            Error::Invalid => "invalid",
+            Error::AlreadyExists => "already_exists",
+            Error::Config(_) => "config",
+            Error::Io(_) => "io",
+            Error::Registry { .. } => "registry",
+            Error::SchemaMigration(_) => "schema_migration",
+            Error::SchemaVersionTooNew { .. } => "schema_version_too_new",
+            Error::PortExhausted => "port_exhausted",
+            Error::Subprocess(_) => "subprocess",
+            Error::SlugExhausted => "slug_exhausted",
+            Error::RowParse { .. } => "row_parse",
+            Error::CapacityFull { .. } => "capacity_full",
+            Error::ReadinessTimeout { .. } => "readiness_timeout",
+        }
+    }
+
+    /// One instance of each variant, for the tests that range over them.
+    ///
+    /// Not exhaustive by construction: a new variant is forced into
+    /// `expected_code` by the compiler, but nothing forces it in here. Add it
+    /// here too, or `error_codes_are_unique_per_variant` never sees it.
+    fn one_of_every_error() -> Vec<Error> {
+        vec![
+            Error::NotFound,
+            Error::Invalid,
+            Error::AlreadyExists,
+            Error::Config("bad".into()),
+            Error::Io(std::io::Error::other("boom")),
+            Error::Registry {
+                context: "save",
+                source: RegistrySource::WalModeUnavailable("delete".into()),
+            },
+            Error::SchemaMigration(rusqlite::Error::QueryReturnedNoRows),
+            Error::SchemaVersionTooNew {
+                found: 9,
+                supported: 2,
+            },
+            Error::PortExhausted,
+            Error::Subprocess("zfs: permission denied".into()),
+            Error::SlugExhausted,
+            Error::RowParse {
+                slug: "a-b-c".into(),
+                field: "status",
+                value: "Bogus".into(),
+            },
+            Error::CapacityFull {
+                kind: CapacityKind::Provisioned,
+            },
+            Error::ReadinessTimeout {
+                slug: "a-b-c".into(),
+                waited_secs: 120,
+                last: "connection refused".into(),
+            },
+        ]
+    }
+
+    /// `Error::code` is published on every instance event, so it is a
+    /// contract: pin every variant's string (#118).
+    #[test]
+    fn error_codes_are_stable() {
+        for e in one_of_every_error() {
+            assert_eq!(e.code(), expected_code(&e), "code changed for {e:?}");
+        }
+    }
+
+    /// Two variants sharing a code would silently merge two distinct failures
+    /// in the event log, which is the one thing the log exists to tell apart.
+    #[test]
+    fn error_codes_are_unique_per_variant() {
+        let errors = one_of_every_error();
+        let mut codes: Vec<&str> = errors.iter().map(|e| e.code()).collect();
+        let total = codes.len();
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), total, "duplicate error codes: {codes:?}");
+    }
+
+    /// The codes travel through JSON and log fields, so keep them to the
+    /// lowercase-and-underscore shape gl-serv already uses (`server_full`).
+    #[test]
+    fn error_codes_are_snake_case() {
+        for e in one_of_every_error() {
+            let code = e.code();
+            assert!(!code.is_empty(), "empty code for {e:?}");
+            assert!(
+                code.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "code {code:?} is not snake_case",
+            );
+        }
+    }
+
     #[test]
     fn row_parse_error_display() {
         let e = Error::RowParse {
@@ -282,6 +382,47 @@ impl std::fmt::Display for CapacityKind {
         match self {
             CapacityKind::Provisioned => write!(f, "max_provisioned"),
             CapacityKind::Active => write!(f, "max_active"),
+        }
+    }
+}
+
+impl Error {
+    /// A stable, coarse discriminant for this error.
+    ///
+    /// Distinct from [`Display`], which renders whatever the failure happened
+    /// to carry — a command's stderr, a corrupt row's raw value, a path. That
+    /// rendering is useful to an operator and unsafe to publish: `Subprocess`
+    /// alone can carry the output of any command a provisioner ran.
+    ///
+    /// This is the half that *is* safe to publish, and it is recorded on every
+    /// [`InstanceEvent`] alongside the full rendering (#118). Once an event log
+    /// or an API response carries one of these strings it is a contract, so the
+    /// mapping is pinned by `error_codes_are_stable` — change a string only
+    /// with the same care as changing a public JSON field name.
+    ///
+    /// Deliberately one code per variant. `CapacityFull` does not split by
+    /// [`CapacityKind`]: gl-serv already has its own public split
+    /// (`server_full` / `server_busy`) for that, and which cap was hit is in
+    /// the rendered detail.
+    ///
+    /// [`Display`]: std::fmt::Display
+    /// [`InstanceEvent`]: crate::instance_event::InstanceEvent
+    pub fn code(&self) -> &'static str {
+        match self {
+            Error::NotFound => "not_found",
+            Error::Invalid => "invalid",
+            Error::AlreadyExists => "already_exists",
+            Error::Config(_) => "config",
+            Error::Io(_) => "io",
+            Error::Registry { .. } => "registry",
+            Error::SchemaMigration(_) => "schema_migration",
+            Error::SchemaVersionTooNew { .. } => "schema_version_too_new",
+            Error::PortExhausted => "port_exhausted",
+            Error::Subprocess(_) => "subprocess",
+            Error::SlugExhausted => "slug_exhausted",
+            Error::RowParse { .. } => "row_parse",
+            Error::CapacityFull { .. } => "capacity_full",
+            Error::ReadinessTimeout { .. } => "readiness_timeout",
         }
     }
 }
