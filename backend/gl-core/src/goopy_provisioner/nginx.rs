@@ -2,8 +2,9 @@
 //!
 //! Every provisioner fronts its instance with the same reverse-proxy site:
 //! `{slug}.{domain}` on 443 (with the shared wildcard cert), an `auth_request`
-//! expiry check against gl-serv, and a redirect to `/expired` when that check
-//! denies the request. Keeping one template here means a change to the proxy
+//! expiry check against gl-serv, and a redirect to the frontend's `/expired`
+//! page on the apex of that same `{domain}` when the check denies the request
+//! (#132). Keeping one template here means a change to the proxy
 //! layer (e.g. #89's `auth_request` caching) is made once rather than per
 //! provisioner.
 //!
@@ -102,7 +103,7 @@ server {{
     }}
 
     location @expired {{
-        return 302 https://goopy.life/expired;
+        return 302 https://{domain}/expired;
     }}
 
     location / {{
@@ -281,6 +282,23 @@ mod tests {
     }
 
     #[test]
+    fn render_site_redirects_expired_instances_to_the_configured_domain() {
+        // A domain other than goopy.life on purpose: the redirect used to be a
+        // literal, and a test passing "goopy.life" could not tell the two apart.
+        // The dev droplet serves southp.dev, so its expired instances were sent
+        // to a production site that does not know them (#132).
+        let cfg = render_site("tasty-lucky-clover", "southp.dev", 9876, "127.0.0.1:3000");
+        assert!(
+            cfg.contains("return 302 https://southp.dev/expired;"),
+            "the expired redirect must follow the configured domain, got:\n{cfg}"
+        );
+        assert!(
+            !cfg.contains("goopy.life"),
+            "no host in the site may be frozen to the production domain, got:\n{cfg}"
+        );
+    }
+
+    #[test]
     fn render_site_contains_auth_request_directives() {
         let cfg = render_site("tasty-lucky-clover", "goopy.life", 9876, "127.0.0.1:3000");
         assert!(
@@ -299,10 +317,6 @@ mod tests {
         assert!(
             cfg.contains("error_page 403 = @expired;"),
             "nginx config must map 403 to @expired named location"
-        );
-        assert!(
-            cfg.contains("return 302 https://goopy.life/expired;"),
-            "expired location must redirect to /expired page"
         );
         assert!(
             cfg.contains("proxy_cache goopy_alive;"),
