@@ -350,6 +350,20 @@ mod tests {
     /// where the config lives, and that omitting `--prod` there silently gets
     /// a dev-mode teardown that leaves the systemd unit and nginx sites
     /// behind. Both live only in the help text, so pin them.
+    #[test]
+    fn long_help_warns_about_running_on_a_droplet() {
+        let help = Cli::command().render_long_help().to_string();
+
+        assert!(
+            help.contains("/opt/goopy-life/config.toml"),
+            "long help should name the config path the deploy installs:\n{help}"
+        );
+        assert!(
+            help.contains("--prod is not optional"),
+            "long help should say --prod is required on a droplet:\n{help}"
+        );
+    }
+
     /// `detail` can carry raw command output, so the one place an operator
     /// meets it has to say so.
     #[test]
@@ -365,20 +379,6 @@ mod tests {
         assert!(
             help.contains("OPERATOR-ONLY"),
             "events help should warn that detail is not for visitors:\n{help}"
-        );
-    }
-
-    #[test]
-    fn long_help_warns_about_running_on_a_droplet() {
-        let help = Cli::command().render_long_help().to_string();
-
-        assert!(
-            help.contains("/opt/goopy-life/config.toml"),
-            "long help should name the config path the deploy installs:\n{help}"
-        );
-        assert!(
-            help.contains("--prod is not optional"),
-            "long help should say --prod is required on a droplet:\n{help}"
         );
     }
 }

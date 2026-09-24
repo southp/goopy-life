@@ -73,6 +73,7 @@ sweep_interval_secs = 86400
 # window is also the answer to "how far back can we explain an outage". Size it
 # against real volume and disk before the first production deploy rather than
 # inheriting dev's number.
+#
 # How many days of instance events to keep (#118). The event log records why a
 # spawn or teardown failed and when the row was reaped, and outlives the
 # instance. It is append-only; the sweep drops anything past this window.

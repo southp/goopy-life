@@ -223,6 +223,11 @@ mod tests {
         }
     }
 
+    /// One instance of each variant, for the tests that range over them.
+    ///
+    /// Not exhaustive by construction: a new variant is forced into
+    /// `expected_code` by the compiler, but nothing forces it in here. Add it
+    /// here too, or `error_codes_are_unique_per_variant` never sees it.
     fn one_of_every_error() -> Vec<Error> {
         vec![
             Error::NotFound,
