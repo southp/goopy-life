@@ -126,7 +126,11 @@ jobs:
           # win a DNS or BGP race against the runner.
           printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_deploy
+          # One ssh connection for the whole deploy: push-binary.sh runs about
+          # a dozen scp/ssh commands, and without this each pays its own
+          # handshake. The scripts stay unchanged -- this is client config.
           printf 'IdentityFile ~/.ssh/id_deploy\nIdentitiesOnly yes\nStrictHostKeyChecking yes\n' > ~/.ssh/config
+          printf 'ControlMaster auto\nControlPath ~/.ssh/cm-%%C\nControlPersist 60\n' >> ~/.ssh/config
 
       - name: Deploy to the dev droplet
         # Same script the manual production deploy uses, so the two paths cannot

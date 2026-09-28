@@ -269,7 +269,17 @@ Cross-compiles `gl-serv` and `gl-cli` to static musl binaries with
 `cargo-zigbuild`, uploads them with `deploy/config/prod.toml` and production's
 [host artifacts](#host-artifacts), and restarts the service. Run
 `./deploy/check-host.sh goopy@droplet prod` first to see what it is about to
-replace. Requires the
+replace.
+
+A deploy makes about a dozen `scp`/`ssh` calls. CI shares one connection
+between them (`ControlMaster` in the workflow's ssh config); to do the same on
+your machine, add to the droplet's entry in `~/.ssh/config`:
+
+```
+ControlMaster auto
+ControlPath ~/.ssh/cm-%C
+ControlPersist 60
+``` Requires the
 one-time local toolchain setup in the
 [README](../README.md#cross-compilation-setup-one-time-on-macos).
 
