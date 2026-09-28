@@ -245,6 +245,45 @@ fn nginx_directive(site: &str, directive: &str) -> Vec<String> {
         .collect()
 }
 
+/// Every deployed config paired with its api site, for the tests below:
+/// `(config path, parsed config, site path, site text)`.
+fn api_sites() -> Vec<(PathBuf, Config, PathBuf, String)> {
+    deployed_configs()
+        .into_iter()
+        .map(|path| {
+            let cfg = Config::from_file(&path).expect("deployed configs parse");
+            let site_path = host_artifact(&path, "api.nginx");
+            let site = std::fs::read_to_string(&site_path).expect("the api site is readable");
+            (path, cfg, site_path, site)
+        })
+        .collect()
+}
+
+/// Asserts `directive` appears in the site at least once and that every value
+/// it takes passes `ok`. A missing directive fails too: a check over no values
+/// would pass by default. `wrong` says what a failing value got wrong.
+fn assert_every_value(
+    site_path: &std::path::Path,
+    site: &str,
+    directive: &str,
+    ok: impl Fn(&str) -> bool,
+    wrong: &str,
+) {
+    let values = nginx_directive(site, directive);
+    assert!(
+        !values.is_empty(),
+        "{} has no {directive}",
+        site_path.display()
+    );
+    for value in values {
+        assert!(
+            ok(&value),
+            "{}: {directive} {value} {wrong}",
+            site_path.display()
+        );
+    }
+}
+
 /// The api site used to be a single prod-shaped file that no deploy installed,
 /// and the dev droplet quietly ran a different one under the same name (#139).
 /// Per-environment files fix that only as long as each still describes its
@@ -254,45 +293,28 @@ fn nginx_directive(site: &str, directive: &str) -> Vec<String> {
 /// what keeps the api and its instances on one certificate.
 #[test]
 fn every_api_site_serves_its_configs_domain() {
-    for path in deployed_configs() {
-        let cfg = Config::from_file(&path).expect("deployed configs parse");
-        let site_path = host_artifact(&path, "api.nginx");
-        let site = std::fs::read_to_string(&site_path).expect("the api site is readable");
-
-        let names = nginx_directive(&site, "server_name");
-        assert!(
-            !names.is_empty(),
-            "{} has no server_name",
-            site_path.display()
+    for (path, cfg, site_path, site) in api_sites() {
+        let name = format!("api.{}", cfg.domain);
+        assert_every_value(
+            &site_path,
+            &site,
+            "server_name",
+            |value| value == name,
+            &format!("is not {name}, the name {} configures", path.display()),
         );
-        let expected = format!("api.{}", cfg.domain);
-        for name in names {
-            assert_eq!(
-                name,
-                expected,
-                "{} serves a name {} does not configure",
-                site_path.display(),
-                path.display()
-            );
-        }
 
         let cert_dir = format!("/etc/letsencrypt/live/{}/", cfg.domain);
         for directive in ["ssl_certificate", "ssl_certificate_key"] {
-            let values = nginx_directive(&site, directive);
-            assert!(
-                !values.is_empty(),
-                "{} has no {directive}",
-                site_path.display()
-            );
-            for value in values {
-                assert!(
-                    value.starts_with(&cert_dir),
-                    "{}: {directive} {value} is not under {cert_dir}, the \
-                     certificate {} names via its domain",
-                    site_path.display(),
+            assert_every_value(
+                &site_path,
+                &site,
+                directive,
+                |value| value.starts_with(&cert_dir),
+                &format!(
+                    "is not under {cert_dir}, the certificate {} names via its domain",
                     path.display()
-                );
-            }
+                ),
+            );
         }
     }
 }
@@ -303,27 +325,15 @@ fn every_api_site_serves_its_configs_domain() {
 /// and nothing else.
 #[test]
 fn every_api_site_proxies_to_its_configs_api_address() {
-    for path in deployed_configs() {
-        let cfg = Config::from_file(&path).expect("deployed configs parse");
-        let site_path = host_artifact(&path, "api.nginx");
-        let site = std::fs::read_to_string(&site_path).expect("the api site is readable");
-
-        let upstreams = nginx_directive(&site, "proxy_pass");
-        assert!(
-            !upstreams.is_empty(),
-            "{} has no proxy_pass",
-            site_path.display()
+    for (path, cfg, site_path, site) in api_sites() {
+        let upstream = format!("http://{}", cfg.resolved_api_address());
+        assert_every_value(
+            &site_path,
+            &site,
+            "proxy_pass",
+            |value| value == upstream,
+            &format!("is not {upstream}, where {} listens", path.display()),
         );
-        let expected = format!("http://{}", cfg.resolved_api_address());
-        for upstream in upstreams {
-            assert_eq!(
-                upstream,
-                expected,
-                "{} proxies somewhere {} does not listen",
-                site_path.display(),
-                path.display()
-            );
-        }
     }
 }
 

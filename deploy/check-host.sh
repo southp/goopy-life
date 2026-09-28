@@ -50,34 +50,17 @@ CONFIG_STAGED=/tmp/gl-serv.check.toml
 # Checked in dry-run too, unlike push-binary.sh's inputs: these are tracked
 # files, so a missing one is a mistyped environment rather than a build that
 # has not run yet.
-for artifact in "$CONFIG" "$UNIT_SOURCE" "$DROPIN_SOURCE" "$SITE_SOURCE" "$SUDOERS_SOURCE"; do
-    if [[ ! -f "$artifact" ]]; then
-        echo "check-host.sh: no such artifact for environment '$ENVIRONMENT': $artifact" >&2
-        echo "check-host.sh: available environments:" >&2
-        for candidate in "$HERE"/config/*.toml; do
-            echo "  $(basename "$candidate" .toml)" >&2
-        done
-        exit 1
-    fi
-done
+if ! require_files check-host.sh "artifact for environment '$ENVIRONMENT'" "$CONFIG" "${HOST_ARTIFACT_SOURCES[@]}"; then
+    list_environments
+    exit 1
+fi
 
-run() {
-    if [[ "$DRY_RUN" == "1" ]]; then
-        printf '%s\n' "$*"
-    else
-        "$@"
-    fi
-}
-
-run scp -P "$PORT" "$UNIT_SOURCE" "$TARGET:$UNIT_STAGED"
-run scp -P "$PORT" "$DROPIN_SOURCE" "$TARGET:$DROPIN_STAGED"
-run scp -P "$PORT" "$SITE_SOURCE" "$TARGET:$SITE_STAGED"
-run scp -P "$PORT" "$SUDOERS_SOURCE" "$TARGET:$SUDOERS_STAGED"
+stage_host_artifacts "$TARGET" "$PORT"
 run scp -P "$PORT" "$CONFIG" "$TARGET:$CONFIG_STAGED"
 
 # One command, so the staged copies are removed whatever the verdict and the
 # check leaves nothing behind on the host.
 CHECK="$(drift_check_command check "$CONFIG_STAGED"); "
-CHECK+="rm -f $UNIT_STAGED $DROPIN_STAGED $SITE_STAGED $SUDOERS_STAGED $CONFIG_STAGED; "
+CHECK+="rm -f ${HOST_ARTIFACT_STAGED[*]} $CONFIG_STAGED; "
 CHECK+="if [ \$status -eq 0 ]; then echo 'check-host.sh: $TARGET matches $ENVIRONMENT'; else echo 'check-host.sh: $TARGET has drifted from $ENVIRONMENT' >&2; fi; exit \$status"
 run ssh -p "$PORT" "$TARGET" "$CHECK"

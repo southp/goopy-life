@@ -75,8 +75,7 @@ if [[ "$GIT_SHA" == unknown ]]; then
     exit 1
 fi
 
-# Must match the --config path in deploy/gl-serv.service's ExecStart.
-REMOTE_CONFIG=/opt/goopy-life/config.toml
+REMOTE_CONFIG=$CONFIG_HOST
 
 # Must match the install destination below, and gl-serv.service's ExecStart.
 REMOTE_SERV=/opt/goopy-life/bin/gl-serv
@@ -91,27 +90,11 @@ if [[ "$DRY_RUN" != "1" ]]; then
             exit 1
         fi
     done
-    if [[ ! -f "$CONFIG" ]]; then
-        echo "push-binary.sh: no such config: $CONFIG" >&2
-        echo "push-binary.sh: expected one of deploy/config/*.toml." >&2
+    if ! require_files push-binary.sh "config or host artifact" "$CONFIG" "${HOST_ARTIFACT_SOURCES[@]}"; then
+        echo "push-binary.sh: expected one of deploy/config/*.toml, with a <env>.gl-serv.conf and a <env>.api.nginx beside it." >&2
         exit 1
     fi
-    for artifact in "$UNIT_SOURCE" "$DROPIN_SOURCE" "$SITE_SOURCE" "$SUDOERS_SOURCE"; do
-        if [[ ! -f "$artifact" ]]; then
-            echo "push-binary.sh: no such host artifact: $artifact" >&2
-            echo "push-binary.sh: every deploy/config/<env>.toml needs a <env>.gl-serv.conf and a <env>.api.nginx beside it." >&2
-            exit 1
-        fi
-    done
 fi
-
-run() {
-    if [[ "$DRY_RUN" == "1" ]]; then
-        printf '%s\n' "$*"
-    else
-        "$@"
-    fi
-}
 
 # scp spells the port -P, ssh spells it -p.
 run scp -P "$PORT" "$SERV_BINARY" "$TARGET:/tmp/gl-serv"
@@ -122,12 +105,7 @@ run scp -P "$PORT" "$CLI_BINARY" "$TARGET:/tmp/gl-cli"
 # later and must never read a half-written file.
 run scp -P "$PORT" "$CONFIG" "$TARGET:$REMOTE_CONFIG.new"
 
-# The host artifacts go to the fixed /tmp paths deploy/sudoers.goopy pins, not
-# beside their destinations: those are root-owned directories.
-run scp -P "$PORT" "$UNIT_SOURCE" "$TARGET:$UNIT_STAGED"
-run scp -P "$PORT" "$DROPIN_SOURCE" "$TARGET:$DROPIN_STAGED"
-run scp -P "$PORT" "$SITE_SOURCE" "$TARGET:$SITE_STAGED"
-run scp -P "$PORT" "$SUDOERS_SOURCE" "$TARGET:$SUDOERS_STAGED"
+stage_host_artifacts "$TARGET" "$PORT"
 
 # Before anything else touches the host: does it still match what this deploy
 # assumes about it? Three answers stop the deploy here, while nothing has
@@ -179,8 +157,14 @@ run ssh -p "$PORT" "$TARGET" "chmod +x /tmp/gl-serv && /tmp/gl-serv --check-conf
 # restored, or on a first install the link removed -- and the deploy stops.
 # nginx itself never reloaded, so it goes on serving what it had.
 #
+# A site that is already installed and linked is left alone: most deploys do not
+# change it, and a reload for nothing respawns nginx's workers under every live
+# instance on the host.
+#
 # The previous copy is saved without sudo: sites-available is world-readable.
-NGINX_SITE="had=0; if [ -e $SITE_HOST ]; then cp $SITE_HOST $SITE_PREVIOUS || exit 1; had=1; fi; "
+SITE_PREVIOUS=$SITE_STAGED.prev
+NGINX_SITE="if cmp -s $SITE_STAGED $SITE_HOST && [ \"\$(readlink $SITE_ENABLED)\" = $SITE_HOST ]; then rm -f $SITE_STAGED; exit 0; fi; "
+NGINX_SITE+="had=0; if [ -e $SITE_HOST ]; then cp $SITE_HOST $SITE_PREVIOUS || exit 1; had=1; fi; "
 NGINX_SITE+="if sudo install -m 644 $SITE_STAGED $SITE_HOST && sudo ln -sf $SITE_HOST $SITE_ENABLED && sudo nginx -t && sudo systemctl reload nginx; then rm -f $SITE_STAGED $SITE_PREVIOUS; exit 0; fi; "
 NGINX_SITE+="echo 'push-binary.sh: nginx rejected the api site; putting the previous one back' >&2; "
 NGINX_SITE+="if [ \$had = 1 ]; then sudo install -m 644 $SITE_PREVIOUS $SITE_HOST; else sudo rm -f $SITE_ENABLED; fi; exit 1"

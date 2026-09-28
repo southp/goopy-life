@@ -181,134 +181,6 @@ assert_config_swap_is_atomic() {
     fi
 }
 
-# Asserts the config gate sits between the uploads and the install. Ordering is
-# the whole point of this step: a gate that ran after the swap would report a
-# failure the old binary was still in a position to prevent.
-assert_config_gate_is_ordered() {
-    local name=$1 serv=$2 cli=$3 config=$4
-    CASES=$((CASES + 1))
-    local output last_upload gate install
-    output=$(DRY_RUN=1 "$SCRIPT_UNDER_TEST" goopy@dev.example.com "$serv" "$cli" "$config")
-    last_upload=$(printf '%s\n' "$output" | grep -n '^scp ' | tail -1 | cut -d: -f1)
-    gate=$(printf '%s\n' "$output" | grep -n -- '--check-config' | head -1 | cut -d: -f1)
-    install=$(printf '%s\n' "$output" | grep -n 'sudo install -m 755' | head -1 | cut -d: -f1)
-
-    if [[ -n "$last_upload" && -n "$gate" && -n "$install" \
-        && "$last_upload" -lt "$gate" && "$gate" -lt "$install" ]]; then
-        echo "ok   — $name"
-    else
-        echo "FAIL — $name"
-        echo "       last upload: ${last_upload:-<none>}"
-        echo "       gate:        ${gate:-<none>}"
-        echo "       install:     ${install:-<none>}"
-        FAILURES=$((FAILURES + 1))
-    fi
-}
-
-# Drives the script for real against stub scp/ssh, with the stub failing the
-# config gate. Asserts the deploy stops there: nothing installed, nothing
-# restarted, so the host keeps serving the pair it already had.
-assert_failed_gate_aborts_before_install() {
-    local name=$1
-    CASES=$((CASES + 1))
-    local stub log status
-    stub=$(mktemp -d)
-    log="$stub/calls"
-    printf '#!/bin/sh\nexit 0\n' >"$stub/scp"
-    cat >"$stub/ssh" <<STUB
-#!/bin/sh
-echo "\$*" >>"$log"
-case "\$*" in
-    *--check-config*) exit 1 ;;
-esac
-exit 0
-STUB
-    chmod +x "$stub/scp" "$stub/ssh"
-
-    # Any three existing files stand in for the binaries and the config: the
-    # transfer is stubbed, only the existence check ahead of it is real.
-    PATH="$stub:$PATH" DRY_RUN=0 "$SCRIPT_UNDER_TEST" goopy@dev.example.com \
-        "$SCRIPT_UNDER_TEST" "$SCRIPT_UNDER_TEST" "$REAL_CONFIG" >/dev/null 2>&1
-    status=$?
-
-    local installed="" restarted=""
-    installed=$(grep -c 'sudo install' "$log" 2>/dev/null || true)
-    restarted=$(grep -c 'systemctl restart' "$log" 2>/dev/null || true)
-    /bin/rm -rf "$stub"
-
-    if [[ "$status" -ne 0 && "${installed:-0}" -eq 0 && "${restarted:-0}" -eq 0 ]]; then
-        echo "ok   — $name"
-    else
-        echo "FAIL — $name"
-        echo "       exit status: $status (expected non-zero)"
-        echo "       install calls: ${installed:-0}, restart calls: ${restarted:-0}"
-        FAILURES=$((FAILURES + 1))
-    fi
-}
-
-# Drives the script for real against stub scp/ssh, with the stub failing the
-# remote install step. Asserts the deploy stops there rather than restarting
-# gl-serv: with either binary un-replaced, a restart would report a green deploy
-# while the host went on running exactly what it ran before.
-assert_failed_install_aborts_before_restart() {
-    local name=$1
-    CASES=$((CASES + 1))
-    local stub log status
-    stub=$(mktemp -d)
-    log="$stub/calls"
-    printf '#!/bin/sh\nexit 0\n' >"$stub/scp"
-    cat >"$stub/ssh" <<STUB
-#!/bin/sh
-echo "\$*" >>"$log"
-case "\$*" in
-    *"sudo install -m 755 /tmp/gl-cli"*) exit 1 ;;
-esac
-exit 0
-STUB
-    chmod +x "$stub/scp" "$stub/ssh"
-
-    PATH="$stub:$PATH" DRY_RUN=0 "$SCRIPT_UNDER_TEST" goopy@dev.example.com \
-        "$SCRIPT_UNDER_TEST" "$SCRIPT_UNDER_TEST" "$REAL_CONFIG" >/dev/null 2>&1
-    status=$?
-
-    local restarted=""
-    restarted=$(grep -c 'systemctl restart' "$log" 2>/dev/null || true)
-    /bin/rm -rf "$stub"
-
-    if [[ "$status" -ne 0 && "${restarted:-0}" -eq 0 ]]; then
-        echo "ok   — $name"
-    else
-        echo "FAIL — $name"
-        echo "       exit status: $status (expected non-zero)"
-        echo "       restart calls: ${restarted:-0} (expected 0)"
-        FAILURES=$((FAILURES + 1))
-    fi
-}
-
-# Asserts the identity check sits after the restart and after `is-active`:
-# asking a process that has not been replaced yet, or one that is still
-# starting, answers a question about the wrong binary.
-assert_identity_check_is_last() {
-    local name=$1 serv=$2 cli=$3 config=$4
-    CASES=$((CASES + 1))
-    local output restart is_active version
-    output=$(DRY_RUN=1 "$SCRIPT_UNDER_TEST" goopy@dev.example.com "$serv" "$cli" "$config")
-    restart=$(printf '%s\n' "$output" | grep -n 'systemctl restart' | head -1 | cut -d: -f1)
-    is_active=$(printf '%s\n' "$output" | grep -n 'is-active' | head -1 | cut -d: -f1)
-    version=$(printf '%s\n' "$output" | grep -n '/version' | head -1 | cut -d: -f1)
-
-    if [[ -n "$restart" && -n "$is_active" && -n "$version" \
-        && "$restart" -lt "$is_active" && "$is_active" -lt "$version" ]]; then
-        echo "ok   — $name"
-    else
-        echo "FAIL — $name"
-        echo "       restart:   ${restart:-<none>}"
-        echo "       is-active: ${is_active:-<none>}"
-        echo "       /version:  ${version:-<none>}"
-        FAILURES=$((FAILURES + 1))
-    fi
-}
-
 # Extracts the identity check the script would run on the host and drives it
 # locally against a stub gl-serv and a stub curl. The comparison runs in the
 # remote shell, so asserting only on the ssh line would leave the part that
@@ -560,12 +432,14 @@ assert_emits push_binary_checks_the_staged_config_with_the_new_binary \
     "ssh -p 22 goopy@dev.example.com chmod +x /tmp/gl-serv && /tmp/gl-serv --check-config --config $REMOTE_CFG.new" \
     goopy@dev.example.com "$SERV" "$CLI" "$CFG"
 
-assert_config_gate_is_ordered push_binary_checks_the_config_before_installing "$SERV" "$CLI" "$CFG"
+# The gate runs before anything is installed; see the step-order case below,
+# which pins it between the drift check and the first install.
 
 # The point of checking early: a bad config must cost a failed deploy, not an
 # outage. `systemctl is-active` at the end catches the same failure, but only
 # once the old binary has already been stopped.
-assert_failed_gate_aborts_before_install push_binary_aborts_the_deploy_when_the_config_check_fails
+assert_failed_step_stops_the_deploy push_binary_aborts_the_deploy_when_the_config_check_fails \
+    '--check-config --config /opt/goopy-life/config.toml.new' 'sudo install'
 
 # The install substrings are whitelisted in deploy/sudoers.goopy — any drift
 # there (a different mode, path, or argument order) becomes a sudo denial on
@@ -594,7 +468,8 @@ assert_install_failure_propagates push_binary_propagates_a_failed_cli_install \
 
 # And the whole script has to stop there too: restarting gl-serv after a failed
 # install reports a green deploy while the host runs what it ran before.
-assert_failed_install_aborts_before_restart push_binary_aborts_the_deploy_when_an_install_fails
+assert_failed_step_stops_the_deploy push_binary_aborts_the_deploy_when_an_install_fails \
+    'sudo install -m 755 /tmp/gl-cli' 'systemctl restart'
 
 # The config is staged beside its destination so the swap is a same-directory
 # rename. Staging in /tmp instead would make it a cross-filesystem copy, and
@@ -668,6 +543,11 @@ assert_nginx_site_step push_binary_installs_and_reloads_an_accepted_site \
 # one would fail `nginx -t` for every per-instance provision after it.
 assert_nginx_site_step push_binary_restores_the_previous_site_when_nginx_rejects_it \
     1 'previous site' 1 'previous site' present no
+# Already installed and linked: left alone, with nginx neither tested nor
+# reloaded — the stub would reject it, so reaching `nginx -t` fails the case.
+# A reload for nothing respawns the workers under every live instance.
+assert_nginx_site_step push_binary_leaves_an_unchanged_site_alone \
+    1 'incoming site' 0 'incoming site' present no
 # Rejected on a host that never had one: unlinked, so nginx never loads it.
 assert_nginx_site_step push_binary_unlinks_a_first_site_nginx_rejects \
     1 '' 1 'incoming site' absent no
@@ -675,16 +555,10 @@ assert_nginx_site_step push_binary_unlinks_a_first_site_nginx_rejects \
 # Outside dry-run each environment's host artifacts must exist beside its
 # config: a deploy that went ahead without them would install the binary and
 # leave the host on whatever unit and site it had.
-CASES=$((CASES + 1))
 lonely=$(mktemp -d)
 printf 'domain = "x"\n' >"$lonely/lonely.toml"
-if DRY_RUN=0 "$SCRIPT_UNDER_TEST" goopy@dev.example.com \
-    "$SCRIPT_UNDER_TEST" "$SCRIPT_UNDER_TEST" "$lonely/lonely.toml" >/dev/null 2>&1; then
-    echo "FAIL — push_binary_rejects_a_config_without_its_host_artifacts (expected non-zero exit, got 0)"
-    FAILURES=$((FAILURES + 1))
-else
-    echo "ok   — push_binary_rejects_a_config_without_its_host_artifacts"
-fi
+assert_missing_file_rejected push_binary_rejects_a_config_without_its_host_artifacts \
+    "$SCRIPT_UNDER_TEST" "$SCRIPT_UNDER_TEST" "$lonely/lonely.toml"
 /bin/rm -rf "$lonely"
 
 # A deploy that does not verify the restart reports success while the API is down.
@@ -696,7 +570,8 @@ assert_emits push_binary_verifies_the_service_is_active_after_restart \
 # that did not replace the binary, a restart that raced, or a rollback that
 # silently did not take. The identity check closes that gap — but only if it
 # runs after the process it is asking about has actually been replaced.
-assert_identity_check_is_last push_binary_verifies_identity_after_the_restart "$SERV" "$CLI" "$CFG"
+assert_steps_in_order push_binary_verifies_identity_after_the_restart "$SERV" "$CLI" "$CFG" \
+    'systemctl restart gl-serv' 'is-active' '/version'
 
 # The commit is compared against the full sha in the /version body, so the check
 # needs no JSON parser on the droplet.

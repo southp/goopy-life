@@ -2,9 +2,10 @@
 # comparison that tells whether a host still matches them (#139).
 #
 # Shared by deploy/push-binary.sh (which installs what it can and refuses to
-# touch a host whose sudoers drop-in has drifted) and deploy/check-host.sh
-# (which installs nothing and reports every difference). One table, so the two
-# cannot disagree about where a file lives.
+# touch a host whose sudoers drop-in has drifted), deploy/check-host.sh (which
+# installs nothing and reports every difference) and deploy/admin-apply.sh
+# (which applies what no deploy may). One table, so they cannot disagree about
+# where a file lives or which files there are.
 #
 # Every staged path below is pinned verbatim in deploy/sudoers.goopy, so none
 # of them can change here alone: a rule that no longer matches is a bare sudo
@@ -26,7 +27,6 @@ DROPIN_HOST=$DROPIN_DIR/deploy.conf
 # may `rm -f /etc/nginx/sites-*/goopy-*` for its per-instance sites, and this
 # must never be one of those.
 SITE_STAGED=/tmp/gl-serv-api.nginx
-SITE_PREVIOUS=/tmp/gl-serv-api.nginx.prev
 SITE_HOST=/etc/nginx/sites-available/gl-serv-api
 SITE_ENABLED=/etc/nginx/sites-enabled/gl-serv-api
 
@@ -35,6 +35,7 @@ SITE_ENABLED=/etc/nginx/sites-enabled/gl-serv-api
 # warns and serves the stale one. No deploy removes it — granting the deploy a
 # permanent rule for a one-time migration would outlive the migration — so its
 # presence is reported instead.
+LEGACY_SITE_HOST=/etc/nginx/sites-available/api.goopy.life
 LEGACY_SITE_ENABLED=/etc/nginx/sites-enabled/api.goopy.life
 
 # The sudoers drop-in. Verify-only: it is the file that grants the deploy its
@@ -45,18 +46,79 @@ LEGACY_SITE_ENABLED=/etc/nginx/sites-enabled/api.goopy.life
 SUDOERS_STAGED=/tmp/sudoers.goopy
 SUDOERS_HOST=/etc/sudoers.d/goopy
 
+# The nginx cache zone, deploy/nginx/goopy-cache.conf. Like sudoers, applied by
+# an admin (admin-apply.sh) rather than a deploy: it lives in nginx's http {}
+# block, which no pinned rule should be able to write.
+CACHE_CONF_HOST=/etc/nginx/conf.d/goopy-cache.conf
+
+# The environment's config. The deploy stages and swaps it itself (beside its
+# destination, for an atomic rename), so it is not in the staged list below.
+# Must match the --config path in deploy/gl-serv.service's ExecStart.
+CONFIG_HOST=/opt/goopy-life/config.toml
+
 # Resolves the tracked source of each artifact for the environment whose
 # config is $1 (deploy/config/<env>.toml), into UNIT_SOURCE, DROPIN_SOURCE,
-# SITE_SOURCE and SUDOERS_SOURCE. The per-environment ones sit beside the
-# config under the same stem; the shared ones sit beside this file.
+# SITE_SOURCE, SUDOERS_SOURCE and CACHE_CONF_SOURCE. The per-environment ones sit
+# beside the config under the same stem; the shared ones sit beside this file.
+#
+# Also fills HOST_ARTIFACT_SOURCES and HOST_ARTIFACT_STAGED, in step: every
+# artifact a deploy or a check uploads, and the fixed path it is staged at.
+# Adding an artifact to both lists here is what makes both scripts ship it.
 resolve_host_artifacts() {
     local config=$1
     local here
     here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     UNIT_SOURCE="$here/gl-serv.service"
     SUDOERS_SOURCE="$here/sudoers.goopy"
+    CACHE_CONF_SOURCE="$here/nginx/goopy-cache.conf"
     DROPIN_SOURCE="${config%.toml}.gl-serv.conf"
     SITE_SOURCE="${config%.toml}.api.nginx"
+    HOST_ARTIFACT_SOURCES=("$UNIT_SOURCE" "$DROPIN_SOURCE" "$SITE_SOURCE" "$SUDOERS_SOURCE")
+    HOST_ARTIFACT_STAGED=("$UNIT_STAGED" "$DROPIN_STAGED" "$SITE_STAGED" "$SUDOERS_STAGED")
+}
+
+# Fails with `<caller>: no such <what>: <path>` for the first of the remaining
+# arguments that is not a file. $1 names the calling script, $2 the kind of file.
+require_files() {
+    local caller=$1 what=$2 path
+    shift 2
+    for path in "$@"; do
+        if [[ ! -f "$path" ]]; then
+            echo "$caller: no such $what: $path" >&2
+            return 1
+        fi
+    done
+}
+
+# Prints each environment deploy/config/ defines, for a caller rejecting a name
+# that is not one of them.
+list_environments() {
+    local here candidate
+    here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    echo "available environments:" >&2
+    for candidate in "$here"/config/*.toml; do
+        echo "  $(basename "$candidate" .toml)" >&2
+    done
+}
+
+# Runs its arguments, or with DRY_RUN=1 prints them instead. Every scp/ssh the
+# deploy scripts issue goes through this, which is what their tests assert on.
+run() {
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+        printf '%s\n' "$*"
+    else
+        "$@"
+    fi
+}
+
+# Uploads every host artifact to its staged path on $1 over ssh port $2. They go
+# to the fixed /tmp paths deploy/sudoers.goopy pins, not beside their
+# destinations: those are root-owned directories. scp spells the port -P.
+stage_host_artifacts() {
+    local target=$1 port=$2 i
+    for i in "${!HOST_ARTIFACT_SOURCES[@]}"; do
+        run scp -P "$port" "${HOST_ARTIFACT_SOURCES[$i]}" "$target:${HOST_ARTIFACT_STAGED[$i]}"
+    done
 }
 
 # Emits a remote sh command comparing every staged artifact with the host's
@@ -100,7 +162,7 @@ drift_check_command() {
     c+="for f in $DROPIN_DIR/*; do if [ -e \"\$f\" ] && [ \"\$f\" != $DROPIN_HOST ]; then echo \"DRIFT  \$f overrides gl-serv.service and is not shipped by any deploy. Fold it into deploy/config/<env>.gl-serv.conf or remove it.\" >&2; status=1; fi; done; "
 
     local pair staged host
-    for pair in "$UNIT_STAGED $UNIT_HOST" "$DROPIN_STAGED $DROPIN_HOST" "$SITE_STAGED $SITE_HOST" ${staged_config:+"$staged_config /opt/goopy-life/config.toml"}; do
+    for pair in "$UNIT_STAGED $UNIT_HOST" "$DROPIN_STAGED $DROPIN_HOST" "$SITE_STAGED $SITE_HOST" ${staged_config:+"$staged_config $CONFIG_HOST"}; do
         staged=${pair% *}
         host=${pair#* }
         c+="if cmp -s $staged $host; then echo 'ok     $host'; "

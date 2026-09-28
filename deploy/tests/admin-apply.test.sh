@@ -14,14 +14,20 @@ REMOTE_HALF="$DEPLOY_DIR/admin-apply.remote.sh"
 FAILURES=0
 CASES=0
 
+# The host half is handed its paths from this table by the local half; the cases
+# below hand it the same ones, and spell the expected results out literally, so
+# a path changed in the table alone fails here rather than on a host.
+# shellcheck source=../host-artifacts.sh
+source "$DEPLOY_DIR/host-artifacts.sh"
+
 pass() {
     CASES=$((CASES + 1))
-        echo "ok   — $1"
+    echo "ok   — $1"
 }
 
 fail() {
     CASES=$((CASES + 1))
-        echo "FAIL — $1"
+    echo "FAIL — $1"
     shift
     printf '       %s\n' "$@"
     FAILURES=$((FAILURES + 1))
@@ -63,10 +69,25 @@ STUB
     chmod +x "$root/bin/visudo" "$root/bin/nginx"
 }
 
+# A host set up before #139: the api site enabled as api.goopy.life, and no
+# gl-serv-api. Otherwise up to date.
+make_legacy_host() {
+    local root
+    root=$(make_host)
+    rm "$root/etc/nginx/sites-enabled/gl-serv-api" "$root/etc/nginx/sites-available/gl-serv-api"
+    printf 'legacy site\n' >"$root/etc/nginx/sites-available/api.goopy.life"
+    ln -s "$root/etc/nginx/sites-available/api.goopy.life" "$root/etc/nginx/sites-enabled/api.goopy.life"
+    printf '%s' "$root"
+}
+
 # Runs the host half against `root`, leaving its exit status in STATUS.
 apply() {
     local root=$1
-    PATH="$root/bin:$PATH" ROOT="$root" sh "$REMOTE_HALF" "$root/staging" >/dev/null 2>&1
+    PATH="$root/bin:$PATH" ROOT="$root" \
+        SUDOERS_HOST="$SUDOERS_HOST" CACHE_CONF_HOST="$CACHE_CONF_HOST" \
+        SITE_HOST="$SITE_HOST" SITE_ENABLED="$SITE_ENABLED" \
+        LEGACY_SITE_HOST="$LEGACY_SITE_HOST" LEGACY_SITE_ENABLED="$LEGACY_SITE_ENABLED" \
+        sh "$REMOTE_HALF" "$root/staging" >/dev/null 2>&1
     STATUS=$?
 }
 
@@ -95,28 +116,19 @@ else
 fi
 rm -rf "$root"
 
-# The everyday case: sudoers.goopy changed in the repo.
+# The everyday case: sudoers.goopy changed in the repo. Staged as goopy.new —
+# skipped by sudo's includedir for its dot — and renamed into place, so nothing
+# may be left behind under that name.
 root=$(make_host)
 printf 'sudoers before this change\n' >"$root/etc/sudoers.d/goopy"
 apply "$root"
 mode=$(stat -f '%Lp' "$root/etc/sudoers.d/goopy" 2>/dev/null || stat -c '%a' "$root/etc/sudoers.d/goopy")
-if [[ "$STATUS" -eq 0 && "$(content "$root/etc/sudoers.d/goopy")" == "sudoers from the repo" && "$mode" == 440 ]]; then
+if [[ "$STATUS" -eq 0 && "$(content "$root/etc/sudoers.d/goopy")" == "sudoers from the repo" && "$mode" == 440 \
+    && ! -e "$root/etc/sudoers.d/goopy.new" ]]; then
     pass admin_apply_installs_a_changed_sudoers_drop_in
 else
     fail admin_apply_installs_a_changed_sudoers_drop_in "exit $STATUS, mode $mode" \
         "drop-in: $(content "$root/etc/sudoers.d/goopy")"
-fi
-rm -rf "$root"
-
-# Staged as goopy.new — skipped by sudo's includedir for its dot — and renamed
-# into place; nothing may be left behind under that name either way.
-root=$(make_host)
-printf 'sudoers before this change\n' >"$root/etc/sudoers.d/goopy"
-apply "$root"
-if [[ ! -e "$root/etc/sudoers.d/goopy.new" ]]; then
-    pass admin_apply_leaves_no_staged_file_in_sudoers_d
-else
-    fail admin_apply_leaves_no_staged_file_in_sudoers_d "goopy.new still present"
 fi
 rm -rf "$root"
 
@@ -192,10 +204,7 @@ rm -rf "$root"
 
 # The pre-#139 host: api.goopy.life enabled, no gl-serv-api. Swapped in one
 # reload, and the old site file gone so nothing can re-enable it by accident.
-root=$(make_host)
-rm "$root/etc/nginx/sites-enabled/gl-serv-api" "$root/etc/nginx/sites-available/gl-serv-api"
-printf 'legacy site\n' >"$root/etc/nginx/sites-available/api.goopy.life"
-ln -s "$root/etc/nginx/sites-available/api.goopy.life" "$root/etc/nginx/sites-enabled/api.goopy.life"
+root=$(make_legacy_host)
 apply "$root"
 if [[ "$STATUS" -eq 0 && -L "$root/etc/nginx/sites-enabled/gl-serv-api" \
     && "$(content "$root/etc/nginx/sites-enabled/gl-serv-api")" == "api site from the repo" \
@@ -211,10 +220,7 @@ rm -rf "$root"
 
 # If nginx rejects the new site, the old one is enabled again and the new one
 # unlinked, so the API keeps being served exactly as before.
-root=$(make_host)
-rm "$root/etc/nginx/sites-enabled/gl-serv-api" "$root/etc/nginx/sites-available/gl-serv-api"
-printf 'legacy site\n' >"$root/etc/nginx/sites-available/api.goopy.life"
-ln -s "$root/etc/nginx/sites-available/api.goopy.life" "$root/etc/nginx/sites-enabled/api.goopy.life"
+root=$(make_legacy_host)
 verdicts "$root" 0 0 1
 apply "$root"
 if [[ "$STATUS" -ne 0 && "$(content "$root/etc/nginx/sites-enabled/api.goopy.life")" == "legacy site" \
@@ -228,10 +234,14 @@ rm -rf "$root"
 echo
 echo "== admin-apply.sh =="
 
-# One ssh -t, one sudo: one password prompt for the whole run, and the staging
-# directory removed whatever the outcome.
+# One ssh -t, one sudo: one password prompt for the whole run, the host half
+# handed every path from the table, and the staging directory removed whatever
+# the outcome.
 dry_run=$(DRY_RUN=1 "$LOCAL_HALF" admin@dev.example.com dev 2>&1)
-if grep -Fqx 'ssh -t -p 22 admin@dev.example.com sudo sh <staging>/admin-apply.remote.sh <staging>; status=$?; rm -rf <staging>; exit $status' <<<"$dry_run" \
+expected="ssh -t -p 22 admin@dev.example.com sudo env SUDOERS_HOST=$SUDOERS_HOST CACHE_CONF_HOST=$CACHE_CONF_HOST"
+expected+=" SITE_HOST=$SITE_HOST SITE_ENABLED=$SITE_ENABLED LEGACY_SITE_HOST=$LEGACY_SITE_HOST LEGACY_SITE_ENABLED=$LEGACY_SITE_ENABLED"
+expected+=' sh <staging>/admin-apply.remote.sh <staging>; status=$?; rm -rf <staging>; exit $status'
+if grep -Fqx -- "$expected" <<<"$dry_run" \
     && [[ "$(grep -c ' sudo ' <<<"$dry_run")" -eq 1 ]]; then
     pass admin_apply_asks_for_the_password_once
 else

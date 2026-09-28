@@ -38,7 +38,10 @@ DRY_RUN=${DRY_RUN:-0}
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CONFIG="$HERE/config/$ENVIRONMENT.toml"
-SITE="$HERE/config/$ENVIRONMENT.api.nginx"
+
+# shellcheck source=host-artifacts.sh
+source "$HERE/host-artifacts.sh"
+resolve_host_artifacts "$CONFIG"
 
 # The deploy account has no password sudo and no rule for `sh`, so this would
 # fail at the prompt anyway -- but only after asking for a password it cannot
@@ -48,12 +51,8 @@ if [[ "${TARGET%%@*}" == goopy ]]; then
     exit 1
 fi
 
-if [[ ! -f "$CONFIG" || ! -f "$SITE" ]]; then
-    echo "admin-apply.sh: no environment '$ENVIRONMENT' (expected $CONFIG and $SITE)" >&2
-    echo "admin-apply.sh: available environments:" >&2
-    for candidate in "$HERE"/config/*.toml; do
-        echo "  $(basename "$candidate" .toml)" >&2
-    done
+if ! require_files admin-apply.sh "artifact for environment '$ENVIRONMENT'" "$CONFIG" "$SITE_SOURCE" "$SUDOERS_SOURCE" "$CACHE_CONF_SOURCE"; then
+    list_environments
     exit 1
 fi
 
@@ -61,19 +60,11 @@ fi
 # should fail here, before anything reaches the host. The host checks again with
 # its own sudo, which is the check that counts.
 if command -v visudo >/dev/null 2>&1; then
-    if ! visudo -cf "$HERE/sudoers.goopy" >/dev/null; then
+    if ! visudo -cf "$SUDOERS_SOURCE" >/dev/null; then
         echo "admin-apply.sh: deploy/sudoers.goopy does not parse; nothing was sent" >&2
         exit 1
     fi
 fi
-
-run() {
-    if [[ "$DRY_RUN" == "1" ]]; then
-        printf '%s\n' "$*"
-    else
-        "$@"
-    fi
-}
 
 # A private directory made by the admin account (mktemp -d is 0700), rather than
 # fixed /tmp names: the deploy account stages its own files in /tmp, and nothing
@@ -85,14 +76,20 @@ else
     STAGING=$(ssh -p "$PORT" "$TARGET" mktemp -d)
 fi
 
-run scp -P "$PORT" "$HERE/sudoers.goopy" "$TARGET:$STAGING/sudoers.goopy"
-run scp -P "$PORT" "$HERE/nginx/goopy-cache.conf" "$TARGET:$STAGING/goopy-cache.conf"
-run scp -P "$PORT" "$SITE" "$TARGET:$STAGING/gl-serv-api"
+run scp -P "$PORT" "$SUDOERS_SOURCE" "$TARGET:$STAGING/sudoers.goopy"
+run scp -P "$PORT" "$CACHE_CONF_SOURCE" "$TARGET:$STAGING/goopy-cache.conf"
+run scp -P "$PORT" "$SITE_SOURCE" "$TARGET:$STAGING/gl-serv-api"
 run scp -P "$PORT" "$HERE/admin-apply.remote.sh" "$TARGET:$STAGING/admin-apply.remote.sh"
+
+# Where each file goes comes from host-artifacts.sh, handed to the host half
+# rather than restated there: it runs under plain sh on the host and cannot
+# source the table itself.
+REMOTE_ENV="SUDOERS_HOST=$SUDOERS_HOST CACHE_CONF_HOST=$CACHE_CONF_HOST SITE_HOST=$SITE_HOST SITE_ENABLED=$SITE_ENABLED"
+REMOTE_ENV+=" LEGACY_SITE_HOST=$LEGACY_SITE_HOST LEGACY_SITE_ENABLED=$LEGACY_SITE_ENABLED"
 
 # -t so sudo can ask for the password; a single sudo for the whole run, so it
 # asks once. The staging directory goes whatever the outcome.
-run ssh -t -p "$PORT" "$TARGET" "sudo sh $STAGING/admin-apply.remote.sh $STAGING; status=\$?; rm -rf $STAGING; exit \$status"
+run ssh -t -p "$PORT" "$TARGET" "sudo env $REMOTE_ENV sh $STAGING/admin-apply.remote.sh $STAGING; status=\$?; rm -rf $STAGING; exit \$status"
 
 if [[ "$DRY_RUN" != "1" ]]; then
     echo

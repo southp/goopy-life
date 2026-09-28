@@ -13,6 +13,12 @@
 # Every change is validated before it can take effect, and put back if the
 # validation that can only run afterwards rejects it.
 #
+# Where each file lives comes from deploy/host-artifacts.sh, passed in by the
+# local half as SUDOERS_HOST, CACHE_CONF_HOST, SITE_HOST, SITE_ENABLED,
+# LEGACY_SITE_HOST and LEGACY_SITE_ENABLED. This script runs under plain sh on
+# the host and cannot source that table, and restating the paths here would be
+# a second copy to drift from it.
+#
 # ROOT prefixes every absolute path. It is empty on a host; the tests set it to
 # a scratch directory, which is the only reason it exists.
 set -eu
@@ -20,16 +26,27 @@ set -eu
 STAGING=${1:?"usage: admin-apply.remote.sh <staging-dir>"}
 ROOT=${ROOT:-}
 
-SUDOERS=$ROOT/etc/sudoers.d/goopy
-CACHE_CONF=$ROOT/etc/nginx/conf.d/goopy-cache.conf
+SUDOERS=$ROOT${SUDOERS_HOST:?}
+CACHE_CONF=$ROOT${CACHE_CONF_HOST:?}
 CACHE_DIR=$ROOT/var/cache/nginx
-SITE=$ROOT/etc/nginx/sites-available/gl-serv-api
-SITE_ENABLED=$ROOT/etc/nginx/sites-enabled/gl-serv-api
-LEGACY=$ROOT/etc/nginx/sites-available/api.goopy.life
-LEGACY_ENABLED=$ROOT/etc/nginx/sites-enabled/api.goopy.life
+SITE=$ROOT${SITE_HOST:?}
+SITE_ENABLED=$ROOT${SITE_ENABLED:?}
+LEGACY=$ROOT${LEGACY_SITE_HOST:?}
+LEGACY_ENABLED=$ROOT${LEGACY_SITE_ENABLED:?}
 
 say() {
     printf '%-10s %s\n' "$1" "$2"
+}
+
+# Undoes an install that failed its check: moves the saved copy <backup> back
+# over <dest> if there was one (<had> = 1), or removes <dest> if this run
+# created it.
+put_back() {
+    if [ "$1" = 1 ]; then
+        mv -f "$2" "$3"
+    else
+        rm -f "$3"
+    fi
 }
 
 # --- 1. The sudoers drop-in ---------------------------------------------------
@@ -61,11 +78,7 @@ else
     chown root:root "$SUDOERS.new"
     mv -f "$SUDOERS.new" "$SUDOERS"
     if ! visudo -c >/dev/null; then
-        if [ "$had_sudoers" = 1 ]; then
-            mv -f "$STAGING/sudoers.previous" "$SUDOERS"
-        else
-            rm -f "$SUDOERS"
-        fi
+        put_back "$had_sudoers" "$STAGING/sudoers.previous" "$SUDOERS"
         echo "admin-apply: sudo rejected the configuration with the new drop-in; the previous one is back" >&2
         exit 1
     fi
@@ -90,11 +103,7 @@ else
     mkdir -p "$CACHE_DIR"
     install -m 644 "$STAGING/goopy-cache.conf" "$CACHE_CONF"
     if ! nginx -t >/dev/null 2>&1; then
-        if [ "$had_cache" = 1 ]; then
-            mv -f "$STAGING/goopy-cache.previous" "$CACHE_CONF"
-        else
-            rm -f "$CACHE_CONF"
-        fi
+        put_back "$had_cache" "$STAGING/goopy-cache.previous" "$CACHE_CONF"
         echo "admin-apply: nginx rejected goopy-cache.conf; the previous one is back (run \`nginx -t\` to see why)" >&2
         exit 1
     fi
