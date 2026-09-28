@@ -332,11 +332,12 @@ assert_steps_in_order() {
 # Extracts the api-site step from the dry run and runs it against a scratch
 # root: the real install/ln/cp, a sudo that simply runs its command, and a stub
 # nginx whose `-t` answers `verdict` (0 accepts, 1 rejects). `previous` is the
-# content already installed, or empty for a host that has never had the site.
+# content already installed, or empty for a host that has never had the site;
+# `linked` (default yes) says whether that previous site was enabled.
 # Asserts on the exit status, the site left on disk, the link, and whether
 # nginx was reloaded.
 assert_nginx_site_step() {
-    local name=$1 verdict=$2 previous=$3 want_status=$4 want_site=$5 want_link=$6 want_reload=$7
+    local name=$1 verdict=$2 previous=$3 want_status=$4 want_site=$5 want_link=$6 want_reload=$7 linked=${8:-yes}
     CASES=$((CASES + 1))
     local remote root status
     remote=$(DRY_RUN=1 "$SCRIPT_UNDER_TEST" goopy@dev.example.com s c "$REAL_CONFIG" \
@@ -353,6 +354,8 @@ assert_nginx_site_step() {
     printf 'incoming site\n' >"$root/tmp/gl-serv-api.nginx"
     if [[ -n "$previous" ]]; then
         printf '%s\n' "$previous" >"$root/etc/nginx/sites-available/gl-serv-api"
+    fi
+    if [[ -n "$previous" && "$linked" == yes ]]; then
         ln -s "$root/etc/nginx/sites-available/gl-serv-api" "$root/etc/nginx/sites-enabled/gl-serv-api"
     fi
     printf '#!/bin/sh\nexec "$@"\n' >"$root/bin/sudo"
@@ -548,6 +551,12 @@ assert_nginx_site_step push_binary_restores_the_previous_site_when_nginx_rejects
 # A reload for nothing respawns the workers under every live instance.
 assert_nginx_site_step push_binary_leaves_an_unchanged_site_alone \
     1 'incoming site' 0 'incoming site' present no
+# A site an earlier deploy had rejected and unlinked is still in
+# sites-available. Rejected again, it must not be treated as a good previous
+# copy — restored and left linked, it would fail `nginx -t` for every
+# per-instance provision after it.
+assert_nginx_site_step push_binary_keeps_an_unlinked_rejected_site_unlinked \
+    1 'rejected earlier' 1 'incoming site' absent no no
 # Rejected on a host that never had one: unlinked, so nginx never loads it.
 assert_nginx_site_step push_binary_unlinks_a_first_site_nginx_rejects \
     1 '' 1 'incoming site' absent no

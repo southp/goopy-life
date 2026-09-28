@@ -161,10 +161,16 @@ run ssh -p "$PORT" "$TARGET" "chmod +x /tmp/gl-serv && /tmp/gl-serv --check-conf
 # change it, and a reload for nothing respawns nginx's workers under every live
 # instance on the host.
 #
+# Only a site that was *enabled* is worth putting back. One that merely sits in
+# sites-available may be a site an earlier deploy had rejected and unlinked;
+# restoring it -- and leaving it linked -- would install exactly the failure
+# this step exists to prevent. Anything else is rolled back by unlinking.
+#
 # The previous copy is saved without sudo: sites-available is world-readable.
 SITE_PREVIOUS=$SITE_STAGED.prev
-NGINX_SITE="if cmp -s $SITE_STAGED $SITE_HOST && [ \"\$(readlink $SITE_ENABLED)\" = $SITE_HOST ]; then rm -f $SITE_STAGED; exit 0; fi; "
-NGINX_SITE+="had=0; if [ -e $SITE_HOST ]; then cp $SITE_HOST $SITE_PREVIOUS || exit 1; had=1; fi; "
+NGINX_SITE="enabled=0; if [ -e $SITE_HOST ] && [ \"\$(readlink $SITE_ENABLED)\" = $SITE_HOST ]; then enabled=1; fi; "
+NGINX_SITE+="if [ \$enabled = 1 ] && cmp -s $SITE_STAGED $SITE_HOST; then rm -f $SITE_STAGED; exit 0; fi; "
+NGINX_SITE+="had=0; if [ \$enabled = 1 ]; then cp $SITE_HOST $SITE_PREVIOUS || exit 1; had=1; fi; "
 NGINX_SITE+="if sudo install -m 644 $SITE_STAGED $SITE_HOST && sudo ln -sf $SITE_HOST $SITE_ENABLED && sudo nginx -t && sudo systemctl reload nginx; then rm -f $SITE_STAGED $SITE_PREVIOUS; exit 0; fi; "
 NGINX_SITE+="echo 'push-binary.sh: nginx rejected the api site; putting the previous one back' >&2; "
 NGINX_SITE+="if [ \$had = 1 ]; then sudo install -m 644 $SITE_PREVIOUS $SITE_HOST; else sudo rm -f $SITE_ENABLED; fi; exit 1"
