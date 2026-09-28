@@ -117,12 +117,19 @@ fi
 # sites-enabled/api.goopy.life, which the deploy refuses to run beside. This
 # swaps it for gl-serv-api in a single reload, so the API never goes down. It is
 # a no-op everywhere else, and from then on the deploy owns gl-serv-api.
-if [ -e "$LEGACY_ENABLED" ]; then
+#
+# The old entry is moved aside, not deleted, and moved back verbatim if nginx
+# rejects the new site. It was placed by hand, so it may be a symlink to
+# sites-available/api.goopy.life, a link elsewhere or a plain file; recreating
+# it by assumption could leave a dangling link -- a host-wide `nginx -t`
+# failure -- with the only copy of the original gone. -L as well as -e, so a
+# link whose target is already missing is still swapped out.
+if [ -e "$LEGACY_ENABLED" ] || [ -L "$LEGACY_ENABLED" ]; then
     install -m 644 "$STAGING/gl-serv-api" "$SITE"
     ln -sf "$SITE" "$SITE_ENABLED"
-    rm -f "$LEGACY_ENABLED"
+    mv "$LEGACY_ENABLED" "$STAGING/legacy-enabled"
     if ! nginx -t >/dev/null 2>&1; then
-        ln -sf "$LEGACY" "$LEGACY_ENABLED"
+        mv "$STAGING/legacy-enabled" "$LEGACY_ENABLED"
         rm -f "$SITE_ENABLED"
         echo "admin-apply: nginx rejected gl-serv-api; api.goopy.life is enabled again (run \`nginx -t\` to see why)" >&2
         exit 1

@@ -230,6 +230,24 @@ else
 fi
 rm -rf "$root"
 
+# The legacy entry was placed by hand, so it need not be the symlink it usually
+# is. A plain file, rejected alongside the new site, must come back as that same
+# file — not as a guessed symlink to a target that may not exist.
+root=$(make_host)
+rm "$root/etc/nginx/sites-enabled/gl-serv-api" "$root/etc/nginx/sites-available/gl-serv-api"
+printf 'hand-placed site\n' >"$root/etc/nginx/sites-enabled/api.goopy.life"
+verdicts "$root" 0 0 1
+apply "$root"
+if [[ "$STATUS" -ne 0 && -f "$root/etc/nginx/sites-enabled/api.goopy.life" && ! -L "$root/etc/nginx/sites-enabled/api.goopy.life" \
+    && "$(content "$root/etc/nginx/sites-enabled/api.goopy.life")" == "hand-placed site" \
+    && ! -e "$root/etc/nginx/sites-enabled/gl-serv-api" ]]; then
+    pass admin_apply_restores_a_legacy_site_that_was_a_plain_file
+else
+    fail admin_apply_restores_a_legacy_site_that_was_a_plain_file "exit $STATUS" \
+        "legacy: $(ls -l "$root/etc/nginx/sites-enabled/api.goopy.life" 2>&1)"
+fi
+rm -rf "$root"
+
 echo
 echo "== admin-apply.sh =="
 
@@ -268,6 +286,29 @@ if command -v zsh >/dev/null 2>&1; then
     fi
     rm -rf "$root"
 fi
+
+# An ssh alias hides the account (`spdev-goopy`), so the name check alone misses
+# it. The host is asked instead, on the connection that would make the staging
+# directory, and a goopy login stops there: nothing uploaded, nothing left.
+root=$(mktemp -d)
+mkdir -p "$root/bin"
+cat >"$root/bin/ssh" <<STUB
+#!/bin/sh
+echo "\$*" >>"$root/calls"
+echo goopy
+STUB
+printf '#!/bin/sh\necho "scp $*" >>"%s/calls"\n' "$root" >"$root/bin/scp"
+chmod +x "$root/bin/ssh" "$root/bin/scp"
+PATH="$root/bin:$PATH" DRY_RUN=0 "$LOCAL_HALF" spdev-goopy dev >/dev/null 2>&1
+STATUS=$?
+calls=$(wc -l <"$root/calls" | tr -d ' ')
+if [[ "$STATUS" -ne 0 && "$calls" -eq 1 ]]; then
+    pass admin_apply_refuses_an_alias_for_the_deploy_account
+else
+    fail admin_apply_refuses_an_alias_for_the_deploy_account "exit $STATUS, remote calls $calls (expected 1)" \
+        "$(cat "$root/calls")"
+fi
+rm -rf "$root"
 
 # Each environment migrates to its own api site, never another's.
 dry_run=$(DRY_RUN=1 "$LOCAL_HALF" admin@prod.example.com prod 2>&1)

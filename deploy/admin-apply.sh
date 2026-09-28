@@ -45,7 +45,8 @@ resolve_host_artifacts "$CONFIG"
 
 # The deploy account has no password sudo and no rule for `sh`, so this would
 # fail at the prompt anyway -- but only after asking for a password it cannot
-# have. Say why up front instead.
+# have. Say why up front instead. This catches the obvious `goopy@host`; an ssh
+# alias for the account (`spdev-goopy`) is caught below, by asking the host.
 if [[ "${TARGET%%@*}" == goopy ]]; then
     echo "admin-apply.sh: $TARGET is the deploy account; run this as an admin with password sudo" >&2
     exit 1
@@ -69,11 +70,20 @@ fi
 # A private directory made by the admin account (mktemp -d is 0700), rather than
 # fixed /tmp names: the deploy account stages its own files in /tmp, and nothing
 # it can write should be what root installs from here.
+#
+# The same connection answers which account the target really is, so an ssh
+# alias for the deploy account is refused before anything is uploaded -- and
+# before a staging directory exists to be left behind.
+MAKE_STAGING="if [ \"\$(id -un)\" = goopy ]; then echo goopy; else mktemp -d; fi"
 if [[ "$DRY_RUN" == "1" ]]; then
     STAGING="<staging>"
-    printf '%s\n' "ssh -p $PORT $TARGET mktemp -d"
+    printf '%s\n' "ssh -p $PORT $TARGET $MAKE_STAGING"
 else
-    STAGING=$(ssh -p "$PORT" "$TARGET" mktemp -d)
+    STAGING=$(ssh -p "$PORT" "$TARGET" "$MAKE_STAGING")
+fi
+if [[ "$STAGING" == goopy ]]; then
+    echo "admin-apply.sh: $TARGET logs in as goopy, the deploy account; run this as an admin with password sudo" >&2
+    exit 1
 fi
 
 run scp -P "$PORT" "$SUDOERS_SOURCE" "$TARGET:$STAGING/sudoers.goopy"
