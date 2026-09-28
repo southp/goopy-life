@@ -44,6 +44,10 @@ LEGACY_SITE_ENABLED=/etc/nginx/sites-enabled/api.goopy.life
 # never written — the comparison itself runs through a pinned `cmp`, because
 # /etc/sudoers.d/goopy is 0440 root and the deploy account cannot read it.
 SUDOERS_STAGED=/tmp/sudoers.goopy
+# Where check-host.sh stages it instead. Its own path, so a check run while a
+# deploy is in flight can neither overwrite nor delete the deploy's copy, and
+# pinned like the other because `cmp` runs as root and the rule must be literal.
+SUDOERS_CHECK_STAGED=/tmp/sudoers.goopy.check
 SUDOERS_HOST=/etc/sudoers.d/goopy
 
 # The nginx cache zone, deploy/nginx/goopy-cache.conf. Like sudoers, applied by
@@ -111,13 +115,21 @@ run() {
     fi
 }
 
-# Uploads every host artifact to its staged path on $1 over ssh port $2. They go
-# to the fixed /tmp paths deploy/sudoers.goopy pins, not beside their
-# destinations: those are root-owned directories. scp spells the port -P.
+# Uploads every host artifact to $1 over ssh port $2. By default each goes to
+# its fixed /tmp path from HOST_ARTIFACT_STAGED, which deploy/sudoers.goopy pins
+# -- not beside its destination, as those are root-owned directories. A caller
+# that installs nothing passes its own destinations instead, one per artifact in
+# the same order, to stay out of a concurrent deploy's way. scp spells the
+# port -P.
 stage_host_artifacts() {
     local target=$1 port=$2 i
+    shift 2
+    local destinations=("${HOST_ARTIFACT_STAGED[@]}")
+    if [[ $# -gt 0 ]]; then
+        destinations=("$@")
+    fi
     for i in "${!HOST_ARTIFACT_SOURCES[@]}"; do
-        run scp -P "$port" "${HOST_ARTIFACT_SOURCES[$i]}" "$target:${HOST_ARTIFACT_STAGED[$i]}"
+        run scp -P "$port" "${HOST_ARTIFACT_SOURCES[$i]}" "$target:${destinations[$i]}"
     done
 }
 
@@ -130,9 +142,12 @@ stage_host_artifacts() {
 #       so a difference in those is reported (the log should say what it
 #       overwrote) but does not stop it. `check` — nothing will be installed,
 #       so every difference is drift.
-#   $2  optional: where the environment's config was staged, to compare with
-#       the installed one. The deploy gates and swaps the config itself, so
-#       only `check` passes it.
+#   $2  where the environment's config was staged, to compare with the
+#       installed one, or empty. The deploy gates and swaps the config itself,
+#       so only `check` passes it.
+#   $3… where the unit, drop-in, site and sudoers drop-in were staged, in
+#       HOST_ARTIFACT_STAGED's order -- the deploy passes that array, the check
+#       its own paths.
 #
 # Regardless of mode, three things always fail, because no deploy can fix them:
 # a sudoers drop-in that does not match, a legacy api site still enabled, and
@@ -140,7 +155,8 @@ stage_host_artifacts() {
 # ships — a stray override.conf changes the unit without appearing in either
 # tracked file, and the deploy would leave it in place.
 drift_check_command() {
-    local mode=$1 staged_config=${2:-}
+    local mode=$1 staged_config=$2
+    local unit_staged=$3 dropin_staged=$4 site_staged=$5 sudoers_staged=$6
     local replaced=":" differs="differs from the repo" missing="is missing"
     if [[ "$mode" == check ]]; then
         replaced="status=1"
@@ -154,7 +170,7 @@ drift_check_command() {
     # sudo's own complaint is dropped: on a host whose drop-in predates the
     # `cmp` rule it is a password prompt that cannot be answered, and the line
     # below already says what that means and what to do.
-    c+="if sudo cmp -s $SUDOERS_STAGED $SUDOERS_HOST 2>/dev/null; then echo 'ok     $SUDOERS_HOST'; "
+    c+="if sudo cmp -s $sudoers_staged $SUDOERS_HOST 2>/dev/null; then echo 'ok     $SUDOERS_HOST'; "
     c+="else echo 'DRIFT  $SUDOERS_HOST does not match deploy/sudoers.goopy, or predates the rule that lets a deploy compare it. No deploy installs it: run deploy/admin-apply.sh as an admin, then re-run.' >&2; status=1; fi; "
 
     c+="if [ -e $LEGACY_SITE_ENABLED ]; then echo 'DRIFT  $LEGACY_SITE_ENABLED is still enabled and shadows $SITE_ENABLED. deploy/admin-apply.sh migrates it.' >&2; status=1; fi; "
@@ -162,7 +178,7 @@ drift_check_command() {
     c+="for f in $DROPIN_DIR/*; do if [ -e \"\$f\" ] && [ \"\$f\" != $DROPIN_HOST ]; then echo \"DRIFT  \$f overrides gl-serv.service and is not shipped by any deploy. Fold it into deploy/config/<env>.gl-serv.conf or remove it.\" >&2; status=1; fi; done; "
 
     local pair staged host
-    for pair in "$UNIT_STAGED $UNIT_HOST" "$DROPIN_STAGED $DROPIN_HOST" "$SITE_STAGED $SITE_HOST" ${staged_config:+"$staged_config $CONFIG_HOST"}; do
+    for pair in "$unit_staged $UNIT_HOST" "$dropin_staged $DROPIN_HOST" "$site_staged $SITE_HOST" ${staged_config:+"$staged_config $CONFIG_HOST"}; do
         staged=${pair% *}
         host=${pair#* }
         c+="if cmp -s $staged $host; then echo 'ok     $host'; "

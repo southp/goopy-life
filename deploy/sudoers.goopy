@@ -15,6 +15,7 @@
 # destination.
 goopy ALL=(root) NOPASSWD: \
     /usr/bin/cmp -s /tmp/sudoers.goopy /etc/sudoers.d/goopy, \
+    /usr/bin/cmp -s /tmp/sudoers.goopy.check /etc/sudoers.d/goopy, \
     /usr/bin/install -m 644 /tmp/gl-serv.service /etc/systemd/system/gl-serv.service, \
     /usr/bin/install -D -m 644 /tmp/gl-serv.deploy.conf /etc/systemd/system/gl-serv.service.d/deploy.conf, \
     /usr/bin/install -m 644 /tmp/gl-serv-api.nginx /etc/nginx/sites-available/gl-serv-api, \

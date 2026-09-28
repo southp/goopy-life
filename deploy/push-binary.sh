@@ -120,7 +120,7 @@ stage_host_artifacts "$TARGET" "$PORT"
 # The sudoers comparison is also what makes the rules below safe to add: a host
 # whose drop-in predates them fails here, by name, rather than as a bare sudo
 # denial partway through an install.
-run ssh -p "$PORT" "$TARGET" "$(drift_check_command deploy); exit \$status"
+run ssh -p "$PORT" "$TARGET" "$(drift_check_command deploy "" "${HOST_ARTIFACT_STAGED[@]}"); exit \$status"
 
 # The gate: the binary that was just uploaded has to be able to read the config
 # that was just staged, while the pair currently on the host is still installed

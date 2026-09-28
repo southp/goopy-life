@@ -413,8 +413,9 @@ Read-only. Compares each artifact above, plus the installed config, with what
 the repo holds for `<env>`, prints `ok` or `DRIFT` per file with a diff, and
 exits non-zero on any difference. Run it before a manual production deploy to
 see what the deploy is about to replace, and after any hand-edit on a host to
-see what the next deploy will undo. It needs no sudo rule beyond the `cmp` the
-deploy already uses.
+see what the next deploy will undo. It stages into a private directory, never
+the deploy's fixed `/tmp` paths, so it is safe to run while a deploy is in
+flight; its only sudo rule is its own pinned `cmp` of the sudoers drop-in.
 
 ### Applying the root-owned artifacts
 

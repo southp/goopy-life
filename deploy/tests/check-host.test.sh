@@ -17,6 +17,7 @@ CASES=0
 
 # shellcheck source=../host-artifacts.sh
 source "$DEPLOY_DIR/host-artifacts.sh"
+resolve_host_artifacts "$DEPLOY_DIR/config/dev.toml"
 
 # A scratch host on which every tracked artifact matches the repo: staged and
 # installed copies identical, the site linked, the config in place. Each case
@@ -47,7 +48,7 @@ assert_drift_verdict() {
     local name=$1 mode=$2 root=$3 want=$4
     CASES=$((CASES + 1))
     local remote status output
-    remote="$(drift_check_command "$mode" /tmp/config.toml); exit \$status"
+    remote="$(drift_check_command "$mode" /tmp/config.toml "${HOST_ARTIFACT_STAGED[@]}"); exit \$status"
     remote=$(printf '%s' "$remote" | sed -e "s|/etc/|$root/etc/|g" -e "s|/tmp/|$root/tmp/|g" -e "s|/opt/|$root/opt/|g")
     output=$(PATH="$root/bin:$PATH" sh -c "$remote" 2>&1)
     status=$?
@@ -148,20 +149,54 @@ assert_drift_verdict drift_reports_a_changed_config_in_check_mode check "$root" 
 echo
 echo "== check-host.sh =="
 
-# Everything it compares is uploaded to the path the comparison reads, and the
-# sudoers copy to the one path the drop-in's `cmp` rule names.
+# Everything it compares is uploaded into its own private directory, and the
+# sudoers copy to the one path its own `cmp` rule names.
 assert_emits check_host_uploads_the_environments_api_site \
-    "scp -P 22 $DEPLOY_DIR/config/dev.api.nginx goopy@dev.example.com:$SITE_STAGED" \
+    "scp -P 22 $DEPLOY_DIR/config/dev.api.nginx goopy@dev.example.com:<staging>/gl-serv-api.nginx" \
     goopy@dev.example.com dev
-assert_emits check_host_uploads_sudoers_to_the_pinned_path \
-    "scp -P 22 $DEPLOY_DIR/sudoers.goopy goopy@dev.example.com:$SUDOERS_STAGED" \
+assert_emits check_host_uploads_sudoers_to_its_own_pinned_path \
+    "scp -P 22 $DEPLOY_DIR/sudoers.goopy goopy@dev.example.com:$SUDOERS_CHECK_STAGED" \
     goopy@dev.example.com dev
 assert_emits check_host_uploads_the_environments_config \
-    "scp -P 22 $DEPLOY_DIR/config/prod.toml goopy@dev.example.com:/tmp/gl-serv.check.toml" \
+    "scp -P 22 $DEPLOY_DIR/config/prod.toml goopy@dev.example.com:<staging>/config.toml" \
     goopy@dev.example.com prod
 assert_emits check_host_honours_a_custom_ssh_port \
-    "scp -P 2222 $DEPLOY_DIR/gl-serv.service goopy@dev.example.com:$UNIT_STAGED" \
+    "scp -P 2222 $DEPLOY_DIR/gl-serv.service goopy@dev.example.com:<staging>/gl-serv.service" \
     goopy@dev.example.com dev 2222
+
+# A check can run while a deploy is between its upload and its install — CI
+# deploys on every merge. Nothing it uploads or removes may be a path the deploy
+# stages at, or the deploy installs this environment's files or loses its own.
+CASES=$((CASES + 1))
+dry_run=$(DRY_RUN=1 "$SCRIPT_UNDER_TEST" goopy@dev.example.com prod)
+shared=""
+for path in "${HOST_ARTIFACT_STAGED[@]}" "$CONFIG_HOST.new"; do
+    if grep -Eq -- "(:| )$path( |;|\$)" <<<"$dry_run"; then
+        shared+="$path "
+    fi
+done
+if [[ -z "$shared" ]]; then
+    echo "ok   — check_host_stays_off_the_deploys_staging_paths"
+else
+    echo "FAIL — check_host_stays_off_the_deploys_staging_paths"
+    echo "       also used by the deploy: $shared"
+    FAILURES=$((FAILURES + 1))
+fi
+
+# Its sudoers comparison is the only thing it runs under sudo, so it has to be
+# a rule the drop-in actually grants, or every check reports drift.
+CASES=$((CASES + 1))
+dry_run=$(DRY_RUN=1 "$SCRIPT_UNDER_TEST" goopy@dev.example.com dev)
+compare=$(grep -o 'sudo [^;&|>]*' <<<"$dry_run" | sed -e 's/ *2*$//' -e 's/^sudo //' -e 's/^-n //' | sort -u)
+# Every rule in the drop-in ends in a comma, so matching `<rule>,` rejects a
+# rule that merely starts with the command and permits more.
+if [[ -n "$compare" ]] && grep -Fq -- "/usr/bin/$compare," "$DEPLOY_DIR/sudoers.goopy"; then
+    echo "ok   — check_host_compares_sudoers_with_a_pinned_rule"
+else
+    echo "FAIL — check_host_compares_sudoers_with_a_pinned_rule"
+    echo "       not in sudoers.goopy: /usr/bin/$compare"
+    FAILURES=$((FAILURES + 1))
+fi
 
 # Read-only: the deploy account can write only /tmp and /opt/goopy-life on its
 # own, so anything else would have to go through sudo — and the one command it

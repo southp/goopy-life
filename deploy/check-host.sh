@@ -16,8 +16,9 @@
 #     ...linked from sites-enabled, with the pre-#139 api.goopy.life site gone
 #   /opt/goopy-life/config.toml                      deploy/config/<env>.toml
 #
-# It installs nothing and needs no rule beyond the `cmp` a deploy already uses:
-# the only file the deploy account cannot read is the sudoers drop-in. Run it
+# It installs nothing, and stages nowhere a deploy does, so it is safe to run
+# while one is in flight. Its only sudo rule is a `cmp` of its own: the one
+# file the deploy account cannot read is the sudoers drop-in. Run it
 # before a manual production deploy to see what the deploy is about to replace,
 # and after any hand-edit on a host to see what the next deploy will undo.
 #
@@ -43,10 +44,6 @@ CONFIG="$HERE/config/$ENVIRONMENT.toml"
 source "$HERE/host-artifacts.sh"
 resolve_host_artifacts "$CONFIG"
 
-# Staged apart from the deploy's $REMOTE_CONFIG.new, which a running deploy
-# would be about to rename into place.
-CONFIG_STAGED=/tmp/gl-serv.check.toml
-
 # Checked in dry-run too, unlike push-binary.sh's inputs: these are tracked
 # files, so a missing one is a mistyped environment rather than a build that
 # has not run yet.
@@ -55,12 +52,34 @@ if ! require_files check-host.sh "artifact for environment '$ENVIRONMENT'" "$CON
     exit 1
 fi
 
-stage_host_artifacts "$TARGET" "$PORT"
+# Nothing is staged at the deploy's paths. A deploy -- CI's, on every merge --
+# may be between its upload and its install at any moment; a check sharing its
+# /tmp names would hand it this environment's files, or delete them under it.
+# So everything goes to a private directory (mktemp -d is 0700), except the
+# sudoers copy: the root-run `cmp` can only be pinned to a literal path, so it
+# has one of its own, SUDOERS_CHECK_STAGED.
+if [[ "$DRY_RUN" == "1" ]]; then
+    STAGING="<staging>"
+    printf '%s\n' "ssh -p $PORT $TARGET mktemp -d"
+else
+    STAGING=$(ssh -p "$PORT" "$TARGET" mktemp -d)
+fi
+CHECK_STAGED=()
+for staged in "${HOST_ARTIFACT_STAGED[@]}"; do
+    if [[ "$staged" == "$SUDOERS_STAGED" ]]; then
+        CHECK_STAGED+=("$SUDOERS_CHECK_STAGED")
+    else
+        CHECK_STAGED+=("$STAGING/$(basename "$staged")")
+    fi
+done
+CONFIG_STAGED=$STAGING/config.toml
+
+stage_host_artifacts "$TARGET" "$PORT" "${CHECK_STAGED[@]}"
 run scp -P "$PORT" "$CONFIG" "$TARGET:$CONFIG_STAGED"
 
 # One command, so the staged copies are removed whatever the verdict and the
 # check leaves nothing behind on the host.
-CHECK="$(drift_check_command check "$CONFIG_STAGED"); "
-CHECK+="rm -f ${HOST_ARTIFACT_STAGED[*]} $CONFIG_STAGED; "
+CHECK="$(drift_check_command check "$CONFIG_STAGED" "${CHECK_STAGED[@]}"); "
+CHECK+="rm -rf $STAGING $SUDOERS_CHECK_STAGED; "
 CHECK+="if [ \$status -eq 0 ]; then echo 'check-host.sh: $TARGET matches $ENVIRONMENT'; else echo 'check-host.sh: $TARGET has drifted from $ENVIRONMENT' >&2; fi; exit \$status"
 run ssh -p "$PORT" "$TARGET" "$CHECK"
