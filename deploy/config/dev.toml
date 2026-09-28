@@ -6,7 +6,7 @@
 #
 # No secrets belong in this file: it is tracked in git and world-readable on the
 # droplet. When gl-serv eventually needs a credential, put it in a root-owned
-# EnvironmentFile referenced from deploy/gl-serv.service instead.
+# EnvironmentFile referenced from deploy/config/dev.gl-serv.conf instead.
 #
 # Every field here is parsed by gl_core::Config. A field the binary requires but
 # this file omits is a startup crash, which is why tests/committed_configs.rs parses

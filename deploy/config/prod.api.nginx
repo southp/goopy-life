@@ -1,0 +1,48 @@
+# nginx site for gl-serv's public API — production.
+#
+# This file IS what the host runs: deploy/push-binary.sh installs it at
+# /etc/nginx/sites-available/gl-serv-api, links it into sites-enabled, and
+# reloads nginx only if `nginx -t` accepts it. Edit it here, not there — a
+# hand-edit on the host is overwritten by the next deploy.
+#
+# server_name and the certificate path must name prod.toml's `domain`, and
+# proxy_pass its api_address; backend/gl-core/tests/committed_configs.rs fails
+# the PR that lets them disagree. The site filename is deliberately not the
+# domain: the one it replaced was called api.goopy.life on a host that served
+# api.southp.dev (#139).
+#
+# REVIEW: a copy of dev's, like prod.toml, and tied to prod.toml's `domain` by
+# the same test — change the two together when #147 settles production's name.
+
+server {
+    listen 80;
+    server_name api.southp.dev;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name api.southp.dev;
+
+    ssl_certificate     /etc/letsencrypt/live/southp.dev/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/southp.dev/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;  # CI pins this to prod.toml's api_address
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        # gl-serv's per-IP rate limiter keys on X-Real-IP, so this must always
+        # overwrite whatever the client sent. That only holds as long as nginx
+        # is the sole path to gl-serv, which is why deploy/config/*.toml set
+        # bind_address = "127.0.0.1:3000" and a CI test fails any deployed
+        # config that widens it (#149). Widen it here and the limiter is
+        # trivially bypassed; a firewall on port 3000 is belt and braces, but it
+        # is host state no deploy manages (#139).
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

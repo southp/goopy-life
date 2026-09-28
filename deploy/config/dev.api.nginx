@@ -1,27 +1,34 @@
-# Nginx config for api.goopy.life — reverse-proxy to gl-serv (port 3000).
-# Install: copy to /etc/nginx/sites-available/api.goopy.life
-#          then: ln -s /etc/nginx/sites-available/api.goopy.life \
-#                      /etc/nginx/sites-enabled/api.goopy.life
-#          then: nginx -t && systemctl reload nginx
+# nginx site for gl-serv's public API — dev droplet.
+#
+# This file IS what the host runs: deploy/push-binary.sh installs it at
+# /etc/nginx/sites-available/gl-serv-api, links it into sites-enabled, and
+# reloads nginx only if `nginx -t` accepts it. Edit it here, not there — a
+# hand-edit on the host is overwritten by the next deploy.
+#
+# server_name and the certificate path must name dev.toml's `domain`, and
+# proxy_pass its api_address; backend/gl-core/tests/committed_configs.rs fails
+# the PR that lets them disagree. The site filename is deliberately not the
+# domain: the one it replaced was called api.goopy.life on a host that served
+# api.southp.dev (#139).
 
 server {
     listen 80;
-    server_name api.goopy.life;
+    server_name api.southp.dev;
     return 301 https://$host$request_uri;
 }
 
 server {
     listen 443 ssl;
-    server_name api.goopy.life;
+    server_name api.southp.dev;
 
-    ssl_certificate     /etc/letsencrypt/live/goopy.life/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/goopy.life/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/southp.dev/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/southp.dev/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers HIGH:!aNULL:!MD5;
     ssl_prefer_server_ciphers on;
 
     location / {
-        proxy_pass http://127.0.0.1:3000;  # port must match api_port in config.toml
+        proxy_pass http://127.0.0.1:3000;  # CI pins this to dev.toml's api_address
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         # gl-serv's per-IP rate limiter keys on X-Real-IP, so this must always

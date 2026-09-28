@@ -175,3 +175,183 @@ fn a_ghost_deploy_config_names_a_version_stamped_source_dir() {
         );
     }
 }
+
+/// The two host artifacts shipped alongside each `<env>.toml` (#139): the
+/// systemd drop-in and the api nginx site. `deploy/push-binary.sh` finds them
+/// by this same naming, so a missing one is a deploy that fails on the host
+/// rather than here.
+const HOST_ARTIFACT_SUFFIXES: [&str; 2] = ["gl-serv.conf", "api.nginx"];
+
+/// `deploy/config/<env>.<suffix>` for the environment `config` belongs to.
+fn host_artifact(config: &std::path::Path, suffix: &str) -> PathBuf {
+    let env = config
+        .file_stem()
+        .expect("a deployed config has a file name")
+        .to_string_lossy();
+    config.with_file_name(format!("{env}.{suffix}"))
+}
+
+#[test]
+fn every_deployed_config_ships_its_host_artifacts() {
+    for path in deployed_configs() {
+        for suffix in HOST_ARTIFACT_SUFFIXES {
+            let artifact = host_artifact(&path, suffix);
+            assert!(
+                artifact.is_file(),
+                "{} has no {} — the deploy installs one per environment and \
+                 stops on a host where it is missing",
+                path.display(),
+                artifact.display()
+            );
+        }
+    }
+}
+
+/// The reverse direction: a host artifact whose environment has no `.toml`
+/// is one nothing ever ships — most likely a typo in the environment name,
+/// leaving the file someone meant to edit untouched.
+#[test]
+fn every_host_artifact_belongs_to_a_deployed_config() {
+    let dir = repo_root().join("deploy/config");
+    for entry in std::fs::read_dir(&dir).expect("deploy/config should be readable") {
+        let path = entry.expect("readable directory entry").path();
+        let name = path
+            .file_name()
+            .expect("entries have names")
+            .to_string_lossy();
+        let Some(env) = HOST_ARTIFACT_SUFFIXES
+            .iter()
+            .find_map(|suffix| name.strip_suffix(&format!(".{suffix}")))
+        else {
+            continue;
+        };
+        assert!(
+            dir.join(format!("{env}.toml")).is_file(),
+            "{} belongs to environment `{env}`, which has no {env}.toml — the \
+             deploy will never ship it",
+            path.display()
+        );
+    }
+}
+
+/// The values of every `directive value;` line in an nginx site, in order.
+/// Enough for the flat, hand-written sites in `deploy/config/`; not a parser.
+fn nginx_directive(site: &str, directive: &str) -> Vec<String> {
+    site.lines()
+        .map(|line| line.split('#').next().unwrap_or_default().trim())
+        .filter_map(|line| line.strip_prefix(directive))
+        .filter(|rest| rest.starts_with(char::is_whitespace))
+        .map(|rest| rest.trim().trim_end_matches(';').trim().to_string())
+        .collect()
+}
+
+/// Every deployed config paired with its api site, for the tests below:
+/// `(config path, parsed config, site path, site text)`.
+fn api_sites() -> Vec<(PathBuf, Config, PathBuf, String)> {
+    deployed_configs()
+        .into_iter()
+        .map(|path| {
+            let cfg = Config::from_file(&path).expect("deployed configs parse");
+            let site_path = host_artifact(&path, "api.nginx");
+            let site = std::fs::read_to_string(&site_path).expect("the api site is readable");
+            (path, cfg, site_path, site)
+        })
+        .collect()
+}
+
+/// Asserts `directive` appears in the site at least once and that every value
+/// it takes passes `ok`. A missing directive fails too: a check over no values
+/// would pass by default. `wrong` says what a failing value got wrong.
+fn assert_every_value(
+    site_path: &std::path::Path,
+    site: &str,
+    directive: &str,
+    ok: impl Fn(&str) -> bool,
+    wrong: &str,
+) {
+    let values = nginx_directive(site, directive);
+    assert!(
+        !values.is_empty(),
+        "{} has no {directive}",
+        site_path.display()
+    );
+    for value in values {
+        assert!(
+            ok(&value),
+            "{}: {directive} {value} {wrong}",
+            site_path.display()
+        );
+    }
+}
+
+/// The api site used to be a single prod-shaped file that no deploy installed,
+/// and the dev droplet quietly ran a different one under the same name (#139).
+/// Per-environment files fix that only as long as each still describes its
+/// own environment — so `server_name` and the certificate path are pinned to
+/// the `domain` in the `.toml` shipped beside it. The per-instance sites derive
+/// both from that same key (`goopy_provisioner/nginx.rs`), so this is also
+/// what keeps the api and its instances on one certificate.
+#[test]
+fn every_api_site_serves_its_configs_domain() {
+    for (path, cfg, site_path, site) in api_sites() {
+        let name = format!("api.{}", cfg.domain);
+        assert_every_value(
+            &site_path,
+            &site,
+            "server_name",
+            |value| value == name,
+            &format!("is not {name}, the name {} configures", path.display()),
+        );
+
+        let cert_dir = format!("/etc/letsencrypt/live/{}/", cfg.domain);
+        for directive in ["ssl_certificate", "ssl_certificate_key"] {
+            assert_every_value(
+                &site_path,
+                &site,
+                directive,
+                |value| value.starts_with(&cert_dir),
+                &format!(
+                    "is not under {cert_dir}, the certificate {} names via its domain",
+                    path.display()
+                ),
+            );
+        }
+    }
+}
+
+/// The site's `proxy_pass` has to reach the address gl-serv actually listens
+/// on. It used to say "port must match api_port in config.toml" in a comment,
+/// naming a key that no longer exists; a mismatch is a 502 on every API call
+/// and nothing else.
+#[test]
+fn every_api_site_proxies_to_its_configs_api_address() {
+    for (path, cfg, site_path, site) in api_sites() {
+        let upstream = format!("http://{}", cfg.resolved_api_address());
+        assert_every_value(
+            &site_path,
+            &site,
+            "proxy_pass",
+            |value| value == upstream,
+            &format!("is not {upstream}, where {} listens", path.display()),
+        );
+    }
+}
+
+/// `deploy/gl-serv.service` is installed verbatim on every host, so anything
+/// that varies between them belongs in the per-environment drop-in. An
+/// `Environment=` line is the one that has already been in the wrong place:
+/// `RUST_LOG=debug` sat in the shared unit, where #91's move to `info` could
+/// only have been made for every environment at once.
+#[test]
+fn the_shared_unit_carries_no_environment() {
+    let unit_path = repo_root().join("deploy/gl-serv.service");
+    let unit = std::fs::read_to_string(&unit_path).expect("the unit is readable");
+    for line in unit.lines().map(str::trim) {
+        assert!(
+            !line.starts_with("Environment"),
+            "{} sets `{line}` for every environment at once — move it to \
+             deploy/config/<env>.gl-serv.conf",
+            unit_path.display()
+        );
+    }
+}
