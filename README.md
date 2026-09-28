@@ -37,10 +37,10 @@ The service runs as a dedicated `goopy` account, which is also the account you d
 sudo useradd --system --create-home --shell /bin/bash goopy
 ssh-copy-id goopy@<droplet>
 
-# 1. Install the sudoers drop-in. No deploy ever installs it — it grants the
-#    deploy its rights — so it goes on by hand, and every deploy checks it.
-sudo visudo -cf deploy/sudoers.goopy
-sudo install -m 0440 -o root -g root deploy/sudoers.goopy /etc/sudoers.d/goopy
+# 1. From your machine, as an admin with password sudo: install the sudoers
+#    drop-in and the nginx cache zone. No deploy installs these — the drop-in
+#    grants the deploy its rights — and every deploy checks the drop-in.
+./deploy/admin-apply.sh <admin>@<droplet> <env>
 
 # 2. Set the ZFS pool mountpoint to match base_dir in config.toml (default: /opt/goopy-life/data).
 #    gl-serv creates/destroys child datasets via sudo (sudoers rules restrict to zpool_ghost/*).

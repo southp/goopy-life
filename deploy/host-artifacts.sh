@@ -93,9 +93,9 @@ drift_check_command() {
     # `cmp` rule it is a password prompt that cannot be answered, and the line
     # below already says what that means and what to do.
     c+="if sudo cmp -s $SUDOERS_STAGED $SUDOERS_HOST 2>/dev/null; then echo 'ok     $SUDOERS_HOST'; "
-    c+="else echo 'DRIFT  $SUDOERS_HOST does not match deploy/sudoers.goopy, or predates the rule that lets a deploy compare it. No deploy installs it: apply it by hand (docs/DEPLOYMENT.md), then re-run.' >&2; status=1; fi; "
+    c+="else echo 'DRIFT  $SUDOERS_HOST does not match deploy/sudoers.goopy, or predates the rule that lets a deploy compare it. No deploy installs it: run deploy/admin-apply.sh as an admin, then re-run.' >&2; status=1; fi; "
 
-    c+="if [ -e $LEGACY_SITE_ENABLED ]; then echo 'DRIFT  $LEGACY_SITE_ENABLED is still enabled and shadows $SITE_ENABLED. Remove it by hand (docs/DEPLOYMENT.md).' >&2; status=1; fi; "
+    c+="if [ -e $LEGACY_SITE_ENABLED ]; then echo 'DRIFT  $LEGACY_SITE_ENABLED is still enabled and shadows $SITE_ENABLED. deploy/admin-apply.sh migrates it.' >&2; status=1; fi; "
 
     c+="for f in $DROPIN_DIR/*; do if [ -e \"\$f\" ] && [ \"\$f\" != $DROPIN_HOST ]; then echo \"DRIFT  \$f overrides gl-serv.service and is not shipped by any deploy. Fold it into deploy/config/<env>.gl-serv.conf or remove it.\" >&2; status=1; fi; done; "
 

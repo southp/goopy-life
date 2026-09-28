@@ -28,11 +28,12 @@ uses, so the two paths cannot drift apart.
 The workflow ships **both binaries, the config and the host artifacts** —
 `gl-serv` and `gl-cli` (see [The maintenance CLI on the
 host](#the-maintenance-cli-on-the-host)), and the systemd unit, its drop-in and
-the api nginx site (see [Host artifacts](#host-artifacts)). The sudoers drop-in,
-the nginx cache zone and the ZFS pool are still one-time manual setup (see the
-[droplet setup](../README.md#droplet-setup-one-time) steps); change one of those
-and you still have to apply it by hand — the deploy checks the sudoers drop-in
-and fails until you do.
+the api nginx site (see [Host artifacts](#host-artifacts)). The sudoers drop-in
+and the nginx cache zone are applied by an admin with `deploy/admin-apply.sh`
+(see [Applying the root-owned artifacts](#applying-the-root-owned-artifacts)) —
+the deploy checks the sudoers drop-in and fails until that has run. The ZFS pool
+is still one-time manual setup (see the
+[droplet setup](../README.md#droplet-setup-one-time) steps).
 
 ### One-time setup
 
@@ -387,18 +388,14 @@ deploy its own rights, so a deploy that installed it could revoke them with one
 bad push, recoverable only from a console. Every deploy instead compares the
 host's copy with `deploy/sudoers.goopy` — through a pinned `sudo cmp`, since the
 file is `0440 root` — and stops **before changing anything** if they differ.
-Changing it is a manual act, done before the deploy that needs it:
-
-```bash
-# as an admin on the host, from a checkout of the commit about to deploy
-sudo visudo -cf deploy/sudoers.goopy
-sudo install -m 0440 -o root -g root deploy/sudoers.goopy /etc/sudoers.d/goopy
-```
+Changing it is an admin's act, done with
+[`admin-apply.sh`](#applying-the-root-owned-artifacts) before the deploy that
+needs it.
 
 This is also why a host's *first* deploy never creates the drop-in: the deploy
-needs its rules before it can install anything. A new host gets it by hand in
-the [droplet setup](../README.md#droplet-setup-one-time), and the first deploy
-is what verifies it.
+needs its rules before it can install anything. A new host gets it from
+`admin-apply.sh` during the [droplet setup](../README.md#droplet-setup-one-time),
+and the first deploy is what verifies it.
 
 Two more things stop a deploy, because it cannot fix either: a file in
 `gl-serv.service.d/` other than `deploy.conf` (a `systemctl edit` override
@@ -419,24 +416,41 @@ see what the deploy is about to replace, and after any hand-edit on a host to
 see what the next deploy will undo. It needs no sudo rule beyond the `cmp` the
 deploy already uses.
 
+### Applying the root-owned artifacts
+
+```bash
+./deploy/admin-apply.sh <admin@host> <env> [ssh-port]   # e.g. spdev dev
+```
+
+Run from your machine, as an account with **password sudo** on the host — not
+`goopy`, whose rights are exactly the pinned list. One run, one password prompt,
+and it applies everything a deploy may not:
+
+| Tracked | Installed at | Validated by |
+|---|---|---|
+| `deploy/sudoers.goopy` | `/etc/sudoers.d/goopy` | `visudo -cf` before, `visudo -c` after |
+| `deploy/nginx/goopy-cache.conf` | `/etc/nginx/conf.d/goopy-cache.conf` | `nginx -t` |
+
+Each file is compared first and left alone if it already matches, so it is safe
+to run whenever in doubt — an up-to-date host sees no change and no reload. A
+change that fails its check is never left in place: the sudoers drop-in is
+checked **before** it reaches `/etc/sudoers.d` (one broken file there disables
+sudo for every account) and arrives by an atomic rename; anything rejected after
+the fact is put back to the previous copy.
+
+When to run it: after merging a change to either file, **before** the deploy
+that follows — for the dev droplet that deploy starts on merge, so run it just
+before merging. Then `check-host.sh` confirms the host matches.
+
 ### Migrating a host from before #139
 
 A host set up before #139 fails its first deploy, by design: its sudoers drop-in
-lacks the new rules, and its api site is enabled as `api.goopy.life`. As an
-admin on the host, from a checkout of the commit about to deploy — this order
-keeps the API up throughout:
-
-```bash
-# 1. The new rules, so the deploy can install the rest.
-sudo visudo -cf deploy/sudoers.goopy
-sudo install -m 0440 -o root -g root deploy/sudoers.goopy /etc/sudoers.d/goopy
-
-# 2. The api site under its new name, then retire the old one in the same reload.
-sudo install -m 644 deploy/config/<env>.api.nginx /etc/nginx/sites-available/gl-serv-api
-sudo ln -sf /etc/nginx/sites-available/gl-serv-api /etc/nginx/sites-enabled/gl-serv-api
-sudo rm /etc/nginx/sites-enabled/api.goopy.life /etc/nginx/sites-available/api.goopy.life
-sudo nginx -t && sudo systemctl reload nginx
-```
+lacks the new rules, and its api site is enabled as `api.goopy.life`.
+`admin-apply.sh` handles both. Alongside the new drop-in it swaps
+`sites-enabled/api.goopy.life` for `gl-serv-api` (from
+`deploy/config/<env>.api.nginx`) in a single reload, so the API stays up, and
+re-enables the old site if nginx rejects the new one. On any other host that
+step is a no-op.
 
 Then deploy. It installs the unit without `RUST_LOG` and the drop-in that now
 carries it, and `check-host.sh` should report the host clean.
@@ -450,6 +464,7 @@ droplet, network or key needed:
 ```bash
 ./deploy/tests/push-binary.test.sh
 ./deploy/tests/check-host.test.sh
+./deploy/tests/admin-apply.test.sh
 ```
 
 `check-host.test.sh` also covers the drift comparison both scripts share
