@@ -139,7 +139,10 @@ assert_sudoers_pins_every_sudo_command() {
         # an absolute path in front of the very same arguments. Matching the
         # whole rule rather than a substring: a rule that merely *contains*
         # the command, with more after it, does not permit it.
+        # -n (never prompt) is sudo's own option, not part of the command the
+        # rule names.
         local wanted="${command#sudo }" rule found=0
+        wanted="${wanted#-n }"
         while IFS= read -r rule; do
             if [[ "$rule" == */"$wanted" && "${rule%%/"$wanted"}" != *" "* ]]; then
                 found=1
@@ -505,7 +508,7 @@ assert_emits push_binary_picks_the_artifacts_of_the_configs_environment \
 # grants the deploy its rights would let one bad push revoke them.
 CASES=$((CASES + 1))
 dry_run=$(DRY_RUN=1 "$SCRIPT_UNDER_TEST" goopy@dev.example.com "$SERV" "$CLI" "$CFG")
-if grep -q 'sudo cmp -s /tmp/sudoers.goopy /etc/sudoers.d/goopy' <<<"$dry_run" \
+if grep -q 'sudo -n cmp -s /tmp/sudoers.goopy /etc/sudoers.d/goopy' <<<"$dry_run" \
     && ! grep -Eq '(install|tee|cp|mv|ln) [^;&]*/etc/sudoers' <<<"$dry_run"; then
     echo "ok   — push_binary_compares_sudoers_but_never_installs_it"
 else
@@ -517,7 +520,7 @@ fi
 # before anything is installed, and the api site ahead of the binaries.
 assert_steps_in_order push_binary_checks_the_host_before_changing_anything "$SERV" "$CLI" "$CFG" \
     "scp -P 22 $DEPLOY_DIR/sudoers.goopy" \
-    'sudo cmp -s /tmp/sudoers.goopy /etc/sudoers.d/goopy' \
+    'sudo -n cmp -s /tmp/sudoers.goopy /etc/sudoers.d/goopy' \
     '--check-config --config /opt/goopy-life/config.toml.new' \
     'sudo nginx -t' \
     'sudo install -m 644 /tmp/gl-serv.service' \
@@ -526,7 +529,7 @@ assert_steps_in_order push_binary_checks_the_host_before_changing_anything "$SER
 # A host whose sudoers drop-in has drifted stops the deploy before a single
 # file changes — the site and the binaries alike.
 assert_failed_step_stops_the_deploy push_binary_stops_when_sudoers_has_drifted \
-    'sudo cmp -s /tmp/sudoers.goopy' 'sudo install'
+    'sudo -n cmp -s /tmp/sudoers.goopy' 'sudo install'
 
 # A rejected api site stops the deploy before gl-serv's binary is replaced.
 assert_failed_step_stops_the_deploy push_binary_stops_when_nginx_rejects_the_site \

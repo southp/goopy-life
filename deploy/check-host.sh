@@ -81,5 +81,5 @@ run scp -P "$PORT" "$CONFIG" "$TARGET:$CONFIG_STAGED"
 # check leaves nothing behind on the host.
 CHECK="$(drift_check_command check "$CONFIG_STAGED" "${CHECK_STAGED[@]}"); "
 CHECK+="rm -rf $STAGING $SUDOERS_CHECK_STAGED; "
-CHECK+="if [ \$status -eq 0 ]; then echo 'check-host.sh: $TARGET matches $ENVIRONMENT'; else echo 'check-host.sh: $TARGET has drifted from $ENVIRONMENT' >&2; fi; exit \$status"
+CHECK+="if [ \$rc -eq 0 ]; then echo 'check-host.sh: $TARGET matches $ENVIRONMENT'; else echo 'check-host.sh: $TARGET has drifted from $ENVIRONMENT' >&2; fi; exit \$rc"
 run ssh -p "$PORT" "$TARGET" "$CHECK"

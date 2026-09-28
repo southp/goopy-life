@@ -134,8 +134,8 @@ stage_host_artifacts() {
 }
 
 # Emits a remote sh command comparing every staged artifact with the host's
-# copy. It prints one line per artifact and leaves `status` at 1 if anything
-# must stop the caller; the caller appends its own `exit $status`, so it can
+# copy. It prints one line per artifact and leaves `rc` at 1 if anything
+# must stop the caller; the caller appends its own `exit $rc`, so it can
 # clean up first.
 #
 #   $1  `deploy` — the deploy is about to install the unit, drop-in and site,
@@ -159,23 +159,28 @@ drift_check_command() {
     local unit_staged=$3 dropin_staged=$4 site_staged=$5 sudoers_staged=$6
     local replaced=":" differs="differs from the repo" missing="is missing"
     if [[ "$mode" == check ]]; then
-        replaced="status=1"
+        replaced="rc=1"
     else
         differs="differs from the repo; this deploy replaces it"
         missing="is missing; this deploy installs it"
     fi
 
-    local c="status=0; "
+    # The result is `rc`, not `status`: this runs in the remote login shell, and
+    # zsh treats `status` as a read-only special. Nothing below may rely on a
+    # bash- or sh-only behaviour for the same reason -- hence no bare glob,
+    # which zsh aborts on when it matches nothing.
+    local c="rc=0; "
 
-    # sudo's own complaint is dropped: on a host whose drop-in predates the
-    # `cmp` rule it is a password prompt that cannot be answered, and the line
-    # below already says what that means and what to do.
-    c+="if sudo cmp -s $sudoers_staged $SUDOERS_HOST 2>/dev/null; then echo 'ok     $SUDOERS_HOST'; "
-    c+="else echo 'DRIFT  $SUDOERS_HOST does not match deploy/sudoers.goopy, or predates the rule that lets a deploy compare it. No deploy installs it: run deploy/admin-apply.sh as an admin, then re-run.' >&2; status=1; fi; "
+    # -n, so a host whose drop-in predates the `cmp` rule fails at once instead
+    # of prompting for a password nobody can type -- over a tty that prompt
+    # would sit on the discarded stderr and look like a hang. sudo's own
+    # complaint is dropped: the line below says what it means and what to do.
+    c+="if sudo -n cmp -s $sudoers_staged $SUDOERS_HOST 2>/dev/null; then echo 'ok     $SUDOERS_HOST'; "
+    c+="else echo 'DRIFT  $SUDOERS_HOST does not match deploy/sudoers.goopy, or predates the rule that lets a deploy compare it. No deploy installs it: run deploy/admin-apply.sh as an admin, then re-run.' >&2; rc=1; fi; "
 
-    c+="if [ -e $LEGACY_SITE_ENABLED ]; then echo 'DRIFT  $LEGACY_SITE_ENABLED is still enabled and shadows $SITE_ENABLED. deploy/admin-apply.sh migrates it.' >&2; status=1; fi; "
+    c+="if [ -e $LEGACY_SITE_ENABLED ]; then echo 'DRIFT  $LEGACY_SITE_ENABLED is still enabled and shadows $SITE_ENABLED. deploy/admin-apply.sh migrates it.' >&2; rc=1; fi; "
 
-    c+="for f in $DROPIN_DIR/*; do if [ -e \"\$f\" ] && [ \"\$f\" != $DROPIN_HOST ]; then echo \"DRIFT  \$f overrides gl-serv.service and is not shipped by any deploy. Fold it into deploy/config/<env>.gl-serv.conf or remove it.\" >&2; status=1; fi; done; "
+    c+="for f in \$(ls -A $DROPIN_DIR 2>/dev/null); do if [ $DROPIN_DIR/\$f != $DROPIN_HOST ]; then echo \"DRIFT  $DROPIN_DIR/\$f overrides gl-serv.service and is not shipped by any deploy. Fold it into deploy/config/<env>.gl-serv.conf or remove it.\" >&2; rc=1; fi; done; "
 
     local pair staged host
     for pair in "$unit_staged $UNIT_HOST" "$dropin_staged $DROPIN_HOST" "$site_staged $SITE_HOST" ${staged_config:+"$staged_config $CONFIG_HOST"}; do

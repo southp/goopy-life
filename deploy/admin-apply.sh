@@ -88,8 +88,10 @@ REMOTE_ENV="SUDOERS_HOST=$SUDOERS_HOST CACHE_CONF_HOST=$CACHE_CONF_HOST SITE_HOS
 REMOTE_ENV+=" LEGACY_SITE_HOST=$LEGACY_SITE_HOST LEGACY_SITE_ENABLED=$LEGACY_SITE_ENABLED"
 
 # -t so sudo can ask for the password; a single sudo for the whole run, so it
-# asks once. The staging directory goes whatever the outcome.
-run ssh -t -p "$PORT" "$TARGET" "sudo env $REMOTE_ENV sh $STAGING/admin-apply.remote.sh $STAGING; status=\$?; rm -rf $STAGING; exit \$status"
+# asks once. The staging directory goes whatever the outcome. The exit code is
+# kept in `rc`, not `status`: this line runs in the admin's login shell, and
+# zsh treats `status` as read-only.
+run ssh -t -p "$PORT" "$TARGET" "sudo env $REMOTE_ENV sh $STAGING/admin-apply.remote.sh $STAGING; rc=\$?; rm -rf $STAGING; exit \$rc"
 
 if [[ "$DRY_RUN" != "1" ]]; then
     echo

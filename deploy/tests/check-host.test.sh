@@ -37,7 +37,8 @@ make_matching_host() {
     done
     ln -s "$root$SITE_HOST" "$root$SITE_ENABLED"
     # Runs its command, as the pinned rule would allow.
-    printf '#!/bin/sh\nexec "$@"\n' >"$root/bin/sudo"
+    # -n is sudo's own option (never prompt); the command follows it.
+    printf '#!/bin/sh\nif [ "$1" = -n ]; then\n    shift\nfi\nexec "$@"\n' >"$root/bin/sudo"
     chmod +x "$root/bin/sudo"
     printf '%s' "$root"
 }
@@ -45,12 +46,12 @@ make_matching_host() {
 # Runs the comparison in `mode` against the scratch host and asserts its exit
 # status. `status` is 0 (host accepted) or 1 (drift that stops the caller).
 assert_drift_verdict() {
-    local name=$1 mode=$2 root=$3 want=$4
+    local name=$1 mode=$2 root=$3 want=$4 shell=${5:-sh}
     CASES=$((CASES + 1))
     local remote status output
-    remote="$(drift_check_command "$mode" /tmp/config.toml "${HOST_ARTIFACT_STAGED[@]}"); exit \$status"
+    remote="$(drift_check_command "$mode" /tmp/config.toml "${HOST_ARTIFACT_STAGED[@]}"); exit \$rc"
     remote=$(printf '%s' "$remote" | sed -e "s|/etc/|$root/etc/|g" -e "s|/tmp/|$root/tmp/|g" -e "s|/opt/|$root/opt/|g")
-    output=$(PATH="$root/bin:$PATH" sh -c "$remote" 2>&1)
+    output=$(PATH="$root/bin:$PATH" "$shell" -c "$remote" 2>&1)
     status=$?
     /bin/rm -rf "$root"
 
@@ -146,6 +147,19 @@ root=$(make_matching_host)
 printf 'hand-edited\n' >"$root/opt/goopy-life/config.toml"
 assert_drift_verdict drift_reports_a_changed_config_in_check_mode check "$root" 1
 
+# The comparison runs in the deploy account's login shell, whatever that is.
+# Under zsh, `status` is a read-only special and a glob matching nothing aborts
+# the command, so both would turn a clean host into a failed deploy. Run there
+# for real when zsh is installed: a clean host, and one with no drop-in
+# directory at all, where a bare glob would have nothing to match.
+if command -v zsh >/dev/null 2>&1; then
+    root=$(make_matching_host)
+    assert_drift_verdict drift_accepts_a_matching_host_under_zsh check "$root" 0 zsh
+    root=$(make_matching_host)
+    rm -r "$root$DROPIN_DIR"
+    assert_drift_verdict drift_survives_a_missing_drop_in_dir_under_zsh deploy "$root" 0 zsh
+fi
+
 echo
 echo "== check-host.sh =="
 
@@ -203,7 +217,7 @@ fi
 # may run there is the sudoers comparison.
 CASES=$((CASES + 1))
 dry_run=$(DRY_RUN=1 "$SCRIPT_UNDER_TEST" goopy@dev.example.com dev)
-privileged=$(grep -o 'sudo [a-z]*' <<<"$dry_run" | sort -u)
+privileged=$(grep -o 'sudo \(-n \)\?[a-z]*' <<<"$dry_run" | sed 's/-n //' | sort -u)
 if [[ "$privileged" == "sudo cmp" ]] && ! grep -q '/opt/goopy-life/config.toml.new' <<<"$dry_run"; then
     echo "ok   — check_host_changes_nothing_on_the_host"
 else

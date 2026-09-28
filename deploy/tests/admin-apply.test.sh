@@ -4,7 +4,7 @@
 # Run: ./deploy/tests/admin-apply.test.sh
 #
 # The host half runs for real against a scratch directory standing in for the
-# host's filesystem (its ROOT), with stub visudo, nginx, systemctl and chown
+# host's filesystem (its ROOT), with stub visudo, nginx and systemctl
 # whose verdicts each case chooses. No droplet, no root, no network required.
 set -uo pipefail
 
@@ -49,9 +49,8 @@ make_host() {
     cp "$root/staging/gl-serv-api" "$root/etc/nginx/sites-available/gl-serv-api"
     ln -s "$root/etc/nginx/sites-available/gl-serv-api" "$root/etc/nginx/sites-enabled/gl-serv-api"
     verdicts "$root" 0 0 0
-    printf '#!/bin/sh\nexit 0\n' >"$root/bin/chown"
     printf '#!/bin/sh\necho "$*" >>"%s/reloads"\n' "$root" >"$root/bin/systemctl"
-    chmod +x "$root/bin/chown" "$root/bin/systemctl"
+    chmod +x "$root/bin/systemctl"
     printf '%s' "$root"
 }
 
@@ -240,12 +239,34 @@ echo "== admin-apply.sh =="
 dry_run=$(DRY_RUN=1 "$LOCAL_HALF" admin@dev.example.com dev 2>&1)
 expected="ssh -t -p 22 admin@dev.example.com sudo env SUDOERS_HOST=$SUDOERS_HOST CACHE_CONF_HOST=$CACHE_CONF_HOST"
 expected+=" SITE_HOST=$SITE_HOST SITE_ENABLED=$SITE_ENABLED LEGACY_SITE_HOST=$LEGACY_SITE_HOST LEGACY_SITE_ENABLED=$LEGACY_SITE_ENABLED"
-expected+=' sh <staging>/admin-apply.remote.sh <staging>; status=$?; rm -rf <staging>; exit $status'
+expected+=' sh <staging>/admin-apply.remote.sh <staging>; rc=$?; rm -rf <staging>; exit $rc'
 if grep -Fqx -- "$expected" <<<"$dry_run" \
     && [[ "$(grep -c ' sudo ' <<<"$dry_run")" -eq 1 ]]; then
     pass admin_apply_asks_for_the_password_once
 else
     fail admin_apply_asks_for_the_password_once "$dry_run"
+fi
+
+# The ssh line runs in the admin's login shell, which may be zsh — where
+# `status` is read-only, so a successful run used to report failure and leave
+# the staging directory behind. Run the line for real under zsh, with a stub
+# sudo that succeeds, and require a clean exit and the directory gone.
+if command -v zsh >/dev/null 2>&1; then
+    root=$(mktemp -d)
+    mkdir -p "$root/bin" "$root/staging"
+    printf '#!/bin/sh\nexit 0\n' >"$root/bin/sudo"
+    chmod +x "$root/bin/sudo"
+    remote=$(DRY_RUN=1 "$LOCAL_HALF" admin@dev.example.com dev | grep '^ssh -t ' | sed 's|^ssh -t -p [0-9]* [^ ]* ||')
+    remote=${remote//<staging>/$root/staging}
+    PATH="$root/bin:$PATH" zsh -c "$remote" >/dev/null 2>&1
+    STATUS=$?
+    if [[ "$STATUS" -eq 0 && ! -e "$root/staging" ]]; then
+        pass admin_apply_reports_success_under_a_zsh_login_shell
+    else
+        fail admin_apply_reports_success_under_a_zsh_login_shell "exit $STATUS" \
+            "staging left behind: $([[ -e "$root/staging" ]] && echo yes || echo no)"
+    fi
+    rm -rf "$root"
 fi
 
 # Each environment migrates to its own api site, never another's.

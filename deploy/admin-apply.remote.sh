@@ -74,8 +74,8 @@ else
         cp -p "$SUDOERS" "$STAGING/sudoers.previous"
         had_sudoers=1
     fi
+    # Run as root, so install creates it root:root, as sudo requires.
     install -m 0440 "$STAGING/sudoers.goopy" "$SUDOERS.new"
-    chown root:root "$SUDOERS.new"
     mv -f "$SUDOERS.new" "$SUDOERS"
     if ! visudo -c >/dev/null; then
         put_back "$had_sudoers" "$STAGING/sudoers.previous" "$SUDOERS"
