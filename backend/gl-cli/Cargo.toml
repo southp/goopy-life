@@ -13,7 +13,4 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-# `test-utils` exposes MockSysRunner, so the mode tests can watch what a built
-# provisioner would run on teardown without running it.
-gl-core = { path = "../gl-core", features = ["test-utils"] }
 tempfile = "3"

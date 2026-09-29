@@ -337,18 +337,18 @@ impl Config {
         SocketAddr::new(loopback, bind.port()).to_string()
     }
 
-    /// Build the provisioner named by `self.provisioner.kind`.
+    /// Build the provisioner named by `self.provisioner.kind`, in the mode
+    /// `self.dev_mode` names.
     ///
-    /// `dev_mode` is passed explicitly, but both binaries pass the config's own
-    /// `dev_mode`: it is authoritative (#163). `gl-cli`'s `--prod` only checks
-    /// it. Tests pass either value to exercise both paths.
+    /// The config's `dev_mode` is the only source of the mode, so the two
+    /// binaries cannot disagree on it (#163). `gl-cli`'s `--prod` only checks
+    /// it.
     ///
     /// Returned boxed because the kind is only known at runtime; the forwarding
     /// impl in `goopy_provisioner` keeps it usable as `GoopyManager`'s generic
     /// provisioner parameter.
     pub fn build_provisioner(
         &self,
-        dev_mode: bool,
         sys: Arc<dyn SysRunner>,
     ) -> Box<dyn GoopyProvisioner + Send + Sync> {
         let storage = self.allocator.build();
@@ -356,14 +356,14 @@ impl Config {
         match &self.provisioner {
             ProvisionerConfig::Hello => Box::new(HelloProvisioner::new(
                 self.domain.clone(),
-                dev_mode,
+                self.dev_mode,
                 api_address,
                 storage,
                 sys,
             )),
             ProvisionerConfig::Ghost(ghost) => Box::new(GhostProvisioner::new(
                 self.domain.clone(),
-                dev_mode,
+                self.dev_mode,
                 api_address,
                 ghost.clone(),
                 storage,
@@ -1049,7 +1049,7 @@ kind = "Hello"
         ] {
             let toml = format!("{GHOST_BASE}\n[provisioner]\nkind = \"{kind}\"\n{extra}\n");
             let cfg = write_config(&toml).expect("should parse");
-            let provisioner = cfg.build_provisioner(true, Arc::new(crate::RealSysRunner));
+            let provisioner = cfg.build_provisioner(Arc::new(crate::RealSysRunner));
             assert_eq!(
                 provisioner.kind().to_string(),
                 kind,
@@ -1070,8 +1070,49 @@ version = "5.87.1"
             GHOST_BASE
         );
         let cfg = write_config(&toml).expect("should parse");
-        let provisioner = cfg.build_provisioner(true, Arc::new(crate::RealSysRunner));
+        let provisioner = cfg.build_provisioner(Arc::new(crate::RealSysRunner));
         assert_eq!(provisioner.service_version(), "5.87.1");
+    }
+
+    /// The hazard #163 closes: a `dev_mode = false` config must build a
+    /// production provisioner, whatever the caller thinks the mode is. A
+    /// dev-mode despawn on a host kills a detached process and leaves the
+    /// systemd unit and nginx sites behind. Observed through what the
+    /// provisioner does on teardown, not through the bool.
+    #[test]
+    fn a_production_config_builds_a_production_provisioner() {
+        let toml = format!("{GHOST_BASE}\n[provisioner]\nkind = \"Hello\"\n");
+        let cfg = write_config(&toml).expect("should parse");
+        assert!(!cfg.dev_mode, "GHOST_BASE is a production config");
+
+        let sys = Arc::new(crate::MockSysRunner::new());
+        let provisioner = cfg.build_provisioner(sys.clone());
+        let working_dir = tempfile::tempdir().expect("create working dir");
+        provisioner
+            .deprovision(&crate::Goopy {
+                slug: "tasty-lucky-clover".to_string(),
+                life_in_days: 7,
+                created_at: chrono::Utc::now(),
+                working_dir: working_dir.path().to_path_buf(),
+                port: 9000,
+                status: crate::Status::Despawning,
+                provisioner_kind: ProvisionerKind::Hello,
+                service_version: "0.1.0".to_string(),
+                build_sha: None,
+            })
+            .expect("deprovision against a mock should succeed");
+
+        let sudo_args = sys.sudo_run_args();
+        assert!(
+            sudo_args.iter().any(|a| a == "systemctl"),
+            "a production teardown removes the systemd unit; sudo_run saw {sudo_args:?}"
+        );
+        assert!(
+            !sys.recorded_calls()
+                .iter()
+                .any(|c| matches!(c, crate::MockCall::KillPid { .. })),
+            "a production teardown must not take the dev-mode kill path"
+        );
     }
 
     #[test]

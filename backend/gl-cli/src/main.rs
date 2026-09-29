@@ -102,20 +102,20 @@ enum Cmd {
     },
 }
 
-/// The mode the provisioner runs in: the config's `dev_mode`, the same rule
-/// gl-serv follows (#163).
+/// Check `--prod` (`assert_prod`) against the config's `dev_mode`.
 ///
-/// `--prod` (`assert_prod`) does not choose the mode, it checks it. On a host,
-/// a dev-mode despawn kills a detached process and deletes the registry row,
-/// leaving the systemd unit, the nginx sites and the dataset behind with
-/// nothing tracking them. So a production run pointed at a dev config is
-/// refused outright rather than warned about.
-fn resolve_dev_mode(
-    cfg: &gl_core::Config,
+/// The mode itself comes from the config, the same rule gl-serv follows
+/// (#163); `--prod` does not choose it, it checks it. On a host, a dev-mode
+/// despawn kills a detached process and deletes the registry row, leaving the
+/// systemd unit, the nginx sites and the dataset behind with nothing tracking
+/// them. So a production run pointed at a dev config is refused outright
+/// rather than warned about.
+fn check_prod_assertion(
+    config_dev_mode: bool,
     config_path: &Path,
     assert_prod: bool,
-) -> Result<bool, String> {
-    if assert_prod && cfg.dev_mode {
+) -> Result<(), String> {
+    if assert_prod && config_dev_mode {
         return Err(format!(
             "--prod expects a production config (dev_mode = false), but {} sets \
              dev_mode = true; refusing to run. Point --config at the host's \
@@ -123,7 +123,7 @@ fn resolve_dev_mode(
             config_path.display()
         ));
     }
-    Ok(cfg.dev_mode)
+    Ok(())
 }
 
 fn main() {
@@ -173,10 +173,10 @@ fn main() {
 
     // Checked before anything below opens the registry or builds a
     // provisioner: a refused run must leave the host exactly as it found it.
-    let dev_mode = resolve_dev_mode(&cfg, &cli.config, cli.prod).unwrap_or_else(|msg| {
+    if let Err(msg) = check_prod_assertion(cfg.dev_mode, &cli.config, cli.prod) {
         tracing::error!("{msg}");
         std::process::exit(1);
-    });
+    }
 
     println!(
         "Config: {path}\n  db:                {db}\n  base_dir:          {base_dir}\n  domain:            {domain}\n  life_in_days:      {life_in_days}\n  provisioner:       {provisioner}\n  port range:        {port_start}–{port_end}\n  allocator:         {alloc_kind}\n  allocator pool:    {alloc_pool}\n  allocator quota:   {alloc_quota} MB\n  cors_origin:       {cors_origin}\n  bind_address:      {bind_address}\n  api_address:       {api_address}\n  sweep_interval:    {sweep}s\n  event_retention:   {retention}d\n  mode:              {mode}",
@@ -196,7 +196,7 @@ fn main() {
         api_address = cfg.resolved_api_address(),
         sweep = cfg.sweep_interval_secs,
         retention = cfg.event_retention_days,
-        mode = if dev_mode { "dev" } else { "production" },
+        mode = if cfg.dev_mode { "dev" } else { "production" },
     );
 
     let sys: Arc<dyn SysRunner> = Arc::new(RealSysRunner);
@@ -224,7 +224,7 @@ fn main() {
         }
         cmd => {
             // Spawn, Despawn, List — all require a provisioner/GoopyManager.
-            let provisioner = cfg.build_provisioner(dev_mode, sys);
+            let provisioner = cfg.build_provisioner(sys);
 
             let registry = SqliteRegistry::new(&cfg.registry.path).unwrap_or_else(|e| {
                 tracing::error!(error = %e, "failed to open SQLite registry");
@@ -393,88 +393,14 @@ mod tests {
         );
     }
 
-    /// Minimal config for the mode tests. PlainDir so that building a
-    /// production-mode provisioner needs no ZFS pool.
-    fn config_with_dev_mode(dev_mode: bool) -> (tempfile::NamedTempFile, gl_core::Config) {
-        let toml = format!(
-            r#"
-base_dir = "/tmp/goopy"
-domain = "goopy.life"
-life_in_days = 7
-port_range_start = 9000
-port_range_end = 9100
-dev_mode = {dev_mode}
-cors_origin = "https://goopy.life"
-bind_address = "127.0.0.1:8080"
-[registry]
-path = "/tmp/goopy.db"
-[allocator]
-kind = "PlainDir"
-[provisioner]
-kind = "Hello"
-"#
-        );
-        let mut file = tempfile::NamedTempFile::new().expect("create temp config");
-        std::io::Write::write_all(&mut file, toml.as_bytes()).expect("write temp config");
-        let cfg = gl_core::Config::from_file(file.path()).expect("config should parse");
-        (file, cfg)
-    }
-
-    /// The config decides, whichever way the flag points, as long as the flag
-    /// does not contradict it.
+    /// The config decides the mode; `--prod` only has to agree with it.
     #[test]
-    fn the_configs_dev_mode_decides_the_mode() {
-        let (dev_file, dev_cfg) = config_with_dev_mode(true);
-        let (prod_file, prod_cfg) = config_with_dev_mode(false);
+    fn prod_is_accepted_unless_the_config_contradicts_it() {
+        let path = Path::new("/opt/goopy-life/config.toml");
 
-        assert_eq!(resolve_dev_mode(&dev_cfg, dev_file.path(), false), Ok(true));
-        assert_eq!(
-            resolve_dev_mode(&prod_cfg, prod_file.path(), false),
-            Ok(false)
-        );
-        assert_eq!(
-            resolve_dev_mode(&prod_cfg, prod_file.path(), true),
-            Ok(false)
-        );
-    }
-
-    /// The hazard #163 closes: a production config without `--prod` used to
-    /// get a dev-mode provisioner, whose despawn kills a detached process and
-    /// leaves the systemd unit and nginx sites behind. Observed through what
-    /// the provisioner actually does on teardown, not through the bool.
-    #[test]
-    fn a_production_config_without_prod_builds_a_production_provisioner() {
-        let (file, cfg) = config_with_dev_mode(false);
-        let dev_mode = resolve_dev_mode(&cfg, file.path(), false).expect("no --prod, no conflict");
-
-        let sys = Arc::new(gl_core::MockSysRunner::new());
-        let provisioner = cfg.build_provisioner(dev_mode, sys.clone());
-        let working_dir = tempfile::tempdir().expect("create working dir");
-        provisioner
-            .deprovision(&Goopy {
-                slug: "tasty-lucky-clover".to_string(),
-                life_in_days: 7,
-                created_at: chrono::Utc::now(),
-                working_dir: working_dir.path().to_path_buf(),
-                port: 9000,
-                status: Status::Despawning,
-                provisioner_kind: ProvisionerKind::Hello,
-                service_version: "0.1.0".to_string(),
-                build_sha: None,
-            })
-            .expect("deprovision against a mock should succeed");
-
-        let sudo_args = sys.sudo_run_args();
-        assert!(
-            sudo_args.iter().any(|a| a == "systemctl"),
-            "a production teardown removes the systemd unit; sudo_run saw {sudo_args:?}"
-        );
-        assert!(
-            !sys.recorded_calls()
-                .iter()
-                .any(|c| matches!(c, gl_core::MockCall::KillPid { .. })),
-            "a production teardown must not take the dev-mode kill path"
-        );
+        assert_eq!(check_prod_assertion(true, path, false), Ok(()));
+        assert_eq!(check_prod_assertion(false, path, false), Ok(()));
+        assert_eq!(check_prod_assertion(false, path, true), Ok(()));
     }
 
     /// `--prod` against a dev config is refused, and the refusal names what
@@ -482,12 +408,12 @@ kind = "Hello"
     /// disagreement.
     #[test]
     fn prod_against_a_dev_config_is_refused_naming_the_path_and_both_values() {
-        let (file, cfg) = config_with_dev_mode(true);
+        let path = Path::new("/opt/goopy-life/config.toml");
 
-        let msg = resolve_dev_mode(&cfg, file.path(), true).expect_err("must refuse");
+        let msg = check_prod_assertion(true, path, true).expect_err("must refuse");
 
         assert!(
-            msg.contains(&file.path().display().to_string()),
+            msg.contains("/opt/goopy-life/config.toml"),
             "should name the config path: {msg}"
         );
         assert!(msg.contains("--prod"), "should name the flag: {msg}");
