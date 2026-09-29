@@ -82,17 +82,16 @@ sweep_interval_secs = 3600
 # instance. It is append-only; the sweep drops anything past this window.
 event_retention_days = 30
 
-# REVIEW: production runs the same droplet spec and system configuration as dev
-# (1 vCPU / 2 GB RAM / 4 GB swap with zswap enabled), so these mirror dev's
-# values. Before the first production deploy, VERIFY that is actually true —
-# this is a checkpoint, not an open decision:
+# Instance caps. PRECONDITION: these values are only valid on a host with dev's
+# spec and system configuration — 1 vCPU / 2 GB RAM, 4 GB of swap, and zswap
+# enabled (#147's host checklist, section 3). Check it on the host:
 #
 #   ssh <prod> 'free -m; cat /proc/swaps; cat /sys/module/zswap/parameters/enabled'
 #
 # Expect ~4095 MB of total swap and zswap `Y`. On the stock 1 GB swap the
-# serving ceiling is ~10, so an unverified box would accept 20 instances and
-# fail the last ten. Swap is host state no deploy installs (#167), and nothing
-# else here will catch its absence.
+# serving ceiling is ~10, and nothing errors: the box accepts all 20 instances
+# and then stops serving every one of them. Swap is host state no deploy
+# installs (#167), and nothing else here will catch its absence.
 #
 # The cap is sized from the *serving* ceiling, never the spawn ceiling. They
 # are not the same and the gap is large. From the #113 load experiment measured
