@@ -8,7 +8,7 @@ use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use clap::{CommandFactory, FromArgMatches, Parser};
 use gl_core::config::ProvisionerConfig;
 use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
@@ -519,7 +519,7 @@ async fn get_goopy(
 
     let goopy = goopy.ok_or_else(|| AppError::NotFound("not found".into()))?;
 
-    let expires_at = goopy.created_at + Duration::hours(goopy.life_in_hours as i64);
+    let expires_at = goopy.expires_at();
     let is_expired = Utc::now() >= expires_at;
 
     let url = if domain == "localhost" {
@@ -583,7 +583,7 @@ async fn alive_check(
         return Ok(deny());
     };
 
-    let expires_at = goopy.created_at + Duration::hours(goopy.life_in_hours as i64);
+    let expires_at = goopy.expires_at();
     let alive = goopy.status == gl_core::Status::Done && Utc::now() < expires_at;
 
     if alive {

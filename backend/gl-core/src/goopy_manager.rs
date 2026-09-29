@@ -616,7 +616,7 @@ where
                 );
                 true
             } else {
-                let expires_at = gp.created_at + Duration::hours(gp.life_in_hours as i64);
+                let expires_at = gp.expires_at();
                 if now > expires_at {
                     tracing::info!(
                         slug = %gp.slug,
@@ -925,6 +925,15 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(gm.get("still-going").unwrap().is_some());
+    }
+
+    #[test]
+    fn expires_at_adds_the_lifetime_in_hours_to_created_at() {
+        let gp = Goopy {
+            life_in_hours: 8,
+            ..make_goopy("eight-hours", 0, 9000, Status::Done)
+        };
+        assert_eq!(gp.expires_at() - gp.created_at, Duration::hours(8));
     }
 
     #[test]

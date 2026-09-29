@@ -34,12 +34,10 @@ use crate::usage_stats::{DailyUsage, UsageCounter, UsageCounts, UsageStats};
 /// Each step runs inside a transaction (see [`migrate`]), which constrains what
 /// its SQL may contain: no explicit `BEGIN`/`COMMIT`, and no statement SQLite
 /// forbids inside a transaction — notably `VACUUM` and `PRAGMA journal_mode`.
-/// That holds for a [`Step::Code`] step too.
-const MIGRATIONS: &[(u32, Step)] = &[
+const MIGRATIONS: &[(u32, &str)] = &[
     (
         1,
-        Step::Sql(
-            "
+        "
     CREATE TABLE IF NOT EXISTS goopies (
         id               INTEGER PRIMARY KEY AUTOINCREMENT,
         slug             TEXT    UNIQUE NOT NULL,
@@ -57,7 +55,6 @@ const MIGRATIONS: &[(u32, Step)] = &[
         slug TEXT    NOT NULL UNIQUE
     );
     ",
-        ),
     ),
     (
         2,
@@ -72,8 +69,7 @@ const MIGRATIONS: &[(u32, Step)] = &[
         //
         // The `occurred_at` index serves both readers: newest-first listing,
         // and the sweep's retention delete.
-        Step::Sql(
-            "
+        "
     CREATE TABLE IF NOT EXISTS instance_events (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
         slug        TEXT    NOT NULL,
@@ -89,7 +85,6 @@ const MIGRATIONS: &[(u32, Step)] = &[
     CREATE INDEX IF NOT EXISTS idx_instance_events_occurred_at
         ON instance_events(occurred_at);
     ",
-        ),
     ),
     (
         3,
@@ -102,11 +97,9 @@ const MIGRATIONS: &[(u32, Step)] = &[
         // Backfilling `'unknown'` would claim an unstamped build made them.
         // Not idempotent — `ADD COLUMN` fails if re-run — which the
         // `user_version` guard in [`migrate`] makes safe.
-        Step::Sql(
-            "
+        "
     ALTER TABLE goopies ADD COLUMN build_sha TEXT;
     ",
-        ),
     ),
     (
         4,
@@ -128,8 +121,7 @@ const MIGRATIONS: &[(u32, Step)] = &[
         // `IF NOT EXISTS` and `OR IGNORE`, as in steps 1 and 2, keep this
         // tolerant of a database whose `user_version` was reset under tables
         // that are still there.
-        Step::Sql(
-            "
+        "
     CREATE TABLE IF NOT EXISTS usage_daily (
         day         TEXT    PRIMARY KEY,
         provisioned INTEGER NOT NULL DEFAULT 0,
@@ -144,73 +136,24 @@ const MIGRATIONS: &[(u32, Step)] = &[
 
     INSERT OR IGNORE INTO usage_totals (id, provisioned, failed) VALUES (1, 0, 0);
     ",
-        ),
     ),
     (
         5,
-        // The lifetime unit becomes hours (#110). See the function.
-        Step::Code(life_in_days_to_hours),
-    ),
-];
-
-/// Migration step 5: rename `goopies.life_in_days` to `life_in_hours` and
-/// convert every existing row, so an instance already running keeps exactly
-/// the expiry it had.
-///
-/// Code rather than SQL because a re-applied step must neither fail nor
-/// convert twice.  Steps 1, 2 and 4 are written to tolerate a `user_version`
-/// reset under tables that are still there; plain SQL cannot do that here:
-/// re-running `RENAME COLUMN` fails once the column is gone, and there is no
-/// `IF EXISTS` form to guard it.  Nor can the `UPDATE` tell a converted row from
-/// an unconverted one by its value.
-///
-/// The column's name is the marker instead.  The rename and the conversion run
-/// in the same transaction (see [`migrate`]), so `life_in_days` exists exactly
-/// when the conversion has not happened.  Seeing `life_in_hours` already there,
-/// the step does nothing.
-fn life_in_days_to_hours(conn: &Connection) -> rusqlite::Result<()> {
-    if !has_column(conn, "goopies", "life_in_days")? {
-        return Ok(());
-    }
-
-    conn.execute_batch(
+        // The lifetime unit becomes hours (#110), so a lifetime can be shorter
+        // than a day.
+        //
+        // The rename and the ×24 are one step so they commit together: every
+        // instance already running keeps exactly the expiry it had, and no
+        // database is ever left with the new name over values still in days.
+        // Not idempotent — `RENAME COLUMN` fails once the column is gone, and
+        // a second `UPDATE` would convert twice — which the `user_version`
+        // guard in [`migrate`] makes safe.
         "
     ALTER TABLE goopies RENAME COLUMN life_in_days TO life_in_hours;
     UPDATE goopies SET life_in_hours = life_in_hours * 24;
     ",
-    )
-}
-
-/// Whether `table` has a column named `column`.
-fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
-    conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
-        params![table, column],
-        |row| row.get(0),
-    )
-}
-
-/// What a migration step does.
-#[derive(Clone, Copy)]
-enum Step {
-    /// A batch of SQL, run as written.
-    Sql(&'static str),
-    /// A step that has to look at the schema before it knows what to run.
-    ///
-    /// SQLite has no conditional DDL — no `RENAME COLUMN IF EXISTS` — so a
-    /// step that must be safe to re-apply over a change it has already made
-    /// cannot always say so in SQL alone.  It receives the step's transaction.
-    Code(fn(&Connection) -> rusqlite::Result<()>),
-}
-
-impl Step {
-    fn apply(&self, conn: &Connection) -> rusqlite::Result<()> {
-        match self {
-            Step::Sql(sql) => conn.execute_batch(sql),
-            Step::Code(run) => run(conn),
-        }
-    }
-}
+    ),
+];
 
 /// The latest schema version understood by this build.
 ///
@@ -253,7 +196,7 @@ fn read_user_version(conn: &Connection) -> Result<u32, Error> {
 /// the highest version in `migrations` — i.e. the database was written by a
 /// newer build than this one.  The check runs before any DDL is issued, so a
 /// database we cannot interpret is left untouched.
-fn migrate(conn: &mut Connection, migrations: &[(u32, Step)]) -> Result<(), Error> {
+fn migrate(conn: &mut Connection, migrations: &[(u32, &str)]) -> Result<(), Error> {
     let latest = migrations.last().map(|&(target, _)| target).unwrap_or(0);
 
     let mut current = read_user_version(conn)?;
@@ -265,7 +208,7 @@ fn migrate(conn: &mut Connection, migrations: &[(u32, Step)]) -> Result<(), Erro
         });
     }
 
-    for &(target, step) in migrations {
+    for &(target, sql) in migrations {
         if current >= target {
             continue;
         }
@@ -287,7 +230,7 @@ fn migrate(conn: &mut Connection, migrations: &[(u32, Step)]) -> Result<(), Erro
             continue;
         }
 
-        step.apply(&tx).map_err(Error::SchemaMigration)?;
+        tx.execute_batch(sql).map_err(Error::SchemaMigration)?;
 
         // `PRAGMA user_version = <n>` does not accept bound parameters, so we
         // format the integer directly.  `target` is a `u32` literal so there
@@ -2145,10 +2088,7 @@ mod tests {
 
         {
             let conn = rusqlite::Connection::open(&db_path).unwrap();
-            for (_, step) in &MIGRATIONS[..3] {
-                step.apply(&conn).unwrap();
-            }
-            conn.execute_batch("PRAGMA user_version = 3;").unwrap();
+            seed_at_version(&conn, MIGRATIONS, 3);
             assert!(!table_exists(&conn, "usage_daily"));
         }
 
@@ -2177,13 +2117,7 @@ mod tests {
     /// `(slug, life_in_days)`.
     fn seed_v4_db(db_path: &Path, rows: &[(&str, i64)]) {
         let conn = rusqlite::Connection::open(db_path).unwrap();
-        for (target, step) in MIGRATIONS {
-            if *target > 4 {
-                break;
-            }
-            step.apply(&conn).unwrap();
-        }
-        conn.execute_batch("PRAGMA user_version = 4;").unwrap();
+        seed_at_version(&conn, MIGRATIONS, 4);
         for (slug, days) in rows {
             conn.execute(
                 "INSERT INTO goopies (slug, life_in_days, created_at, status, working_dir, port, provisioner_kind, service_version) \
@@ -2197,7 +2131,7 @@ mod tests {
     /// Instances running when step 5 lands must expire exactly when they
     /// would have: the column changes unit, and every value with it.
     #[test]
-    fn migration_converts_life_in_days_to_hours_keeping_every_expiry() {
+    fn migration_converts_the_lifetime_to_hours_keeping_every_expiry() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("v4.db");
         seed_v4_db(&db_path, &[("one-day", 1), ("one-week", 7)]);
@@ -2213,34 +2147,11 @@ mod tests {
             let gp = r.load(slug).unwrap().expect("the row survives migration");
             assert_eq!(gp.life_in_hours, hours, "{slug}");
             assert_eq!(
-                gp.created_at + chrono::Duration::hours(gp.life_in_hours as i64),
+                gp.expires_at(),
                 gp.created_at + chrono::Duration::days(days),
                 "{slug} must keep the expiry it had"
             );
         }
-    }
-
-    /// A `user_version` reset under the converted table walks step 5 again.
-    /// Written as SQL, that would fail on the missing `life_in_days` — or,
-    /// had it got past the rename, multiply every lifetime by 24 a second time.
-    #[test]
-    fn reapplying_step_5_neither_fails_nor_converts_twice() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("v4.db");
-        seed_v4_db(&db_path, &[("one-day", 1)]);
-        SqliteRegistry::new(&db_path).unwrap();
-
-        rusqlite::Connection::open(&db_path)
-            .unwrap()
-            .execute_batch("PRAGMA user_version = 4;")
-            .unwrap();
-        let r = SqliteRegistry::new(&db_path).expect("re-applying step 5 must not fail");
-
-        assert_eq!(
-            user_version(&rusqlite::Connection::open(&db_path).unwrap()),
-            LATEST_VERSION
-        );
-        assert_eq!(r.load("one-day").unwrap().unwrap().life_in_hours, 24);
     }
 
     #[test]
@@ -2271,7 +2182,7 @@ mod tests {
         // Reproduce a pre-#118 database: step 1's schema, stamped at 1.
         {
             let conn = rusqlite::Connection::open(&db_path).unwrap();
-            MIGRATIONS[0].1.apply(&conn).unwrap();
+            conn.execute_batch(MIGRATIONS[0].1).unwrap();
             conn.execute_batch("PRAGMA user_version = 1;").unwrap();
             assert!(
                 !table_exists(&conn, "instance_events"),
@@ -2336,8 +2247,8 @@ mod tests {
         // Reproduce a pre-#119 database holding one instance: steps 1-2, stamped at 2.
         {
             let conn = rusqlite::Connection::open(&db_path).unwrap();
-            MIGRATIONS[0].1.apply(&conn).unwrap();
-            MIGRATIONS[1].1.apply(&conn).unwrap();
+            conn.execute_batch(MIGRATIONS[0].1).unwrap();
+            conn.execute_batch(MIGRATIONS[1].1).unwrap();
             conn.execute_batch("PRAGMA user_version = 2;").unwrap();
             conn.execute(
                 "INSERT INTO goopies (slug, life_in_days, created_at, status, working_dir, port, provisioner_kind, service_version) \
@@ -2513,10 +2424,10 @@ mod tests {
     /// * No step uses `IF NOT EXISTS`, so re-applying an already-applied step
     ///   errors.  A no-op run therefore has to genuinely skip, not just be
     ///   idempotent by luck.
-    const TEST_MIGRATIONS: &[(u32, Step)] = &[
-        (1, Step::Sql("CREATE TABLE t1 (a INTEGER);")),
-        (2, Step::Sql("CREATE TABLE t2 (b INTEGER);")),
-        (3, Step::Sql("ALTER TABLE t1 ADD COLUMN c TEXT;")),
+    const TEST_MIGRATIONS: &[(u32, &str)] = &[
+        (1, "CREATE TABLE t1 (a INTEGER);"),
+        (2, "CREATE TABLE t2 (b INTEGER);"),
+        (3, "ALTER TABLE t1 ADD COLUMN c TEXT;"),
     ];
 
     fn user_version(conn: &Connection) -> u32 {
@@ -2535,17 +2446,25 @@ mod tests {
     }
 
     fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
-        has_column(conn, table, column).unwrap()
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                params![table, column],
+                |row| row.get(0),
+            )
+            .unwrap();
+        n > 0
     }
 
-    /// Apply the SQL of every step up to and including `through`, then stamp
-    /// `user_version`, to simulate a DB left behind by an older build.
-    fn seed_at_version(conn: &Connection, through: u32) {
-        for &(target, step) in TEST_MIGRATIONS {
+    /// Apply the SQL of every step in `migrations` up to and including
+    /// `through`, then stamp `user_version`, to simulate a DB left behind by an
+    /// older build.
+    fn seed_at_version(conn: &Connection, migrations: &[(u32, &str)], through: u32) {
+        for &(target, sql) in migrations {
             if target > through {
                 break;
             }
-            step.apply(conn).unwrap();
+            conn.execute_batch(sql).unwrap();
         }
         conn.execute_batch(&format!("PRAGMA user_version = {through};"))
             .unwrap();
@@ -2582,7 +2501,7 @@ mod tests {
     #[test]
     fn migrate_from_v1_applies_only_remaining_steps() {
         for_each_backing(|conn| {
-            seed_at_version(conn, 1);
+            seed_at_version(conn, TEST_MIGRATIONS, 1);
 
             migrate(conn, TEST_MIGRATIONS).unwrap();
 
@@ -2595,7 +2514,7 @@ mod tests {
     #[test]
     fn migrate_from_v2_applies_only_remaining_steps() {
         for_each_backing(|conn| {
-            seed_at_version(conn, 2);
+            seed_at_version(conn, TEST_MIGRATIONS, 2);
 
             // Step 1 and 2 are non-idempotent DDL, so this only succeeds if
             // both are skipped.
@@ -2609,7 +2528,7 @@ mod tests {
     #[test]
     fn migrate_on_up_to_date_db_is_a_noop() {
         for_each_backing(|conn| {
-            seed_at_version(conn, 3);
+            seed_at_version(conn, TEST_MIGRATIONS, 3);
 
             // Every step is non-idempotent, so re-running any of them would
             // surface as an error here.
@@ -2661,11 +2580,11 @@ mod tests {
     /// created, then re-creating the existing `t1` errors.  Applied without a
     /// transaction, this leaves `t2` behind; applied atomically, it leaves no
     /// trace.
-    const FAILING_MIGRATIONS: &[(u32, Step)] = &[
-        (1, Step::Sql("CREATE TABLE t1 (a INTEGER);")),
+    const FAILING_MIGRATIONS: &[(u32, &str)] = &[
+        (1, "CREATE TABLE t1 (a INTEGER);"),
         (
             2,
-            Step::Sql("CREATE TABLE t2 (b INTEGER); CREATE TABLE t1 (dup INTEGER);"),
+            "CREATE TABLE t2 (b INTEGER); CREATE TABLE t1 (dup INTEGER);",
         ),
     ];
 
@@ -2722,7 +2641,7 @@ mod tests {
     #[test]
     fn migrate_skips_a_step_applied_by_another_process() {
         for_each_backing(|conn| {
-            seed_at_version(conn, 1);
+            seed_at_version(conn, TEST_MIGRATIONS, 1);
 
             // Simulate the other process having finished step 2.  Its DDL is
             // applied here too, so re-running step 2 would fail with
