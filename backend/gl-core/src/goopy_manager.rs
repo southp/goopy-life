@@ -23,6 +23,9 @@ pub struct GoopyManagerConfig {
     /// How long an instance event is kept before the sweep drops it. See
     /// [`Config::event_retention_days`].
     pub event_retention_days: u32,
+    /// How many UTC days of daily usage counts the sweep keeps, today
+    /// included. See [`Config::stats_retention_days`].
+    pub stats_retention_days: u32,
 }
 
 /// A point-in-time reading of both instance caps and how much of each is used.
@@ -93,6 +96,7 @@ pub struct GoopyManager<
     pub max_active: u32,
     pub max_provisioned: u32,
     pub event_retention_days: u32,
+    pub stats_retention_days: u32,
 
     registry: Arc<Registry>,
     provisioner: Arc<Provisioner>,
@@ -113,6 +117,7 @@ where
             max_active: config.max_active,
             max_provisioned: config.max_provisioned,
             event_retention_days: config.event_retention_days,
+            stats_retention_days: config.stats_retention_days,
             registry: Arc::new(registry),
             provisioner: Arc::new(provisioner),
         }
@@ -519,6 +524,40 @@ where
         }
     }
 
+    /// Drop daily usage rows that fall outside the last
+    /// `stats_retention_days` UTC days, today included (#172).
+    ///
+    /// The window is counted in whole days ending today, so a 7-day window
+    /// keeps exactly the days `last_7_days` sums. The all-time total is a
+    /// separate row and is never pruned.
+    ///
+    /// Handled like [`prune_events`]: housekeeping, outside the sweep's
+    /// `(swept, errors)` result, logged and carried past on failure. Missing
+    /// one costs a few extra rows until the next sweep.
+    ///
+    /// [`prune_events`]: GoopyManager::prune_events
+    fn prune_usage(&self, now: chrono::DateTime<Utc>) {
+        let keep_from = now.date_naive() - Duration::days(i64::from(self.stats_retention_days) - 1);
+
+        match self.registry.prune_usage_before(keep_from) {
+            Ok(0) => {}
+            Ok(pruned) => {
+                tracing::info!(
+                    pruned,
+                    retention_days = self.stats_retention_days,
+                    "sweep: dropped expired daily usage rows"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = ?e,
+                    retention_days = self.stats_retention_days,
+                    "sweep: pruning daily usage rows failed",
+                );
+            }
+        }
+    }
+
     /// Despawn all expired goopy instances and reap all `Failed` instances.
     ///
     /// **Expired instances** are those where `now > created_at + life_in_days`.
@@ -548,8 +587,9 @@ where
     /// `nginx -t` and a reload. That cost is what #109 (batch the reloads) buys
     /// back; until then a sweep over a full registry is the slow case to watch.
     ///
-    /// Also enforces retention on the instance event log — see
-    /// `prune_events`, which is deliberately outside the returned counts.
+    /// Also enforces retention on the instance event log and on the daily
+    /// usage counts — see `prune_events` and `prune_usage`, which are
+    /// deliberately outside the returned counts.
     ///
     /// Meant to be called periodically (e.g. via `tokio::time::interval` in
     /// `gl-serv`), from a context where blocking is acceptable.
@@ -559,6 +599,7 @@ where
     pub fn sweep(&self) -> Result<(u32, Vec<Error>), Error> {
         let now = Utc::now();
         self.prune_events(now);
+        self.prune_usage(now);
         let goopies = self.list()?;
         let mut swept = 0u32;
         let mut errors: Vec<Error> = Vec::new();
@@ -626,7 +667,7 @@ mod tests {
     use crate::goopy_registry::GoopyRegistry;
     use crate::goopy_registry::sqlite_registry::SqliteRegistry;
     use crate::storage_allocator::{PlainDirAllocator, StorageAllocator};
-    use crate::usage_stats::UsageCounts;
+    use crate::usage_stats::{UsageCounter, UsageCounts};
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
@@ -741,6 +782,7 @@ mod tests {
                 max_active: 100,
                 max_provisioned: 100,
                 event_retention_days: 30,
+                stats_retention_days: 90,
             },
             registry,
             NoopProvisioner,
@@ -774,6 +816,7 @@ mod tests {
                     max_active: 100,
                     max_provisioned: 100,
                     event_retention_days: 30,
+                    stats_retention_days: 90,
                 },
                 SqliteRegistry::new(Path::new(":memory:")).unwrap(),
                 NoopProvisioner,
@@ -799,6 +842,7 @@ mod tests {
                 max_active: 100,
                 max_provisioned: 100,
                 event_retention_days: 30,
+                stats_retention_days: 90,
             },
             CollideOnceRegistry {
                 save_calls: Mutex::new(0),
@@ -976,6 +1020,7 @@ mod tests {
                 max_active: 100,
                 max_provisioned: 100,
                 event_retention_days: 30,
+                stats_retention_days: 90,
             },
             FailingUpdateRegistry(inner),
             NoopProvisioner,
@@ -1156,6 +1201,7 @@ mod tests {
                 max_active: 100,
                 max_provisioned: 100,
                 event_retention_days: 30,
+                stats_retention_days: 90,
             },
             registry,
             DirCleaningProvisioner,
@@ -1221,6 +1267,7 @@ mod tests {
                 max_active: 100,
                 max_provisioned: 100,
                 event_retention_days: 30,
+                stats_retention_days: 90,
             },
             registry,
             NoopProvisioner,
@@ -1319,6 +1366,7 @@ mod tests {
                 max_active,
                 max_provisioned,
                 event_retention_days: 30,
+                stats_retention_days: 90,
             },
             registry,
             provisioner,
@@ -2057,6 +2105,33 @@ mod tests {
         let left = gm.events(None, 10).unwrap();
         assert_eq!(left.len(), 1, "only the stale event should go: {left:?}");
         assert_eq!(left[0].slug, "recent");
+    }
+
+    /// The acceptance criterion: after a sweep no daily row is older than the
+    /// window, and the all-time figure has not moved.
+    #[test]
+    fn sweep_drops_usage_days_past_the_window_but_keeps_the_total() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let today = Utc::now().date_naive();
+        // 90-day window, as `manager_with` configures: today and the 89 days
+        // before it are kept.
+        let oldest_kept = today - Duration::days(89);
+        registry.bump_usage_on(today - Duration::days(200), UsageCounter::Provisioned);
+        registry.bump_usage_on(today - Duration::days(90), UsageCounter::Failed);
+        registry.bump_usage_on(oldest_kept, UsageCounter::Provisioned);
+        registry.bump_usage_on(today, UsageCounter::Provisioned);
+
+        let gm = manager_with_provisioner(registry, NoopProvisioner);
+        let before = gm.usage_stats().unwrap().all_time;
+        let (swept, errors) = gm.sweep().unwrap();
+
+        assert_eq!(swept, 0, "a prune is not a reap");
+        assert!(errors.is_empty());
+        let after = gm.usage_stats().unwrap();
+        let days: Vec<_> = after.daily.iter().map(|d| d.day).collect();
+        assert_eq!(days, [today, oldest_kept]);
+        assert_eq!(after.all_time, before, "the total is never pruned");
+        assert_eq!(after.all_time, usage(3, 1));
     }
 
     /// Retention is housekeeping, not a reap: a prune must not show up in the
