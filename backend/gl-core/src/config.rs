@@ -9,6 +9,7 @@ use crate::goopy_provisioner::hello_provisioner::HelloProvisioner;
 use crate::shared_types::{AllocatorKind, Error, ProvisionerKind};
 use crate::storage_allocator::{PlainDirAllocator, StorageAllocator, ZfsAllocator};
 use crate::sys_utils::SysRunner;
+use crate::usage_stats::UsageStats;
 
 // Design note: a fully abstract design would store these as `dyn RegistryConfig` /
 // `dyn AllocatorConfig` traits. We use concrete structs instead — the number of
@@ -259,6 +260,18 @@ pub struct Config {
     /// the log never having worked.
     #[serde(default = "default_event_retention_days")]
     pub event_retention_days: u32,
+    /// How many UTC days of daily usage counts to keep (#172), today included.
+    ///
+    /// The counters are a row per day plus one all-time row, so storage grows
+    /// with this window, not with the number of instances. The sweep drops
+    /// daily rows older than the window on every run; the all-time total is
+    /// never pruned. `GET /stats` reports it as `window_days`.
+    ///
+    /// Must be at least [`UsageStats::WEEK_DAYS`] (7), which `Config::from_file`
+    /// enforces: the weekly figure sums the last seven days, and a shorter
+    /// window would prune days it still needs.
+    #[serde(default = "default_stats_retention_days")]
+    pub stats_retention_days: u32,
     pub registry: RegistryConfig,
     pub allocator: AllocatorConfig,
     pub provisioner: ProvisionerConfig,
@@ -293,6 +306,14 @@ fn default_max_active() -> u32 {
 /// a holiday still finds its evidence.
 fn default_event_retention_days() -> u32 {
     30
+}
+
+/// Default usage-stats window: 90 days.
+///
+/// A quarter is long enough to see a trend in daily provisions, and at one
+/// small row per day it costs nothing to keep.
+fn default_stats_retention_days() -> u32 {
+    90
 }
 
 /// Default disk-bound total-instance cap. See [`Config::max_provisioned`].
@@ -383,6 +404,7 @@ impl Config {
             max_active: self.max_active,
             max_provisioned: self.max_provisioned,
             event_retention_days: self.event_retention_days,
+            stats_retention_days: self.stats_retention_days,
         }
     }
 
@@ -453,6 +475,15 @@ impl Config {
         // the most misleading state a forensic record can be in.
         if cfg.event_retention_days == 0 {
             return Err(Error::Config("event_retention_days must be > 0".into()));
+        }
+        // `GET /stats` reports the last seven days. A shorter window would
+        // prune days that figure still sums, so it would quietly under-report
+        // rather than fail.
+        if cfg.stats_retention_days < UsageStats::WEEK_DAYS {
+            return Err(Error::Config(format!(
+                "stats_retention_days must be >= {}",
+                UsageStats::WEEK_DAYS
+            )));
         }
         // gl-serv binds this verbatim. Rejecting it here rather than at
         // `TcpListener::bind` is what lets `--check-config` catch it before the
@@ -585,6 +616,7 @@ kind = "PlainDir"
         assert_eq!(cfg.port_range_start, 9000);
         assert_eq!(cfg.sweep_interval_secs, 3600);
         assert_eq!(cfg.event_retention_days, 30);
+        assert_eq!(cfg.stats_retention_days, 90);
     }
 
     #[test]
@@ -742,6 +774,50 @@ kind = "PlainDir"
         let err = write_config(&toml).unwrap_err();
         assert!(
             matches!(err, Error::Config(ref s) if s.contains("event_retention_days must be > 0")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn stats_retention_days_passes_through_to_the_manager_config() {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            with_caps(VALID_BASE, "stats_retention_days = 30")
+        );
+        let cfg = write_config(&toml).expect("an explicit stats window is valid");
+        assert_eq!(cfg.stats_retention_days, 30);
+        assert_eq!(cfg.build_manager_config().stats_retention_days, 30);
+    }
+
+    /// Seven is the floor, and exactly seven is fine: it keeps every day the
+    /// weekly figure sums.
+    #[test]
+    fn stats_retention_of_exactly_a_week_accepted() {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            with_caps(VALID_BASE, "stats_retention_days = 7")
+        );
+        assert_eq!(write_config(&toml).unwrap().stats_retention_days, 7);
+    }
+
+    #[test]
+    fn stats_retention_shorter_than_a_week_rejected() {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            with_caps(VALID_BASE, "stats_retention_days = 6")
+        );
+        let err = write_config(&toml).unwrap_err();
+        assert!(
+            matches!(err, Error::Config(ref s) if s.contains("stats_retention_days must be >= 7")),
             "got {err:?}"
         );
     }
