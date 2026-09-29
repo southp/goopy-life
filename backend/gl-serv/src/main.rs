@@ -348,8 +348,8 @@ impl From<gl_core::UsageCounts> for UsageCountsResponse {
 struct DailyUsageResponse {
     /// `YYYY-MM-DD`, UTC.
     day: String,
-    provisioned: u64,
-    failed: u64,
+    #[serde(flatten)]
+    counts: UsageCountsResponse,
 }
 
 /// Body of `GET /stats` — how many instances were provisioned, and how many
@@ -670,8 +670,7 @@ async fn get_stats(State(state): State<Arc<AppState>>) -> Result<impl IntoRespon
             .into_iter()
             .map(|d| DailyUsageResponse {
                 day: d.day.to_string(),
-                provisioned: d.counts.provisioned,
-                failed: d.counts.failed,
+                counts: d.counts.into(),
             })
             .collect(),
     }))
@@ -1816,20 +1815,13 @@ mod tests {
         );
     }
 
-    /// `/version` is a read, not a provisioning request: the deploy polls it
-    /// and every visitor's footer fetches it, so it must sit on the loose read
-    /// limiter. With `provision_burst = 1`, a run of reads that would exhaust
-    /// the provisioning budget must all pass.
-    #[tokio::test]
-    async fn get_version_uses_the_loose_read_rate_limit() {
+    /// Assert that `uri` sits on the loose read limiter, not the tight
+    /// provisioning one: with `provision_burst = 1`, a run of reads that would
+    /// exhaust the provisioning budget must all pass.
+    async fn assert_on_read_limiter(uri: &str) {
         let rl = gl_core::config::RateLimitConfig {
             provision_burst: 1,
-            provision_period_secs: 60,
-            read_burst: 100,
-            read_period_secs: 1,
-            alive_burst: 600,
-            alive_period_secs: 1,
-            alive_cache_secs: 5,
+            ..Default::default()
         };
         let app = make_router_with_rl(
             "goopy.life",
@@ -1842,8 +1834,8 @@ mod tests {
                 .clone()
                 .oneshot(
                     Request::builder()
-                        .header("x-real-ip", "203.0.113.11")
-                        .uri("/version")
+                        .header("x-real-ip", "203.0.113.9")
+                        .uri(uri)
                         .body(Body::empty())
                         .unwrap(),
                 )
@@ -1852,9 +1844,17 @@ mod tests {
             assert_eq!(
                 resp.status(),
                 StatusCode::OK,
-                "read #{attempt} must not be throttled by the provisioning limit",
+                "{uri} read #{attempt} must not be throttled by the provisioning limit",
             );
         }
+    }
+
+    /// `/version` is a read, not a provisioning request: the deploy polls it
+    /// and every visitor's footer fetches it, so it must sit on the loose read
+    /// limiter.
+    #[tokio::test]
+    async fn get_version_uses_the_loose_read_rate_limit() {
+        assert_on_read_limiter("/version").await;
     }
 
     // ── get_capacity ──────────────────────────────────────────────────────
@@ -1952,43 +1952,10 @@ mod tests {
     }
 
     /// `/capacity` is polled by every visitor, so it must sit on the loose read
-    /// limiter, not the tight provisioning one. With `provision_burst = 1`, a
-    /// run of reads that would exhaust the provisioning budget must all pass.
+    /// limiter, not the tight provisioning one.
     #[tokio::test]
     async fn get_capacity_uses_the_loose_read_rate_limit() {
-        let rl = gl_core::config::RateLimitConfig {
-            provision_burst: 1,
-            provision_period_secs: 60,
-            read_burst: 100,
-            read_period_secs: 1,
-            alive_burst: 600,
-            alive_period_secs: 1,
-            alive_cache_secs: 5,
-        };
-        let app = make_router_with_rl(
-            "goopy.life",
-            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
-            rl,
-        );
-
-        for attempt in 0..5 {
-            let resp = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .header("x-real-ip", "203.0.113.9")
-                        .uri("/capacity")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                resp.status(),
-                StatusCode::OK,
-                "read #{attempt} must not be throttled by the provisioning limit",
-            );
-        }
+        assert_on_read_limiter("/capacity").await;
     }
 
     // ── get_stats ─────────────────────────────────────────────────────────
@@ -2068,39 +2035,7 @@ mod tests {
     /// `/capacity`, not the tight provisioning one.
     #[tokio::test]
     async fn get_stats_uses_the_loose_read_rate_limit() {
-        let rl = gl_core::config::RateLimitConfig {
-            provision_burst: 1,
-            provision_period_secs: 60,
-            read_burst: 100,
-            read_period_secs: 1,
-            alive_burst: 600,
-            alive_period_secs: 1,
-            alive_cache_secs: 5,
-        };
-        let app = make_router_with_rl(
-            "goopy.life",
-            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
-            rl,
-        );
-
-        for attempt in 0..5 {
-            let resp = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .header("x-real-ip", "203.0.113.9")
-                        .uri("/stats")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                resp.status(),
-                StatusCode::OK,
-                "read #{attempt} must not be throttled by the provisioning limit",
-            );
-        }
+        assert_on_read_limiter("/stats").await;
     }
 
     /// A live instance may be cached, briefly.

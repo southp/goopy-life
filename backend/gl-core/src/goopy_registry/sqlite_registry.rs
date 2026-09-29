@@ -115,7 +115,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
         // impossible rather than merely unexpected.
         //
         // `day` is `YYYY-MM-DD`, so TEXT order is date order, which is what
-        // both the newest-first listing and the retention delete rely on.
+        // the retention delete's `day < ?` relies on.
         //
         // `IF NOT EXISTS` and `OR IGNORE`, as in steps 1 and 2, keep this
         // tolerant of a database whose `user_version` was reset under tables
@@ -1174,7 +1174,7 @@ impl GoopyRegistry for SqliteRegistry {
             .unwrap_or_default();
 
         let mut stmt = tx
-            .prepare("SELECT day, provisioned, failed FROM usage_daily ORDER BY day DESC")
+            .prepare("SELECT day, provisioned, failed FROM usage_daily")
             .map_err(|e| Error::Registry {
                 context: "usage daily prepare",
                 source: e.into(),
@@ -1868,17 +1868,6 @@ mod tests {
     // Usage counters (#172)
     // -------------------------------------------------------------------------
 
-    fn today() -> NaiveDate {
-        utc_today()
-    }
-
-    fn counts(provisioned: u64, failed: u64) -> UsageCounts {
-        UsageCounts {
-            provisioned,
-            failed,
-        }
-    }
-
     /// Break the next counter write by removing the table it goes to, so a
     /// test can watch the status write it rides with roll back.
     fn break_usage_writes(r: &SqliteRegistry) {
@@ -1888,11 +1877,11 @@ mod tests {
 
     #[test]
     fn usage_stats_on_an_empty_registry_is_all_zeros() {
-        let stats = registry().usage_stats(today()).unwrap();
+        let stats = registry().usage_stats(utc_today()).unwrap();
 
-        assert_eq!(stats.all_time, counts(0, 0));
-        assert_eq!(stats.last_7_days, counts(0, 0));
-        assert_eq!(stats.today, counts(0, 0));
+        assert_eq!(stats.all_time, UsageCounts::new(0, 0));
+        assert_eq!(stats.last_7_days, UsageCounts::new(0, 0));
+        assert_eq!(stats.today, UsageCounts::new(0, 0));
         assert!(stats.daily.is_empty());
     }
 
@@ -1904,11 +1893,11 @@ mod tests {
         r.complete_spawn("u-done").unwrap();
 
         assert_eq!(r.load("u-done").unwrap().unwrap().status, Status::Done);
-        let stats = r.usage_stats(today()).unwrap();
-        assert_eq!(stats.today, counts(1, 0));
-        assert_eq!(stats.all_time, counts(1, 0));
+        let stats = r.usage_stats(utc_today()).unwrap();
+        assert_eq!(stats.today, UsageCounts::new(1, 0));
+        assert_eq!(stats.all_time, UsageCounts::new(1, 0));
         assert_eq!(stats.daily.len(), 1);
-        assert_eq!(stats.daily[0].day, today());
+        assert_eq!(stats.daily[0].day, utc_today());
     }
 
     #[test]
@@ -1918,7 +1907,10 @@ mod tests {
         let err = r.complete_spawn("u-never").unwrap_err();
 
         assert!(matches!(err, Error::NotFound), "{err:?}");
-        assert_eq!(r.usage_stats(today()).unwrap().all_time, counts(0, 0));
+        assert_eq!(
+            r.usage_stats(utc_today()).unwrap().all_time,
+            UsageCounts::new(0, 0)
+        );
     }
 
     /// The acceptance criterion's "one transaction": a count that cannot be
@@ -1951,9 +1943,9 @@ mod tests {
         )
         .unwrap();
 
-        let stats = r.usage_stats(today()).unwrap();
-        assert_eq!(stats.today, counts(0, 1));
-        assert_eq!(stats.all_time, counts(0, 1));
+        let stats = r.usage_stats(utc_today()).unwrap();
+        assert_eq!(stats.today, UsageCounts::new(0, 1));
+        assert_eq!(stats.all_time, UsageCounts::new(0, 1));
     }
 
     /// Cleanup problems are not failed provisions: the instance was served,
@@ -1976,7 +1968,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(r.events(Some("u-cleanup"), 10).unwrap().len(), 2);
-        assert_eq!(r.usage_stats(today()).unwrap().all_time, counts(0, 0));
+        assert_eq!(
+            r.usage_stats(utc_today()).unwrap().all_time,
+            UsageCounts::new(0, 0)
+        );
     }
 
     #[test]
@@ -1989,7 +1984,10 @@ mod tests {
         r.fail_with_event("u-dup", &event).unwrap();
 
         assert_eq!(r.events(Some("u-dup"), 10).unwrap().len(), 1);
-        assert_eq!(r.usage_stats(today()).unwrap().all_time, counts(0, 1));
+        assert_eq!(
+            r.usage_stats(utc_today()).unwrap().all_time,
+            UsageCounts::new(0, 1)
+        );
     }
 
     #[test]
@@ -2016,16 +2014,20 @@ mod tests {
     #[test]
     fn usage_stats_sums_the_week_and_lists_days_newest_first() {
         let r = registry();
-        let t = today();
+        let t = utc_today();
         r.bump_usage_on(t, UsageCounter::Provisioned);
         r.bump_usage_on(t - chrono::Duration::days(6), UsageCounter::Failed);
         r.bump_usage_on(t - chrono::Duration::days(7), UsageCounter::Provisioned);
 
         let stats = r.usage_stats(t).unwrap();
 
-        assert_eq!(stats.today, counts(1, 0));
-        assert_eq!(stats.last_7_days, counts(1, 1), "day -7 is outside");
-        assert_eq!(stats.all_time, counts(2, 1));
+        assert_eq!(stats.today, UsageCounts::new(1, 0));
+        assert_eq!(
+            stats.last_7_days,
+            UsageCounts::new(1, 1),
+            "day -7 is outside"
+        );
+        assert_eq!(stats.all_time, UsageCounts::new(2, 1));
         let days: Vec<_> = stats.daily.iter().map(|d| d.day).collect();
         assert_eq!(
             days,
@@ -2040,7 +2042,7 @@ mod tests {
     #[test]
     fn prune_usage_before_drops_older_days_and_never_the_total() {
         let r = registry();
-        let t = today();
+        let t = utc_today();
         r.bump_usage_on(t - chrono::Duration::days(200), UsageCounter::Provisioned);
         r.bump_usage_on(t - chrono::Duration::days(90), UsageCounter::Failed);
         r.bump_usage_on(t - chrono::Duration::days(89), UsageCounter::Provisioned);
@@ -2053,7 +2055,11 @@ mod tests {
         let stats = r.usage_stats(t).unwrap();
         assert_eq!(stats.daily.len(), 1);
         assert_eq!(stats.daily[0].day, t - chrono::Duration::days(89));
-        assert_eq!(stats.all_time, counts(2, 1), "the total is never pruned");
+        assert_eq!(
+            stats.all_time,
+            UsageCounts::new(2, 1),
+            "the total is never pruned"
+        );
     }
 
     /// Droplets are at `user_version = 3`; the tables and the seeded totals
@@ -2078,12 +2084,18 @@ mod tests {
         assert_eq!(user_version(&conn), LATEST_VERSION);
         assert!(table_exists(&conn, "usage_daily"));
         assert!(table_exists(&conn, "usage_totals"));
-        assert_eq!(r.usage_stats(today()).unwrap().all_time, counts(0, 0));
+        assert_eq!(
+            r.usage_stats(utc_today()).unwrap().all_time,
+            UsageCounts::new(0, 0)
+        );
 
         // And the upgraded database counts.
         r.save(&make_goopy("u-upgraded")).unwrap();
         r.complete_spawn("u-upgraded").unwrap();
-        assert_eq!(r.usage_stats(today()).unwrap().all_time, counts(1, 0));
+        assert_eq!(
+            r.usage_stats(utc_today()).unwrap().all_time,
+            UsageCounts::new(1, 0)
+        );
     }
 
     #[test]
