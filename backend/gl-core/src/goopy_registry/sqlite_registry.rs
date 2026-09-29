@@ -25,7 +25,8 @@ use crate::usage_stats::{DailyUsage, UsageCounter, UsageCounts, UsageStats};
 ///
 /// Version 2 adds `instance_events` (#118).  Version 3 adds
 /// `goopies.build_sha` (#119).  Version 4 adds the usage counters,
-/// `usage_daily` and `usage_totals` (#172).  A fresh database is fully
+/// `usage_daily` and `usage_totals` (#172).  Version 5 measures an instance's
+/// lifetime in hours rather than days (#110).  A fresh database is fully
 /// initialised by walking every step in order, so new steps append here rather
 /// than editing an existing one — an already-migrated database never re-runs a
 /// step it has passed.
@@ -33,10 +34,12 @@ use crate::usage_stats::{DailyUsage, UsageCounter, UsageCounts, UsageStats};
 /// Each step runs inside a transaction (see [`migrate`]), which constrains what
 /// its SQL may contain: no explicit `BEGIN`/`COMMIT`, and no statement SQLite
 /// forbids inside a transaction — notably `VACUUM` and `PRAGMA journal_mode`.
-const MIGRATIONS: &[(u32, &str)] = &[
+/// That holds for a [`Step::Code`] step too.
+const MIGRATIONS: &[(u32, Step)] = &[
     (
         1,
-        "
+        Step::Sql(
+            "
     CREATE TABLE IF NOT EXISTS goopies (
         id               INTEGER PRIMARY KEY AUTOINCREMENT,
         slug             TEXT    UNIQUE NOT NULL,
@@ -54,6 +57,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
         slug TEXT    NOT NULL UNIQUE
     );
     ",
+        ),
     ),
     (
         2,
@@ -68,7 +72,8 @@ const MIGRATIONS: &[(u32, &str)] = &[
         //
         // The `occurred_at` index serves both readers: newest-first listing,
         // and the sweep's retention delete.
-        "
+        Step::Sql(
+            "
     CREATE TABLE IF NOT EXISTS instance_events (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
         slug        TEXT    NOT NULL,
@@ -84,6 +89,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     CREATE INDEX IF NOT EXISTS idx_instance_events_occurred_at
         ON instance_events(occurred_at);
     ",
+        ),
     ),
     (
         3,
@@ -96,9 +102,11 @@ const MIGRATIONS: &[(u32, &str)] = &[
         // Backfilling `'unknown'` would claim an unstamped build made them.
         // Not idempotent — `ADD COLUMN` fails if re-run — which the
         // `user_version` guard in [`migrate`] makes safe.
-        "
+        Step::Sql(
+            "
     ALTER TABLE goopies ADD COLUMN build_sha TEXT;
     ",
+        ),
     ),
     (
         4,
@@ -120,7 +128,8 @@ const MIGRATIONS: &[(u32, &str)] = &[
         // `IF NOT EXISTS` and `OR IGNORE`, as in steps 1 and 2, keep this
         // tolerant of a database whose `user_version` was reset under tables
         // that are still there.
-        "
+        Step::Sql(
+            "
     CREATE TABLE IF NOT EXISTS usage_daily (
         day         TEXT    PRIMARY KEY,
         provisioned INTEGER NOT NULL DEFAULT 0,
@@ -135,8 +144,73 @@ const MIGRATIONS: &[(u32, &str)] = &[
 
     INSERT OR IGNORE INTO usage_totals (id, provisioned, failed) VALUES (1, 0, 0);
     ",
+        ),
+    ),
+    (
+        5,
+        // The lifetime unit becomes hours (#110). See the function.
+        Step::Code(life_in_days_to_hours),
     ),
 ];
+
+/// Migration step 5: rename `goopies.life_in_days` to `life_in_hours` and
+/// convert every existing row, so an instance already running keeps exactly
+/// the expiry it had.
+///
+/// Code rather than SQL because a re-applied step must neither fail nor
+/// convert twice.  Steps 1, 2 and 4 are written to tolerate a `user_version`
+/// reset under tables that are still there; plain SQL cannot do that here:
+/// re-running `RENAME COLUMN` fails once the column is gone, and there is no
+/// `IF EXISTS` form to guard it.  Nor can the `UPDATE` tell a converted row from
+/// an unconverted one by its value.
+///
+/// The column's name is the marker instead.  The rename and the conversion run
+/// in the same transaction (see [`migrate`]), so `life_in_days` exists exactly
+/// when the conversion has not happened.  Seeing `life_in_hours` already there,
+/// the step does nothing.
+fn life_in_days_to_hours(conn: &Connection) -> rusqlite::Result<()> {
+    if !has_column(conn, "goopies", "life_in_days")? {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "
+    ALTER TABLE goopies RENAME COLUMN life_in_days TO life_in_hours;
+    UPDATE goopies SET life_in_hours = life_in_hours * 24;
+    ",
+    )
+}
+
+/// Whether `table` has a column named `column`.
+fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+        params![table, column],
+        |row| row.get(0),
+    )
+}
+
+/// What a migration step does.
+#[derive(Clone, Copy)]
+enum Step {
+    /// A batch of SQL, run as written.
+    Sql(&'static str),
+    /// A step that has to look at the schema before it knows what to run.
+    ///
+    /// SQLite has no conditional DDL — no `RENAME COLUMN IF EXISTS` — so a
+    /// step that must be safe to re-apply over a change it has already made
+    /// cannot always say so in SQL alone.  It receives the step's transaction.
+    Code(fn(&Connection) -> rusqlite::Result<()>),
+}
+
+impl Step {
+    fn apply(&self, conn: &Connection) -> rusqlite::Result<()> {
+        match self {
+            Step::Sql(sql) => conn.execute_batch(sql),
+            Step::Code(run) => run(conn),
+        }
+    }
+}
 
 /// The latest schema version understood by this build.
 ///
@@ -179,7 +253,7 @@ fn read_user_version(conn: &Connection) -> Result<u32, Error> {
 /// the highest version in `migrations` — i.e. the database was written by a
 /// newer build than this one.  The check runs before any DDL is issued, so a
 /// database we cannot interpret is left untouched.
-fn migrate(conn: &mut Connection, migrations: &[(u32, &str)]) -> Result<(), Error> {
+fn migrate(conn: &mut Connection, migrations: &[(u32, Step)]) -> Result<(), Error> {
     let latest = migrations.last().map(|&(target, _)| target).unwrap_or(0);
 
     let mut current = read_user_version(conn)?;
@@ -191,7 +265,7 @@ fn migrate(conn: &mut Connection, migrations: &[(u32, &str)]) -> Result<(), Erro
         });
     }
 
-    for &(target, sql) in migrations {
+    for &(target, step) in migrations {
         if current >= target {
             continue;
         }
@@ -213,7 +287,7 @@ fn migrate(conn: &mut Connection, migrations: &[(u32, &str)]) -> Result<(), Erro
             continue;
         }
 
-        tx.execute_batch(sql).map_err(Error::SchemaMigration)?;
+        step.apply(&tx).map_err(Error::SchemaMigration)?;
 
         // `PRAGMA user_version = <n>` does not accept bound parameters, so we
         // format the integer directly.  `target` is a `u32` literal so there
@@ -342,7 +416,7 @@ impl SqliteRegistry {
 #[allow(clippy::too_many_arguments)]
 fn parse_row(
     slug: String,
-    life_in_days: i64,
+    life_in_hours: i64,
     created_at_str: String,
     status_str: String,
     working_dir_str: String,
@@ -391,7 +465,7 @@ fn parse_row(
 
     Ok(Goopy {
         slug,
-        life_in_days: life_in_days as i32,
+        life_in_hours: life_in_hours as i32,
         created_at,
         status,
         working_dir: PathBuf::from(working_dir_str),
@@ -660,12 +734,12 @@ fn parse_event_row(
 fn insert_goopy(conn: &Connection, gp: &Goopy) -> Result<(), Error> {
     let result = conn.execute(
         "INSERT OR FAIL INTO goopies
-         (slug, life_in_days, created_at, status, working_dir, port,
+         (slug, life_in_hours, created_at, status, working_dir, port,
           provisioner_kind, service_version, build_sha)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             gp.slug,
-            gp.life_in_days as i64,
+            gp.life_in_hours as i64,
             gp.created_at.to_rfc3339(),
             gp.status.to_string(),
             gp.working_dir.to_string_lossy().as_ref(),
@@ -719,14 +793,14 @@ impl GoopyRegistry for SqliteRegistry {
         })?;
 
         let result = conn.query_row(
-            "SELECT slug, life_in_days, created_at, status, working_dir,
+            "SELECT slug, life_in_hours, created_at, status, working_dir,
                     port, provisioner_kind, service_version, build_sha
              FROM goopies WHERE slug = ?1",
             params![slug],
             |row| {
                 Ok((
                     row.get::<_, String>("slug")?,
-                    row.get::<_, i64>("life_in_days")?,
+                    row.get::<_, i64>("life_in_hours")?,
                     row.get::<_, String>("created_at")?,
                     row.get::<_, String>("status")?,
                     row.get::<_, String>("working_dir")?,
@@ -746,7 +820,7 @@ impl GoopyRegistry for SqliteRegistry {
             }),
             Ok((
                 slug,
-                life_in_days,
+                life_in_hours,
                 created_at_str,
                 status_str,
                 working_dir_str,
@@ -757,7 +831,7 @@ impl GoopyRegistry for SqliteRegistry {
             )) => {
                 let gp = parse_row(
                     slug,
-                    life_in_days,
+                    life_in_hours,
                     created_at_str,
                     status_str,
                     working_dir_str,
@@ -809,7 +883,7 @@ impl GoopyRegistry for SqliteRegistry {
 
         let mut stmt = conn
             .prepare(
-                "SELECT slug, life_in_days, created_at, status, working_dir,
+                "SELECT slug, life_in_hours, created_at, status, working_dir,
                         port, provisioner_kind, service_version, build_sha
                  FROM goopies ORDER BY created_at",
             )
@@ -822,7 +896,7 @@ impl GoopyRegistry for SqliteRegistry {
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>("slug")?,
-                    row.get::<_, i64>("life_in_days")?,
+                    row.get::<_, i64>("life_in_hours")?,
                     row.get::<_, String>("created_at")?,
                     row.get::<_, String>("status")?,
                     row.get::<_, String>("working_dir")?,
@@ -839,7 +913,7 @@ impl GoopyRegistry for SqliteRegistry {
             .map(|r| {
                 let (
                     slug,
-                    life_in_days,
+                    life_in_hours,
                     created_at_str,
                     status_str,
                     working_dir_str,
@@ -853,7 +927,7 @@ impl GoopyRegistry for SqliteRegistry {
                 })?;
                 parse_row(
                     slug,
-                    life_in_days,
+                    life_in_hours,
                     created_at_str,
                     status_str,
                     working_dir_str,
@@ -1261,7 +1335,7 @@ mod tests {
     fn make_goopy(slug: &str) -> Goopy {
         Goopy {
             slug: slug.to_string(),
-            life_in_days: 7,
+            life_in_hours: 168,
             created_at: chrono::Utc::now(),
             working_dir: PathBuf::from(format!("/tmp/{slug}")),
             port: 8080,
@@ -1283,7 +1357,7 @@ mod tests {
         r.save(&gp).unwrap();
         let loaded = r.load("test-slug").unwrap().unwrap();
         assert_eq!(loaded.slug, gp.slug);
-        assert_eq!(loaded.life_in_days, gp.life_in_days);
+        assert_eq!(loaded.life_in_hours, gp.life_in_hours);
         assert_eq!(loaded.status, gp.status);
         assert_eq!(loaded.port, gp.port);
         assert_eq!(loaded.working_dir, gp.working_dir);
@@ -1564,8 +1638,8 @@ mod tests {
         {
             let conn = r.pool.get().unwrap();
             conn.execute(
-                "INSERT INTO goopies (slug, life_in_days, created_at, status, working_dir, port, provisioner_kind, service_version) \
-                 VALUES ('bad-ts', 7, 'not-a-date', 'Spawning', '/tmp', 8080, 'Hello', '0.1.0')",
+                "INSERT INTO goopies (slug, life_in_hours, created_at, status, working_dir, port, provisioner_kind, service_version) \
+                 VALUES ('bad-ts', 168, 'not-a-date', 'Spawning', '/tmp', 8080, 'Hello', '0.1.0')",
                 [],
             )
             .unwrap();
@@ -1583,8 +1657,8 @@ mod tests {
         {
             let conn = r.pool.get().unwrap();
             conn.execute(
-                "INSERT INTO goopies (slug, life_in_days, created_at, status, working_dir, port, provisioner_kind, service_version) \
-                 VALUES ('bad-status', 7, '2024-01-01T00:00:00Z', 'Bogus', '/tmp', 8080, 'Hello', '0.1.0')",
+                "INSERT INTO goopies (slug, life_in_hours, created_at, status, working_dir, port, provisioner_kind, service_version) \
+                 VALUES ('bad-status', 168, '2024-01-01T00:00:00Z', 'Bogus', '/tmp', 8080, 'Hello', '0.1.0')",
                 [],
             )
             .unwrap();
@@ -1602,8 +1676,8 @@ mod tests {
         {
             let conn = r.pool.get().unwrap();
             conn.execute(
-                "INSERT INTO goopies (slug, life_in_days, created_at, status, working_dir, port, provisioner_kind, service_version) \
-                 VALUES ('bad-pk', 7, '2024-01-01T00:00:00Z', 'Spawning', '/tmp', 8080, 'Unknown', '0.1.0')",
+                "INSERT INTO goopies (slug, life_in_hours, created_at, status, working_dir, port, provisioner_kind, service_version) \
+                 VALUES ('bad-pk', 168, '2024-01-01T00:00:00Z', 'Spawning', '/tmp', 8080, 'Unknown', '0.1.0')",
                 [],
             )
             .unwrap();
@@ -2071,8 +2145,8 @@ mod tests {
 
         {
             let conn = rusqlite::Connection::open(&db_path).unwrap();
-            for (_, sql) in &MIGRATIONS[..3] {
-                conn.execute_batch(sql).unwrap();
+            for (_, step) in &MIGRATIONS[..3] {
+                step.apply(&conn).unwrap();
             }
             conn.execute_batch("PRAGMA user_version = 3;").unwrap();
             assert!(!table_exists(&conn, "usage_daily"));
@@ -2096,6 +2170,77 @@ mod tests {
             r.usage_stats(utc_today()).unwrap().all_time,
             UsageCounts::new(1, 0)
         );
+    }
+
+    /// Build a file database the way the build before #110 left it: every step
+    /// up to 4 applied and stamped, `goopies` still in days, holding one row per
+    /// `(slug, life_in_days)`.
+    fn seed_v4_db(db_path: &Path, rows: &[(&str, i64)]) {
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        for (target, step) in MIGRATIONS {
+            if *target > 4 {
+                break;
+            }
+            step.apply(&conn).unwrap();
+        }
+        conn.execute_batch("PRAGMA user_version = 4;").unwrap();
+        for (slug, days) in rows {
+            conn.execute(
+                "INSERT INTO goopies (slug, life_in_days, created_at, status, working_dir, port, provisioner_kind, service_version) \
+                 VALUES (?1, ?2, '2026-09-29T10:00:00Z', 'Done', '/tmp/v4', 8080, 'Hello', '0.1.0')",
+                params![slug, days],
+            )
+            .unwrap();
+        }
+    }
+
+    /// Instances running when step 5 lands must expire exactly when they
+    /// would have: the column changes unit, and every value with it.
+    #[test]
+    fn migration_converts_life_in_days_to_hours_keeping_every_expiry() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("v4.db");
+        seed_v4_db(&db_path, &[("one-day", 1), ("one-week", 7)]);
+
+        let r = SqliteRegistry::new(&db_path).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        assert_eq!(user_version(&conn), LATEST_VERSION);
+        assert!(column_exists(&conn, "goopies", "life_in_hours"));
+        assert!(!column_exists(&conn, "goopies", "life_in_days"));
+
+        for (slug, days, hours) in [("one-day", 1, 24), ("one-week", 7, 168)] {
+            let gp = r.load(slug).unwrap().expect("the row survives migration");
+            assert_eq!(gp.life_in_hours, hours, "{slug}");
+            assert_eq!(
+                gp.created_at + chrono::Duration::hours(gp.life_in_hours as i64),
+                gp.created_at + chrono::Duration::days(days),
+                "{slug} must keep the expiry it had"
+            );
+        }
+    }
+
+    /// A `user_version` reset under the converted table walks step 5 again.
+    /// Written as SQL, that would fail on the missing `life_in_days` — or,
+    /// had it got past the rename, multiply every lifetime by 24 a second time.
+    #[test]
+    fn reapplying_step_5_neither_fails_nor_converts_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("v4.db");
+        seed_v4_db(&db_path, &[("one-day", 1)]);
+        SqliteRegistry::new(&db_path).unwrap();
+
+        rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .execute_batch("PRAGMA user_version = 4;")
+            .unwrap();
+        let r = SqliteRegistry::new(&db_path).expect("re-applying step 5 must not fail");
+
+        assert_eq!(
+            user_version(&rusqlite::Connection::open(&db_path).unwrap()),
+            LATEST_VERSION
+        );
+        assert_eq!(r.load("one-day").unwrap().unwrap().life_in_hours, 24);
     }
 
     #[test]
@@ -2126,7 +2271,7 @@ mod tests {
         // Reproduce a pre-#118 database: step 1's schema, stamped at 1.
         {
             let conn = rusqlite::Connection::open(&db_path).unwrap();
-            conn.execute_batch(MIGRATIONS[0].1).unwrap();
+            MIGRATIONS[0].1.apply(&conn).unwrap();
             conn.execute_batch("PRAGMA user_version = 1;").unwrap();
             assert!(
                 !table_exists(&conn, "instance_events"),
@@ -2191,8 +2336,8 @@ mod tests {
         // Reproduce a pre-#119 database holding one instance: steps 1-2, stamped at 2.
         {
             let conn = rusqlite::Connection::open(&db_path).unwrap();
-            conn.execute_batch(MIGRATIONS[0].1).unwrap();
-            conn.execute_batch(MIGRATIONS[1].1).unwrap();
+            MIGRATIONS[0].1.apply(&conn).unwrap();
+            MIGRATIONS[1].1.apply(&conn).unwrap();
             conn.execute_batch("PRAGMA user_version = 2;").unwrap();
             conn.execute(
                 "INSERT INTO goopies (slug, life_in_days, created_at, status, working_dir, port, provisioner_kind, service_version) \
@@ -2368,10 +2513,10 @@ mod tests {
     /// * No step uses `IF NOT EXISTS`, so re-applying an already-applied step
     ///   errors.  A no-op run therefore has to genuinely skip, not just be
     ///   idempotent by luck.
-    const TEST_MIGRATIONS: &[(u32, &str)] = &[
-        (1, "CREATE TABLE t1 (a INTEGER);"),
-        (2, "CREATE TABLE t2 (b INTEGER);"),
-        (3, "ALTER TABLE t1 ADD COLUMN c TEXT;"),
+    const TEST_MIGRATIONS: &[(u32, Step)] = &[
+        (1, Step::Sql("CREATE TABLE t1 (a INTEGER);")),
+        (2, Step::Sql("CREATE TABLE t2 (b INTEGER);")),
+        (3, Step::Sql("ALTER TABLE t1 ADD COLUMN c TEXT;")),
     ];
 
     fn user_version(conn: &Connection) -> u32 {
@@ -2390,24 +2535,17 @@ mod tests {
     }
 
     fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
-        let n: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
-                params![table, column],
-                |row| row.get(0),
-            )
-            .unwrap();
-        n > 0
+        has_column(conn, table, column).unwrap()
     }
 
     /// Apply the SQL of every step up to and including `through`, then stamp
     /// `user_version`, to simulate a DB left behind by an older build.
     fn seed_at_version(conn: &Connection, through: u32) {
-        for &(target, sql) in TEST_MIGRATIONS {
+        for &(target, step) in TEST_MIGRATIONS {
             if target > through {
                 break;
             }
-            conn.execute_batch(sql).unwrap();
+            step.apply(conn).unwrap();
         }
         conn.execute_batch(&format!("PRAGMA user_version = {through};"))
             .unwrap();
@@ -2523,11 +2661,11 @@ mod tests {
     /// created, then re-creating the existing `t1` errors.  Applied without a
     /// transaction, this leaves `t2` behind; applied atomically, it leaves no
     /// trace.
-    const FAILING_MIGRATIONS: &[(u32, &str)] = &[
-        (1, "CREATE TABLE t1 (a INTEGER);"),
+    const FAILING_MIGRATIONS: &[(u32, Step)] = &[
+        (1, Step::Sql("CREATE TABLE t1 (a INTEGER);")),
         (
             2,
-            "CREATE TABLE t2 (b INTEGER); CREATE TABLE t1 (dup INTEGER);",
+            Step::Sql("CREATE TABLE t2 (b INTEGER); CREATE TABLE t1 (dup INTEGER);"),
         ),
     ];
 

@@ -156,12 +156,12 @@ fn main() {
     }
 
     println!(
-        "Config: {path}\n  db:                {db}\n  base_dir:          {base_dir}\n  domain:            {domain}\n  life_in_days:      {life_in_days}\n  provisioner:       {provisioner}\n  port range:        {port_start}–{port_end}\n  allocator:         {alloc_kind}\n  allocator pool:    {alloc_pool}\n  allocator quota:   {alloc_quota} MB\n  cors_origin:       {cors_origin}\n  bind_address:      {bind_address}\n  api_address:       {api_address}\n  sweep_interval:    {sweep}s\n  event_retention:   {retention}d\n  mode:              {mode}",
+        "Config: {path}\n  db:                {db}\n  base_dir:          {base_dir}\n  domain:            {domain}\n  life_in_hours:     {life_in_hours}\n  provisioner:       {provisioner}\n  port range:        {port_start}–{port_end}\n  allocator:         {alloc_kind}\n  allocator pool:    {alloc_pool}\n  allocator quota:   {alloc_quota} MB\n  cors_origin:       {cors_origin}\n  bind_address:      {bind_address}\n  api_address:       {api_address}\n  sweep_interval:    {sweep}s\n  event_retention:   {retention}d\n  mode:              {mode}",
         path = cli.config.display(),
         db = cfg.registry.path.display(),
         base_dir = cfg.base_dir.display(),
         domain = cfg.domain,
-        life_in_days = cfg.life_in_days,
+        life_in_hours = cfg.life_in_hours,
         provisioner = cfg.provisioner.kind(),
         port_start = cfg.port_range_start,
         port_end = cfg.port_range_end,
@@ -256,10 +256,10 @@ fn main() {
                     Ok(goopies) => {
                         for gp in goopies {
                             println!(
-                                "{slug}\n  status:           {status}\n  life_in_days:     {life_in_days}\n  created_at:       {created_at}\n  port:             {port}\n  provisioner_kind: {provisioner_kind}\n  service_version:  {service_version}\n  build_sha:        {build_sha}\n  working_dir:      {working_dir}\n",
+                                "{slug}\n  status:           {status}\n  life_in_hours:    {life_in_hours}\n  created_at:       {created_at}\n  port:             {port}\n  provisioner_kind: {provisioner_kind}\n  service_version:  {service_version}\n  build_sha:        {build_sha}\n  working_dir:      {working_dir}\n",
                                 slug = gp.slug,
                                 status = gp.status,
-                                life_in_days = gp.life_in_days,
+                                life_in_hours = gp.life_in_hours,
                                 created_at = gp.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
                                 port = gp.port,
                                 provisioner_kind = gp.provisioner_kind,

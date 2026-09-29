@@ -24,7 +24,7 @@ use std::process::{Command, Stdio};
 const VALID_CONFIG: &str = r#"
 base_dir = "/tmp/goopy-check-cli"
 domain = "goopy.life"
-life_in_days = 7
+life_in_hours = 168
 port_range_start = 9000
 port_range_end = 9100
 dev_mode = true
@@ -113,6 +113,22 @@ fn check_config_exits_non_zero_for_a_config_the_binary_cannot_start_on() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("bind_address"), "stderr was: {stderr}");
+}
+
+#[test]
+fn check_config_exits_non_zero_for_a_config_still_in_days() {
+    // #110 renamed the lifetime field. A droplet config not yet converted must
+    // stop the deploy here, and say which field it is missing.
+    let f = write_config(&VALID_CONFIG.replace("life_in_hours = 168", "life_in_days = 7"));
+    let out = run_check(f.path());
+
+    assert!(
+        !out.status.success(),
+        "a config with only life_in_days must exit non-zero, got {:?}",
+        out.status.code(),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("life_in_hours"), "stderr was: {stderr}");
 }
 
 #[test]

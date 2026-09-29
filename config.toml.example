@@ -4,8 +4,8 @@ base_dir = "/opt/goopy-life/data"
 # Public domain (e.g. "goopy.life" — instances get {slug}.{domain})
 domain = "goopy.life"
 
-# How long each goopy lives (days)
-life_in_days = 7
+# How long each goopy lives (hours)
+life_in_hours = 168
 
 # Port range for goopy instances (inclusive)
 port_range_start = 40000

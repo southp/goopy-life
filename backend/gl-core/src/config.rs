@@ -173,7 +173,13 @@ impl Default for RateLimitConfig {
 pub struct Config {
     pub base_dir: PathBuf,
     pub domain: String,
-    pub life_in_days: i32,
+    /// How long a new instance lives. Each instance records its own copy, so
+    /// changing this affects only instances spawned afterwards.
+    ///
+    /// Required, with no default: a config still carrying the old
+    /// `life_in_days` must fail to parse rather than start with a guess, so
+    /// `gl-serv --check-config` stops the deploy that would ship it (#110).
+    pub life_in_hours: i32,
     pub port_range_start: u32,
     pub port_range_end: u32,
     pub dev_mode: bool,
@@ -397,7 +403,7 @@ impl Config {
         GoopyManagerConfig {
             base_dir: self.base_dir.clone(),
             domain: self.domain.clone(),
-            life_in_days: self.life_in_days,
+            life_in_hours: self.life_in_hours,
             port_range_start: self.port_range_start,
             port_range_end: self.port_range_end,
             max_active: self.max_active,
@@ -412,8 +418,8 @@ impl Config {
             .map_err(|e| Error::Config(format!("could not read {}: {}", path.display(), e)))?;
         let cfg: Self = toml::from_str(&contents)
             .map_err(|e| Error::Config(format!("could not parse {}: {}", path.display(), e)))?;
-        if cfg.life_in_days <= 0 {
-            return Err(Error::Config("life_in_days must be > 0".into()));
+        if cfg.life_in_hours <= 0 {
+            return Err(Error::Config("life_in_hours must be > 0".into()));
         }
         if cfg.port_range_start >= cfg.port_range_end {
             return Err(Error::Config(
@@ -588,7 +594,7 @@ mod tests {
     const VALID_BASE: &str = r#"
 base_dir = "/tmp/goopy"
 domain = "goopy.life"
-life_in_days = 7
+life_in_hours = 168
 port_range_start = 9000
 port_range_end = 9100
 dev_mode = true
@@ -611,7 +617,7 @@ kind = "PlainDir"
         );
         let cfg = write_config(&toml).expect("should parse");
         assert_eq!(cfg.domain, "goopy.life");
-        assert_eq!(cfg.life_in_days, 7);
+        assert_eq!(cfg.life_in_hours, 168);
         assert_eq!(cfg.port_range_start, 9000);
         assert_eq!(cfg.sweep_interval_secs, 3600);
         assert_eq!(cfg.event_retention_days, 30);
@@ -623,7 +629,7 @@ kind = "PlainDir"
         // Omit `domain`
         let toml = r#"
 base_dir = "/tmp/goopy"
-life_in_days = 7
+life_in_hours = 168
 port_range_start = 40000
 port_range_end = 49999
 dev_mode = false
@@ -821,6 +827,40 @@ kind = "PlainDir"
         );
     }
 
+    /// A config written before #110 says `life_in_days`. It must be refused,
+    /// and the refusal must name the field that replaced it.
+    #[test]
+    fn a_config_with_only_life_in_days_is_rejected_naming_life_in_hours() {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            VALID_BASE.replace("life_in_hours = 168", "life_in_days = 7")
+        );
+        let err = write_config(&toml).unwrap_err();
+        assert!(
+            matches!(err, Error::Config(ref s) if s.contains("missing field `life_in_hours`")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn zero_life_in_hours_rejected() {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            VALID_BASE.replace("life_in_hours = 168", "life_in_hours = 0")
+        );
+        let err = write_config(&toml).unwrap_err();
+        assert!(
+            matches!(err, Error::Config(ref s) if s.contains("life_in_hours must be > 0")),
+            "got {err:?}"
+        );
+    }
+
     #[test]
     fn zero_sweep_interval_rejected() {
         // Left to gl-serv this is a panic while spawning the sweep task, which
@@ -956,7 +996,7 @@ kind = "PlainDir"
         let manager_cfg = cfg.build_manager_config();
         assert_eq!(manager_cfg.base_dir, cfg.base_dir);
         assert_eq!(manager_cfg.domain, cfg.domain);
-        assert_eq!(manager_cfg.life_in_days, cfg.life_in_days);
+        assert_eq!(manager_cfg.life_in_hours, cfg.life_in_hours);
         assert_eq!(manager_cfg.port_range_start, cfg.port_range_start);
         assert_eq!(manager_cfg.port_range_end, cfg.port_range_end);
         // port_range_start and port_range_end are both u32 — assert distinct
@@ -980,7 +1020,7 @@ kind = "PlainDir"
     const GHOST_BASE: &str = r#"
 base_dir = "/tmp/goopy"
 domain = "goopy.life"
-life_in_days = 7
+life_in_hours = 168
 port_range_start = 9000
 port_range_end = 9100
 dev_mode = false
@@ -1155,7 +1195,7 @@ version = "5.87.1"
 base_dir = "/tmp/goopy"
 domain = "goopy.life"
 ssl_email = "admin@goopy.life"
-life_in_days = 7
+life_in_hours = 168
 port_range_start = 9000
 port_range_end = 9100
 dev_mode = true
@@ -1176,7 +1216,7 @@ kind = "PlainDir"
 base_dir = "/tmp/goopy"
 domain = "goopy.life"
 ssl_email = "admin@goopy.life"
-life_in_days = 7
+life_in_hours = 168
 provisioner_kind = "Hello"
 port_range_start = 9000
 port_range_end = 9100

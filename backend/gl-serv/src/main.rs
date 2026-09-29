@@ -112,7 +112,7 @@ fn check_config(path: &std::path::Path) -> Result<(gl_core::Config, String), gl_
         ("allocator", allocator),
         ("registry", cfg.registry.path.display().to_string()),
         ("base_dir", cfg.base_dir.display().to_string()),
-        ("life_in_days", cfg.life_in_days.to_string()),
+        ("life_in_hours", cfg.life_in_hours.to_string()),
         ("sweep_interval_secs", cfg.sweep_interval_secs.to_string()),
         ("event_retention_days", cfg.event_retention_days.to_string()),
         ("stats_retention_days", cfg.stats_retention_days.to_string()),
@@ -268,7 +268,7 @@ struct GoopyResponse {
 
 #[derive(serde::Serialize)]
 struct ConfigResponse {
-    life_in_days: i32,
+    life_in_hours: i32,
     storage_quota_mb: u64,
     domain: String,
 }
@@ -444,8 +444,8 @@ impl AppError {
     /// `capacity_retry_after_secs` becomes the `Retry-After` header on the 503 a
     /// capacity cap produces. Callers pass [`Config::sweep_interval_secs`],
     /// because the sweep is the only thing that frees a slot: the API exposes no
-    /// despawn endpoint, so capacity is reclaimed when an instance ages past
-    /// `life_in_days` *and* the sweeper next runs. Deriving the hint from config
+    /// despawn endpoint, so capacity is reclaimed when an instance outlives its
+    /// lifetime *and* the sweeper next runs. Deriving the hint from config
     /// rather than a constant also means it follows the operator if they shorten
     /// the interval.
     ///
@@ -519,7 +519,7 @@ async fn get_goopy(
 
     let goopy = goopy.ok_or_else(|| AppError::NotFound("not found".into()))?;
 
-    let expires_at = goopy.created_at + Duration::days(goopy.life_in_days as i64);
+    let expires_at = goopy.created_at + Duration::hours(goopy.life_in_hours as i64);
     let is_expired = Utc::now() >= expires_at;
 
     let url = if domain == "localhost" {
@@ -583,7 +583,7 @@ async fn alive_check(
         return Ok(deny());
     };
 
-    let expires_at = goopy.created_at + Duration::days(goopy.life_in_days as i64);
+    let expires_at = goopy.created_at + Duration::hours(goopy.life_in_hours as i64);
     let alive = goopy.status == gl_core::Status::Done && Utc::now() < expires_at;
 
     if alive {
@@ -705,7 +705,7 @@ async fn get_version() -> impl IntoResponse {
 
 async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(ConfigResponse {
-        life_in_days: state.cfg.life_in_days,
+        life_in_hours: state.cfg.life_in_hours,
         storage_quota_mb: state.cfg.allocator.quota_mb,
         domain: state.cfg.domain.clone(),
     })
@@ -1171,7 +1171,7 @@ mod tests {
         gl_core::Config {
             base_dir: PathBuf::from("/tmp/goopy-test"),
             domain: domain.to_string(),
-            life_in_days: 7,
+            life_in_hours: 168,
             port_range_start: 9000,
             port_range_end: 9100,
             dev_mode: true,
@@ -1246,7 +1246,7 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: cfg.base_dir.clone(),
                 domain: cfg.domain.clone(),
-                life_in_days: cfg.life_in_days,
+                life_in_hours: cfg.life_in_hours,
                 port_range_start: cfg.port_range_start,
                 port_range_end: cfg.port_range_end,
                 max_active,
@@ -1281,14 +1281,14 @@ mod tests {
     fn seed_goopy(
         registry: &SqliteRegistry,
         slug: &str,
-        life_in_days: i32,
+        life_in_hours: i32,
         days_ago: i64,
         port: u32,
         status: Status,
     ) -> Goopy {
         let goopy = Goopy {
             slug: slug.to_string(),
-            life_in_days,
+            life_in_hours,
             created_at: Utc::now() - Duration::days(days_ago),
             working_dir: PathBuf::from(format!("/tmp/goopy-test/{slug}")),
             port,
@@ -1340,7 +1340,7 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: PathBuf::from("/tmp/goopy-test"),
                 domain: cfg.domain.clone(),
-                life_in_days: cfg.life_in_days,
+                life_in_hours: cfg.life_in_hours,
                 port_range_start: cfg.port_range_start,
                 port_range_end: cfg.port_range_end,
                 max_active: 100,
@@ -1484,9 +1484,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_goopy_expires_at_uses_instance_life_in_days() {
-        // Config says 7 days, but the goopy was saved with life_in_days = 3.
-        // expires_at must reflect the per-instance value, not the config.
+    async fn get_goopy_expires_at_uses_instance_life_in_hours() {
+        // Config says 168 hours, but the goopy was saved with life_in_hours = 3.
+        // expires_at must reflect the per-instance value, not the config, and
+        // count it in hours.
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         let goopy = seed_goopy(&registry, "short-lived-slug", 3, 0, 9002, Status::Done);
         let app = make_router("goopy.life", registry);
@@ -1505,7 +1506,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp.into_body()).await;
 
-        let expected_expires_at = (goopy.created_at + Duration::days(3)).to_rfc3339();
+        let expected_expires_at = (goopy.created_at + Duration::hours(3)).to_rfc3339();
         assert_eq!(body["expires_at"], expected_expires_at);
     }
 
@@ -1687,7 +1688,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp.into_body()).await;
         assert_eq!(body["domain"], "goopy.life");
-        assert_eq!(body["life_in_days"], 7);
+        assert_eq!(body["life_in_hours"], 168);
         assert_eq!(body["storage_quota_mb"], 0); // PlainDir has no quota
     }
 
@@ -2307,7 +2308,7 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: cfg.base_dir.clone(),
                 domain: cfg.domain.clone(),
-                life_in_days: cfg.life_in_days,
+                life_in_hours: cfg.life_in_hours,
                 port_range_start: cfg.port_range_start,
                 port_range_end: cfg.port_range_end,
                 max_active: 100,
@@ -2339,7 +2340,7 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: cfg.base_dir.clone(),
                 domain: cfg.domain.clone(),
-                life_in_days: cfg.life_in_days,
+                life_in_hours: cfg.life_in_hours,
                 port_range_start: cfg.port_range_start,
                 port_range_end: cfg.port_range_end,
                 max_active: 100,
@@ -2627,7 +2628,7 @@ mod tests {
     const VALID_CONFIG: &str = r#"
 base_dir = "/tmp/goopy"
 domain = "goopy.life"
-life_in_days = 7
+life_in_hours = 168
 port_range_start = 9000
 port_range_end = 9100
 dev_mode = true

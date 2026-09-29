@@ -6,7 +6,9 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Goopy {
     pub slug: String,
-    pub life_in_days: i32,
+    /// How long this instance lives, fixed when it is spawned: `expires_at` is
+    /// `created_at` plus this many hours.
+    pub life_in_hours: i32,
     pub created_at: DateTime<Utc>,
     pub status: Status,
     pub working_dir: PathBuf,

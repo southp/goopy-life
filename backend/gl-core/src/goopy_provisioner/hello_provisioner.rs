@@ -182,7 +182,7 @@ mod tests {
     fn test_goopy(working_dir: &Path, port: u32) -> Goopy {
         Goopy {
             slug: "tasty-lucky-clover".to_string(),
-            life_in_days: 7,
+            life_in_hours: 168,
             created_at: chrono::Utc::now(),
             working_dir: working_dir.to_path_buf(),
             port,

@@ -18,8 +18,8 @@ base_dir = "/opt/goopy-life/data"
 # Public domain — instances are served at {slug}.{domain}.
 domain = "southp.dev"
 
-# How long each goopy lives (days).
-life_in_days = 1
+# How long each goopy lives (hours).
+life_in_hours = 24
 
 # Port range for goopy instances (inclusive).
 port_range_start = 40000
