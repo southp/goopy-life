@@ -3,6 +3,7 @@ use crate::goopy_provisioner::*;
 use crate::goopy_registry::*;
 use crate::instance_event::*;
 use crate::shared_types::*;
+use crate::usage_stats::UsageStats;
 
 use chrono::{Duration, Utc};
 use std::path::PathBuf;
@@ -200,7 +201,10 @@ where
             let _guard = span.enter();
             match provisioner.provision(&goopy_clone) {
                 Ok(_) => {
-                    if let Err(e) = registry.update_status(&goopy_clone.slug, Status::Done) {
+                    // `Done` and the provision count commit together (#172),
+                    // so the count is exactly the instances a visitor could
+                    // use: since #151, `Done` means it answered HTTP.
+                    if let Err(e) = registry.complete_spawn(&goopy_clone.slug) {
                         tracing::error!("spawning: update {} error: {:?}", goopy_clone.slug, e);
                     }
                 }
@@ -454,6 +458,15 @@ where
         self.registry.events(slug, limit)
     }
 
+    /// Read the usage counters as of today (UTC): provisions and failed
+    /// provisions for today, the last seven days and all time (#172).
+    ///
+    /// Every provision counts, `gl-cli spawn` included — it runs this same
+    /// code — so a load test run on the host inflates the figures.
+    pub fn usage_stats(&self) -> Result<UsageStats, Error> {
+        self.registry.usage_stats(Utc::now().date_naive())
+    }
+
     /// Read the current usage of both caps.
     ///
     /// The two counts are read independently, so they are not a consistent
@@ -613,7 +626,7 @@ mod tests {
     use crate::goopy_registry::GoopyRegistry;
     use crate::goopy_registry::sqlite_registry::SqliteRegistry;
     use crate::storage_allocator::{PlainDirAllocator, StorageAllocator};
-    use crate::usage_stats::{UsageCounts, UsageStats};
+    use crate::usage_stats::UsageCounts;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
@@ -1938,6 +1951,90 @@ mod tests {
             reap.occurred_at >= failure.occurred_at,
             "failed at T, reaped at T+n: {events:?}"
         );
+    }
+
+    // ── usage counters (#172) ─────────────────────────────────────────────
+
+    fn usage(provisioned: u64, failed: u64) -> UsageCounts {
+        UsageCounts {
+            provisioned,
+            failed,
+        }
+    }
+
+    /// Stands in for the readiness gate (#151) refusing an instance that never
+    /// answered HTTP — the spawn failure a visitor would actually hit.
+    struct NeverReadyProvisioner;
+
+    impl GoopyProvisioner for NeverReadyProvisioner {
+        fn provision(&self, goopy: &Goopy) -> Result<(), Error> {
+            Err(Error::ReadinessTimeout {
+                slug: goopy.slug.clone(),
+                waited_secs: 60,
+                last: "connection refused".into(),
+            })
+        }
+        fn deprovision(&self, _goopy: &Goopy) -> Result<(), Error> {
+            Ok(())
+        }
+        fn kind(&self) -> ProvisionerKind {
+            ProvisionerKind::Hello
+        }
+        fn service_version(&self) -> &str {
+            "9.9.9-mock"
+        }
+    }
+
+    #[test]
+    fn a_spawn_that_reaches_done_counts_one_provision() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let gm = manager_with_provisioner(registry, NoopProvisioner);
+
+        let (slug, _) = gm.spawn().unwrap();
+        wait_for_spawn_to_settle(&gm, &slug);
+
+        assert_eq!(gm.get(&slug).unwrap().unwrap().status, Status::Done);
+        let stats = gm.usage_stats().unwrap();
+        assert_eq!(stats.today, usage(1, 0));
+        assert_eq!(stats.all_time, usage(1, 0));
+    }
+
+    #[test]
+    fn a_spawn_that_fails_at_the_readiness_gate_counts_one_failure() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let gm = manager_with_provisioner(registry, NeverReadyProvisioner);
+
+        let (slug, _) = gm.spawn().unwrap();
+        wait_for_spawn_to_settle(&gm, &slug);
+
+        assert_eq!(gm.get(&slug).unwrap().unwrap().status, Status::Failed);
+        let stats = gm.usage_stats().unwrap();
+        assert_eq!(stats.today, usage(0, 1));
+        assert_eq!(stats.all_time, usage(0, 1));
+    }
+
+    /// A teardown that fails is a cleanup problem: the instance was already
+    /// counted when it was provisioned, and must not be counted again.
+    #[test]
+    fn a_failed_despawn_changes_neither_count() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let gm = manager_with_provisioner(
+            registry,
+            UndeprovisionableProvisioner {
+                deprovision_calls: Arc::new(Mutex::new(0)),
+            },
+        );
+        let (slug, _) = gm.spawn().unwrap();
+        wait_for_spawn_to_settle(&gm, &slug);
+        let before = gm.usage_stats().unwrap();
+        assert_eq!(before.all_time, usage(1, 0));
+
+        gm.despawn_blocking(&slug).unwrap_err();
+
+        assert_eq!(gm.get(&slug).unwrap().unwrap().status, Status::Failed);
+        let after = gm.usage_stats().unwrap();
+        assert_eq!(after.all_time, before.all_time);
+        assert_eq!(after.today, before.today);
     }
 
     /// Append-only means unbounded unless something trims it, and the sweep is
