@@ -208,6 +208,7 @@ trait ManagerService: Send + Sync {
     fn get(&self, slug: &str) -> Result<Option<gl_core::Goopy>, gl_core::Error>;
     fn sweep(&self) -> Result<(u32, Vec<gl_core::Error>), gl_core::Error>;
     fn capacity(&self) -> Result<gl_core::Capacity, gl_core::Error>;
+    fn usage_stats(&self) -> Result<gl_core::UsageStats, gl_core::Error>;
 }
 
 impl<R, P> ManagerService for GoopyManager<R, P>
@@ -229,6 +230,10 @@ where
 
     fn capacity(&self) -> Result<gl_core::Capacity, gl_core::Error> {
         GoopyManager::capacity(self)
+    }
+
+    fn usage_stats(&self) -> Result<gl_core::UsageStats, gl_core::Error> {
+        GoopyManager::usage_stats(self)
     }
 }
 
@@ -320,6 +325,49 @@ struct CapacityResponse {
     max_active: u32,
     provisioned: u32,
     max_provisioned: u32,
+}
+
+/// A provisioned/failed pair, as `GET /stats` reports it for every span.
+#[derive(serde::Serialize)]
+struct UsageCountsResponse {
+    provisioned: u64,
+    failed: u64,
+}
+
+impl From<gl_core::UsageCounts> for UsageCountsResponse {
+    fn from(c: gl_core::UsageCounts) -> Self {
+        Self {
+            provisioned: c.provisioned,
+            failed: c.failed,
+        }
+    }
+}
+
+/// One UTC day in `GET /stats`' `daily` list.
+#[derive(serde::Serialize)]
+struct DailyUsageResponse {
+    /// `YYYY-MM-DD`, UTC.
+    day: String,
+    provisioned: u64,
+    failed: u64,
+}
+
+/// Body of `GET /stats` — how many instances were provisioned, and how many
+/// failed to be (#172).
+///
+/// Counts only: no slugs and no failure `detail`, so nothing here identifies
+/// an instance or leaks the operator-only reason an event carries.
+#[derive(serde::Serialize)]
+struct StatsResponse {
+    all_time: UsageCountsResponse,
+    /// The last seven UTC days, today included.
+    last_7_days: UsageCountsResponse,
+    today: UsageCountsResponse,
+    /// How many UTC days of `daily` rows the sweep keeps, today included.
+    window_days: u32,
+    /// Days that have a row, newest first. A day with no activity has no row
+    /// and is left out rather than zero-filled.
+    daily: Vec<DailyUsageResponse>,
 }
 
 #[derive(serde::Serialize)]
@@ -597,6 +645,38 @@ async fn get_capacity(State(state): State<Arc<AppState>>) -> Result<impl IntoRes
     }))
 }
 
+/// `GET /stats` — provision counts for today, the last seven days and all
+/// time, plus the daily rows behind them (#172).
+///
+/// Public, on the read limiter: the numbers are aggregate counts and carry
+/// nothing that identifies an instance. Days are UTC. Every provision counts,
+/// `gl-cli spawn` included, since it runs the same `GoopyManager` code.
+async fn get_stats(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
+    let stats = tokio::task::spawn_blocking({
+        let state = Arc::clone(&state);
+        move || state.manager.usage_stats()
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("task join error: {e}")))?
+    .map_err(|e| AppError::from_core(e, state.cfg.sweep_interval_secs))?;
+
+    Ok(Json(StatsResponse {
+        all_time: stats.all_time.into(),
+        last_7_days: stats.last_7_days.into(),
+        today: stats.today.into(),
+        window_days: state.cfg.stats_retention_days,
+        daily: stats
+            .daily
+            .into_iter()
+            .map(|d| DailyUsageResponse {
+                day: d.day.to_string(),
+                provisioned: d.counts.provisioned,
+                failed: d.counts.failed,
+            })
+            .collect(),
+    }))
+}
+
 /// `GET /version` — the commit this process was built from.
 ///
 /// Answers "is the thing I merged the thing that is running?" without an ssh
@@ -827,6 +907,7 @@ fn build_router(
         .route("/config", get(get_config))
         .route("/capacity", get(get_capacity))
         .route("/version", get(get_version))
+        .route("/stats", get(get_stats))
         .layer(read_layer)
         .with_state(Arc::clone(&state));
 
@@ -1910,6 +1991,118 @@ mod tests {
         }
     }
 
+    // ── get_stats ─────────────────────────────────────────────────────────
+
+    async fn get_stats_body(app: Router) -> Value {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
+                    .uri("/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        body_json(resp.into_body()).await
+    }
+
+    #[tokio::test]
+    async fn get_stats_on_an_empty_database_returns_zeros() {
+        let app = make_router(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+        );
+
+        let body = get_stats_body(app).await;
+
+        let zeros = serde_json::json!({ "provisioned": 0, "failed": 0 });
+        assert_eq!(body["all_time"], zeros);
+        assert_eq!(body["last_7_days"], zeros);
+        assert_eq!(body["today"], zeros);
+        assert_eq!(body["window_days"], 90);
+        assert_eq!(body["daily"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_stats_reports_provisions_and_failures_without_slugs() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_goopy(&registry, "stats-done", 7, 0, 9501, Status::Spawning);
+        registry.complete_spawn("stats-done").unwrap();
+        seed_goopy(&registry, "stats-failed", 7, 0, 9502, Status::Spawning);
+        registry
+            .fail_with_event(
+                "stats-failed",
+                &gl_core::InstanceEvent::failed(
+                    "stats-failed",
+                    gl_core::EventPhase::Spawn,
+                    &gl_core::Error::Invalid,
+                ),
+            )
+            .unwrap();
+        let app = make_router("goopy.life", registry);
+
+        let body = get_stats_body(app).await;
+
+        let one_each = serde_json::json!({ "provisioned": 1, "failed": 1 });
+        assert_eq!(body["all_time"], one_each);
+        assert_eq!(body["last_7_days"], one_each);
+        assert_eq!(body["today"], one_each);
+        assert_eq!(
+            body["daily"],
+            serde_json::json!([{
+                "day": Utc::now().date_naive().to_string(),
+                "provisioned": 1,
+                "failed": 1,
+            }])
+        );
+        let text = body.to_string();
+        assert!(
+            !text.contains("stats-done") && !text.contains("stats-failed"),
+            "nothing in /stats may identify an instance: {text}"
+        );
+    }
+
+    /// Public and aggregate, so it belongs on the loose read limiter with
+    /// `/capacity`, not the tight provisioning one.
+    #[tokio::test]
+    async fn get_stats_uses_the_loose_read_rate_limit() {
+        let rl = gl_core::config::RateLimitConfig {
+            provision_burst: 1,
+            provision_period_secs: 60,
+            read_burst: 100,
+            read_period_secs: 1,
+            alive_burst: 600,
+            alive_period_secs: 1,
+            alive_cache_secs: 5,
+        };
+        let app = make_router_with_rl(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+            rl,
+        );
+
+        for attempt in 0..5 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .header("x-real-ip", "203.0.113.9")
+                        .uri("/stats")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "read #{attempt} must not be throttled by the provisioning limit",
+            );
+        }
+    }
+
     /// A live instance may be cached, briefly.
     #[tokio::test]
     async fn alive_check_allows_caching_a_live_instance() {
@@ -2349,6 +2542,9 @@ mod tests {
         }
         fn capacity(&self) -> Result<gl_core::Capacity, gl_core::Error> {
             unimplemented!("the sweeper never reads capacity")
+        }
+        fn usage_stats(&self) -> Result<gl_core::UsageStats, gl_core::Error> {
+            unimplemented!("the sweeper never reads usage stats")
         }
     }
 
