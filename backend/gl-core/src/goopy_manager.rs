@@ -3,7 +3,7 @@ use crate::goopy_provisioner::*;
 use crate::goopy_registry::*;
 use crate::instance_event::*;
 use crate::shared_types::*;
-use crate::usage_stats::UsageStats;
+use crate::usage_stats::{UsageStats, window_start};
 
 use chrono::{Duration, Utc};
 use std::path::PathBuf;
@@ -537,7 +537,7 @@ where
     ///
     /// [`prune_events`]: GoopyManager::prune_events
     fn prune_usage(&self, now: chrono::DateTime<Utc>) {
-        let keep_from = now.date_naive() - Duration::days(i64::from(self.stats_retention_days) - 1);
+        let keep_from = window_start(now.date_naive(), self.stats_retention_days);
 
         match self.registry.prune_usage_before(keep_from) {
             Ok(0) => {}
@@ -2003,36 +2003,6 @@ mod tests {
 
     // ── usage counters (#172) ─────────────────────────────────────────────
 
-    fn usage(provisioned: u64, failed: u64) -> UsageCounts {
-        UsageCounts {
-            provisioned,
-            failed,
-        }
-    }
-
-    /// Stands in for the readiness gate (#151) refusing an instance that never
-    /// answered HTTP — the spawn failure a visitor would actually hit.
-    struct NeverReadyProvisioner;
-
-    impl GoopyProvisioner for NeverReadyProvisioner {
-        fn provision(&self, goopy: &Goopy) -> Result<(), Error> {
-            Err(Error::ReadinessTimeout {
-                slug: goopy.slug.clone(),
-                waited_secs: 60,
-                last: "connection refused".into(),
-            })
-        }
-        fn deprovision(&self, _goopy: &Goopy) -> Result<(), Error> {
-            Ok(())
-        }
-        fn kind(&self) -> ProvisionerKind {
-            ProvisionerKind::Hello
-        }
-        fn service_version(&self) -> &str {
-            "9.9.9-mock"
-        }
-    }
-
     #[test]
     fn a_spawn_that_reaches_done_counts_one_provision() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
@@ -2043,22 +2013,24 @@ mod tests {
 
         assert_eq!(gm.get(&slug).unwrap().unwrap().status, Status::Done);
         let stats = gm.usage_stats().unwrap();
-        assert_eq!(stats.today, usage(1, 0));
-        assert_eq!(stats.all_time, usage(1, 0));
+        assert_eq!(stats.today, UsageCounts::new(1, 0));
+        assert_eq!(stats.all_time, UsageCounts::new(1, 0));
     }
 
+    /// Any spawn-phase failure counts, whatever the error; the readiness gate
+    /// (#151) refusing an instance is one such failure.
     #[test]
-    fn a_spawn_that_fails_at_the_readiness_gate_counts_one_failure() {
+    fn a_spawn_that_fails_counts_one_failure() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        let gm = manager_with_provisioner(registry, NeverReadyProvisioner);
+        let gm = manager_with_provisioner(registry, UnprovisionableProvisioner);
 
         let (slug, _) = gm.spawn().unwrap();
         wait_for_spawn_to_settle(&gm, &slug);
 
         assert_eq!(gm.get(&slug).unwrap().unwrap().status, Status::Failed);
         let stats = gm.usage_stats().unwrap();
-        assert_eq!(stats.today, usage(0, 1));
-        assert_eq!(stats.all_time, usage(0, 1));
+        assert_eq!(stats.today, UsageCounts::new(0, 1));
+        assert_eq!(stats.all_time, UsageCounts::new(0, 1));
     }
 
     /// A teardown that fails is a cleanup problem: the instance was already
@@ -2075,7 +2047,7 @@ mod tests {
         let (slug, _) = gm.spawn().unwrap();
         wait_for_spawn_to_settle(&gm, &slug);
         let before = gm.usage_stats().unwrap();
-        assert_eq!(before.all_time, usage(1, 0));
+        assert_eq!(before.all_time, UsageCounts::new(1, 0));
 
         gm.despawn_blocking(&slug).unwrap_err();
 
@@ -2131,7 +2103,7 @@ mod tests {
         let days: Vec<_> = after.daily.iter().map(|d| d.day).collect();
         assert_eq!(days, [today, oldest_kept]);
         assert_eq!(after.all_time, before, "the total is never pruned");
-        assert_eq!(after.all_time, usage(3, 1));
+        assert_eq!(after.all_time, UsageCounts::new(3, 1));
     }
 
     /// Retention is housekeeping, not a reap: a prune must not show up in the

@@ -30,10 +30,26 @@ pub struct UsageCounts {
 }
 
 impl UsageCounts {
+    pub const fn new(provisioned: u64, failed: u64) -> Self {
+        Self {
+            provisioned,
+            failed,
+        }
+    }
+
     fn add(&mut self, other: UsageCounts) {
         self.provisioned += other.provisioned;
         self.failed += other.failed;
     }
+}
+
+/// The first day of a `days`-long window that ends on `today`, today
+/// included: a 1-day window starts today, a 7-day one six days back.
+///
+/// Shared by the weekly sum and the retention prune, so a 7-day retention
+/// keeps exactly the days `last_7_days` sums.
+pub fn window_start(today: NaiveDate, days: u32) -> NaiveDate {
+    today - Duration::days(i64::from(days) - 1)
 }
 
 /// One UTC day's counts.
@@ -71,20 +87,19 @@ impl UsageStats {
     pub fn from_rows(all_time: UsageCounts, mut daily: Vec<DailyUsage>, today: NaiveDate) -> Self {
         daily.sort_by(|a, b| b.day.cmp(&a.day));
 
-        let week_start = today - Duration::days(i64::from(Self::WEEK_DAYS) - 1);
+        let week_start = window_start(today, Self::WEEK_DAYS);
         let mut last_7_days = UsageCounts::default();
-        let mut today_counts = UsageCounts::default();
         for row in &daily {
-            if row.day > today {
-                continue;
-            }
-            if row.day >= week_start {
+            if (week_start..=today).contains(&row.day) {
                 last_7_days.add(row.counts);
             }
-            if row.day == today {
-                today_counts.add(row.counts);
-            }
         }
+        // `day` is the table's primary key, so today has at most one row.
+        let today_counts = daily
+            .iter()
+            .find(|r| r.day == today)
+            .map(|r| r.counts)
+            .unwrap_or_default();
 
         Self {
             all_time,
@@ -106,10 +121,7 @@ mod tests {
     fn row(d: &str, provisioned: u64, failed: u64) -> DailyUsage {
         DailyUsage {
             day: day(d),
-            counts: UsageCounts {
-                provisioned,
-                failed,
-            },
+            counts: UsageCounts::new(provisioned, failed),
         }
     }
 
@@ -125,20 +137,8 @@ mod tests {
             day("2026-09-29"),
         );
 
-        assert_eq!(
-            stats.last_7_days,
-            UsageCounts {
-                provisioned: 11,
-                failed: 1
-            }
-        );
-        assert_eq!(
-            stats.today,
-            UsageCounts {
-                provisioned: 1,
-                failed: 0
-            }
-        );
+        assert_eq!(stats.last_7_days, UsageCounts::new(11, 1));
+        assert_eq!(stats.today, UsageCounts::new(1, 0));
     }
 
     #[test]
