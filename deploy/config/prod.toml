@@ -38,12 +38,10 @@ port_range_end = 49999
 # processes. Never true here.
 dev_mode = false
 
-# REVIEW: what is the production frontend's origin? This is still dev's. The
-# expired-instance redirect already assumes the frontend at https://{domain}
-# (https://goopy.life), which suggests that value — unless the Vercel project
-# serves from www.goopy.life, since this names exactly one origin.
-# Allowed CORS origin: the Vercel frontend.
-cors_origin = "https://southp.dev"
+# Allowed CORS origin: the Vercel frontend, which lives at https://{domain}.
+# gl-core already assumes that address in every instance's expiry redirect
+# (`return 302 https://{domain}/expired;`).
+cors_origin = "https://goopy.life"
 
 # Address and port gl-serv listens on. Loopback on purpose (#149): nginx is the
 # only thing that should reach gl-serv, and a caller arriving any other way
