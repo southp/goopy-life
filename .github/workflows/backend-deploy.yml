@@ -88,10 +88,10 @@ jobs:
         # The ZFS-backed tests are #[ignore]d and stay that way here — they need
         # a loopback zpool and root, and the PR-time "Backend build" workflow
         # already runs them with --ignored before anything reaches trunk.
-        run: cargo test --verbose
+        run: cargo test --locked --verbose
 
       - name: Lint
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Build release binaries
         # gl-cli is built here, not on a path of its own: it links the same
@@ -104,7 +104,7 @@ jobs:
         # the deploy step below stamps and asserts the same commit.
         run: |
           export GL_BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          cargo build --release --target x86_64-unknown-linux-musl -p gl-serv -p gl-cli
+          cargo build --locked --release --target x86_64-unknown-linux-musl -p gl-serv -p gl-cli
 
       - name: Configure SSH
         env:
