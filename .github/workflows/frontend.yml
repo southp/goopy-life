@@ -21,7 +21,10 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          # engines.node in package.json is the one place the Node version is
+          # written: Vercel reads the same field, and yarn refuses to install
+          # locally on a Node outside it.
+          node-version-file: frontend/package.json
           cache: 'yarn'
           cache-dependency-path: frontend/yarn.lock
 
