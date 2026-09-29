@@ -1212,6 +1212,7 @@ mod tests {
             status,
             provisioner_kind: ProvisionerKind::Hello,
             service_version: "0.1.0".to_string(),
+            build_sha: None,
         };
         registry.save(&goopy).unwrap();
         registry.acquire_port(slug, port, port + 1).unwrap();
