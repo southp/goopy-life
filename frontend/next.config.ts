@@ -13,7 +13,16 @@ if (!process.env.NEXT_PUBLIC_GL_API_URL) {
 }
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  env: {
+    // The commit this bundle was built from, for the footer. Build time is the
+    // right time here — the bundle *is* the build. Vercel provides
+    // VERCEL_GIT_COMMIT_SHA; an explicit NEXT_PUBLIC_GL_BUILD_SHA wins so a local
+    // build can be stamped by hand. A build with neither reports "unknown".
+    NEXT_PUBLIC_GL_BUILD_SHA:
+      process.env.NEXT_PUBLIC_GL_BUILD_SHA ||
+      process.env.VERCEL_GIT_COMMIT_SHA ||
+      "",
+  },
 };
 
 export default nextConfig;

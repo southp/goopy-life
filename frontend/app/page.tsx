@@ -3,6 +3,7 @@ export const dynamic = 'force-static';
 import GhostButton from '@/components/GhostButton';
 import HowItWorks from '@/components/HowItWorks';
 import TermsOfUse from '@/components/TermsOfUse';
+import VersionFooter from '@/components/VersionFooter';
 import { fetchConfig } from '@/lib/config';
 
 // Server Component. The page structure and copy are rendered server-side and present
@@ -28,6 +29,8 @@ export default async function Home() {
 					/>
 					<TermsOfUse />
 				</div>
+
+				<VersionFooter />
 			</main>
 		</div>
 	);
