@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ApiRequestError, getGoopy, spawnGoopy } from '@/lib/api';
 import { LOCALSTORAGE_KEY, POLL_INTERVAL_MS } from '@/lib/constants';
+import { formatExpiry } from '@/lib/expiry';
 import { useCapacity } from '@/lib/useCapacity';
 import type { AppState } from '@/lib/types';
 import CapacityIndicator from '@/components/CapacityIndicator';
@@ -67,7 +68,12 @@ export default function GhostButton() {
 				const data = await getGoopy(pollSlug, controller.signal);
 
 				if (data.status === "Done") {
-					setState({ kind: "done", slug: data.slug, url: data.url });
+					setState({
+						kind: "done",
+						slug: data.slug,
+						url: data.url,
+						expiresAt: data.expires_at,
+					});
 					setPollSlug(null);
 					return;
 				} else if (data.status !== "Spawning") {
@@ -128,7 +134,12 @@ export default function GhostButton() {
 					localStorage.removeItem(LOCALSTORAGE_KEY);
 					setState({ kind: "expired", slug });
 				} else {
-					setState({ kind: "done", slug: data.slug, url: data.url });
+					setState({
+						kind: "done",
+						slug: data.slug,
+						url: data.url,
+						expiresAt: data.expires_at,
+					});
 				}
 			} else if (data.status !== "Spawning") {
 				localStorage.removeItem(LOCALSTORAGE_KEY);
@@ -203,15 +214,20 @@ export default function GhostButton() {
 				</>
 			);
 
-		case "done":
+		case "done": {
+			const availableUntil = formatExpiry(state.expiresAt, new Date());
 			return (
 				<div className="go-button-done-message">
 					<p>Your Ghost is ready at:</p>
 					<a className="go-button-url" href={state.url}>
 						{state.url}
 					</a>
+					{availableUntil !== null && (
+						<p className="expiry-message">Available until {availableUntil}</p>
+					)}
 				</div>
 			);
+		}
 
 		case "expired":
 			return (

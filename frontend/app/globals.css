@@ -121,6 +121,12 @@ body {
 	font-weight: bold;
 }
 
+.expiry-message {
+	font-size: 0.875rem;
+	color: #aaa;
+	margin: 0.25rem 0 0;
+}
+
 @media (min-width: 48rem) {
 	.go-button {
 		width: 158px;

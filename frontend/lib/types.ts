@@ -67,7 +67,8 @@ export type AppState =
 	| { kind: "idle" }
 	| { kind: "resuming"; slug: string }
 	| { kind: "spawning" }
-	| { kind: "done"; slug: string; url: string }
+	// `expiresAt` is the API's ISO timestamp, kept raw; it is formatted for display.
+	| { kind: "done"; slug: string; url: string; expiresAt: string }
 	| { kind: "expired"; slug: string }
 	| { kind: "failed"; slug: string }
 	// `code` is the API's error code (or null when the response carried none); it
