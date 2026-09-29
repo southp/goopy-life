@@ -3,6 +3,7 @@ use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
 use gl_core::sys_utils::RealSysRunner;
 use gl_core::*;
 use indicatif::{MultiProgress, ProgressBar};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,16 +19,16 @@ hand all happen here. The deploy installs it at /opt/goopy-life/bin/gl-cli \
 from the same build as gl-serv, so the two always share a gl-core -- and \
 therefore a registry schema and a provisioner.
 
-On a droplet, run it as the service account and name both the config and the \
-mode:
+On a droplet, run it as the service account and name the config:
 
     sudo -u goopy /opt/goopy-life/bin/gl-cli \\
         --config /opt/goopy-life/config.toml --prod list
 
---prod is not optional there. Without it the CLI runs in dev mode whatever the \
-config says, and a dev-mode despawn kills a detached process instead of \
-removing the systemd unit and the nginx sites, leaving the instance's real \
-resources behind.
+The mode comes from the config's dev_mode, the same rule gl-serv follows. \
+--prod does not choose it: it asserts that the config is a production config, \
+and the CLI refuses to run -- before it opens the registry or builds a \
+provisioner -- if the config sets dev_mode = true. That catches a --config \
+pointed at the wrong file.
 
 Running alongside a live gl-serv is safe by design: both open the same SQLite \
 registry in WAL mode with a 5s busy_timeout, so a reader never blocks the \
@@ -41,10 +42,11 @@ struct Cli {
     #[arg(long, default_value = "./config.toml")]
     config: std::path::PathBuf,
 
-    /// Use production mode (default: dev mode)
+    /// Assert that the config is a production config (dev_mode = false)
     ///
-    /// Without this flag the CLI always operates in dev mode regardless of
-    /// what `dev_mode` is set to in config.toml.
+    /// The mode always comes from `dev_mode` in the config. With this flag, a
+    /// config that sets `dev_mode = true` is refused before the registry is
+    /// opened or a provisioner is built.
     #[arg(long)]
     prod: bool,
 
@@ -100,6 +102,30 @@ enum Cmd {
     },
 }
 
+/// The mode the provisioner runs in: the config's `dev_mode`, the same rule
+/// gl-serv follows (#163).
+///
+/// `--prod` (`assert_prod`) does not choose the mode, it checks it. On a host,
+/// a dev-mode despawn kills a detached process and deletes the registry row,
+/// leaving the systemd unit, the nginx sites and the dataset behind with
+/// nothing tracking them. So a production run pointed at a dev config is
+/// refused outright rather than warned about.
+fn resolve_dev_mode(
+    cfg: &gl_core::Config,
+    config_path: &Path,
+    assert_prod: bool,
+) -> Result<bool, String> {
+    if assert_prod && cfg.dev_mode {
+        return Err(format!(
+            "--prod expects a production config (dev_mode = false), but {} sets \
+             dev_mode = true; refusing to run. Point --config at the host's \
+             production config, or drop --prod on a dev machine",
+            config_path.display()
+        ));
+    }
+    Ok(cfg.dev_mode)
+}
+
 fn main() {
     let span_events = match std::env::var("RUST_LOG_SPANS").as_deref() {
         Ok("0") | Ok("false") | Ok("") | Err(_) => tracing_subscriber::fmt::format::FmtSpan::NONE,
@@ -145,15 +171,12 @@ fn main() {
         }
     };
 
-    // --prod overrides config; absent → dev mode (safe default).
-    let dev_mode = !cli.prod;
-    if cfg.dev_mode != dev_mode {
-        tracing::warn!(
-            config_dev_mode = cfg.dev_mode,
-            effective_dev_mode = dev_mode,
-            "config.toml dev_mode differs from effective mode; pass --prod to enable production mode"
-        );
-    }
+    // Checked before anything below opens the registry or builds a
+    // provisioner: a refused run must leave the host exactly as it found it.
+    let dev_mode = resolve_dev_mode(&cfg, &cli.config, cli.prod).unwrap_or_else(|msg| {
+        tracing::error!("{msg}");
+        std::process::exit(1);
+    });
 
     println!(
         "Config: {path}\n  db:                {db}\n  base_dir:          {base_dir}\n  domain:            {domain}\n  life_in_days:      {life_in_days}\n  provisioner:       {provisioner}\n  port range:        {port_start}–{port_end}\n  allocator:         {alloc_kind}\n  allocator pool:    {alloc_pool}\n  allocator quota:   {alloc_quota} MB\n  cors_origin:       {cors_origin}\n  bind_address:      {bind_address}\n  api_address:       {api_address}\n  sweep_interval:    {sweep}s\n  event_retention:   {retention}d\n  mode:              {mode}",
@@ -348,9 +371,10 @@ mod tests {
     }
 
     /// The two things an operator has to know before running this on a host:
-    /// where the config lives, and that omitting `--prod` there silently gets
-    /// a dev-mode teardown that leaves the systemd unit and nginx sites
-    /// behind. Both live only in the help text, so pin them.
+    /// where the config lives, and what `--prod` does now that the config
+    /// decides the mode (#163) -- it asserts, it does not choose. Both live
+    /// only in the help text, so pin them, and pin that the help no longer
+    /// calls a forgotten flag dangerous.
     #[test]
     fn long_help_warns_about_running_on_a_droplet() {
         let help = Cli::command().render_long_help().to_string();
@@ -360,8 +384,116 @@ mod tests {
             "long help should name the config path the deploy installs:\n{help}"
         );
         assert!(
-            help.contains("--prod is not optional"),
-            "long help should say --prod is required on a droplet:\n{help}"
+            help.contains("asserts that the config is a production config"),
+            "long help should say --prod is an assertion, not a mode switch:\n{help}"
+        );
+        assert!(
+            !help.contains("not optional"),
+            "forgetting --prod is no longer dangerous; the help must not say so:\n{help}"
+        );
+    }
+
+    /// Minimal config for the mode tests. PlainDir so that building a
+    /// production-mode provisioner needs no ZFS pool.
+    fn config_with_dev_mode(dev_mode: bool) -> (tempfile::NamedTempFile, gl_core::Config) {
+        let toml = format!(
+            r#"
+base_dir = "/tmp/goopy"
+domain = "goopy.life"
+life_in_days = 7
+port_range_start = 9000
+port_range_end = 9100
+dev_mode = {dev_mode}
+cors_origin = "https://goopy.life"
+bind_address = "127.0.0.1:8080"
+[registry]
+path = "/tmp/goopy.db"
+[allocator]
+kind = "PlainDir"
+[provisioner]
+kind = "Hello"
+"#
+        );
+        let mut file = tempfile::NamedTempFile::new().expect("create temp config");
+        std::io::Write::write_all(&mut file, toml.as_bytes()).expect("write temp config");
+        let cfg = gl_core::Config::from_file(file.path()).expect("config should parse");
+        (file, cfg)
+    }
+
+    /// The config decides, whichever way the flag points, as long as the flag
+    /// does not contradict it.
+    #[test]
+    fn the_configs_dev_mode_decides_the_mode() {
+        let (dev_file, dev_cfg) = config_with_dev_mode(true);
+        let (prod_file, prod_cfg) = config_with_dev_mode(false);
+
+        assert_eq!(resolve_dev_mode(&dev_cfg, dev_file.path(), false), Ok(true));
+        assert_eq!(
+            resolve_dev_mode(&prod_cfg, prod_file.path(), false),
+            Ok(false)
+        );
+        assert_eq!(
+            resolve_dev_mode(&prod_cfg, prod_file.path(), true),
+            Ok(false)
+        );
+    }
+
+    /// The hazard #163 closes: a production config without `--prod` used to
+    /// get a dev-mode provisioner, whose despawn kills a detached process and
+    /// leaves the systemd unit and nginx sites behind. Observed through what
+    /// the provisioner actually does on teardown, not through the bool.
+    #[test]
+    fn a_production_config_without_prod_builds_a_production_provisioner() {
+        let (file, cfg) = config_with_dev_mode(false);
+        let dev_mode = resolve_dev_mode(&cfg, file.path(), false).expect("no --prod, no conflict");
+
+        let sys = Arc::new(gl_core::MockSysRunner::new());
+        let provisioner = cfg.build_provisioner(dev_mode, sys.clone());
+        let working_dir = tempfile::tempdir().expect("create working dir");
+        provisioner
+            .deprovision(&Goopy {
+                slug: "tasty-lucky-clover".to_string(),
+                life_in_days: 7,
+                created_at: chrono::Utc::now(),
+                working_dir: working_dir.path().to_path_buf(),
+                port: 9000,
+                status: Status::Despawning,
+                provisioner_kind: ProvisionerKind::Hello,
+                service_version: "0.1.0".to_string(),
+                build_sha: None,
+            })
+            .expect("deprovision against a mock should succeed");
+
+        let sudo_args = sys.sudo_run_args();
+        assert!(
+            sudo_args.iter().any(|a| a == "systemctl"),
+            "a production teardown removes the systemd unit; sudo_run saw {sudo_args:?}"
+        );
+        assert!(
+            !sys.recorded_calls()
+                .iter()
+                .any(|c| matches!(c, gl_core::MockCall::KillPid { .. })),
+            "a production teardown must not take the dev-mode kill path"
+        );
+    }
+
+    /// `--prod` against a dev config is refused, and the refusal names what
+    /// the operator needs to fix it: which file, and both sides of the
+    /// disagreement.
+    #[test]
+    fn prod_against_a_dev_config_is_refused_naming_the_path_and_both_values() {
+        let (file, cfg) = config_with_dev_mode(true);
+
+        let msg = resolve_dev_mode(&cfg, file.path(), true).expect_err("must refuse");
+
+        assert!(
+            msg.contains(&file.path().display().to_string()),
+            "should name the config path: {msg}"
+        );
+        assert!(msg.contains("--prod"), "should name the flag: {msg}");
+        assert!(
+            msg.contains("dev_mode = false") && msg.contains("dev_mode = true"),
+            "should name the expected and the configured value: {msg}"
         );
     }
 
