@@ -1,11 +1,12 @@
 # Deployed configuration — production.
 #
 # ┌───────────────────────────────────────────────────────────────────────────┐
-# │ PLACEHOLDER. This is a verbatim copy of the dev droplet's configuration,   │
-# │ taken so the file exists and parses. There is no production host yet, and  │
-# │ the lines marked `REVIEW` below still name dev-only values.                │
+# │ PLACEHOLDER. Started as a copy of the dev droplet's configuration. The     │
+# │ lines marked `REVIEW` below are open questions on #147 and still hold      │
+# │ dev's values.                                                              │
 # │                                                                            │
-# │ Work through every REVIEW marker before the first production deploy.       │
+# │ Answer every REVIEW marker, then remove this banner, before the first      │
+# │ production deploy.                                                         │
 # └───────────────────────────────────────────────────────────────────────────┘
 #
 # This file IS what the production host runs: deploy/push-binary.sh installs it
@@ -37,7 +38,10 @@ port_range_end = 49999
 # processes. Never true here.
 dev_mode = false
 
-# REVIEW: must match the production frontend origin, not the dev one.
+# REVIEW: what is the production frontend's origin? This is still dev's. The
+# expired-instance redirect already assumes the frontend at https://{domain}
+# (https://goopy.life), which suggests that value — unless the Vercel project
+# serves from www.goopy.life, since this names exactly one origin.
 # Allowed CORS origin: the Vercel frontend.
 cors_origin = "https://southp.dev"
 
@@ -70,12 +74,11 @@ bind_address = "127.0.0.1:3000"
 # cap of 10 on a private box and matters a lot on a public one.
 sweep_interval_secs = 3600
 
-# REVIEW: 30 days is the shipped default, chosen for a dev droplet where the
-# only reader is whoever is debugging that week. Production may want longer —
-# a public beta's failure rate is a trend worth seeing over a quarter, and the
-# window is also the answer to "how far back can we explain an outage". Size it
-# against real volume and disk before the first production deploy rather than
-# inheriting dev's number.
+# REVIEW: keep 30 days, or resize? 30 is the shipped default, chosen for a dev
+# droplet where the only reader is whoever is debugging that week. Production
+# may want longer: a public beta's failure rate is a trend worth seeing over a
+# quarter, and the window is also the answer to "how far back can we explain an
+# outage". Size it against real volume and disk, not dev's number.
 #
 # How many days of instance events to keep (#118). The event log records why a
 # spawn or teardown failed and when the row was reaped, and outlives the
@@ -126,14 +129,17 @@ path = "/opt/goopy-life/goopy.db"
 [allocator]
 # "PlainDir" (plain filesystem) or "Zfs" (ZFS datasets).
 kind = "Zfs"
-# REVIEW: the production pool name and a quota sized for real Ghost installs.
+# REVIEW: what is the production zpool called? `zpool_ghost` is dev's name,
+# which #147's host checklist reuses. Whichever it is, the binding rule below
+# holds: pool size >= max_provisioned * quota_mb.
 #
-# Mirrors dev. #113 measured real usage at ~120 KB per instance (ZFS
-# compression running at 3.36x), so this bounds abuse rather than sizing normal
-# use. The binding rule is max_provisioned * quota_mb <= pool size: an
-# overcommitted pool fills and breaks *every* instance at once, which fails
-# worse than one greedy instance hitting its own quota. 20 * 200 MB = 4 GB
-# against dev's 4.5 GB pool, so production's pool must be at least that.
+# The quota was settled by #173 and mirrors dev. #113 measured real usage at
+# ~120 KB per instance (ZFS compression running at 3.36x), so this bounds abuse
+# rather than sizing normal use. The binding rule is max_provisioned * quota_mb
+# <= pool size: an overcommitted pool fills and breaks *every* instance at once,
+# which fails worse than one greedy instance hitting its own quota.
+# 20 * 200 MB = 4 GB against dev's 4.5 GB pool, so production's pool must be at
+# least that.
 #
 # NOTE: production is public and accountless, where dev is not. This lets any
 # anonymous visitor store up to 200 MB for the instance's lifetime. 32 MB was
