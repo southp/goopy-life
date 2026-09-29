@@ -43,6 +43,8 @@ jobs:
       # lints with the same clippy as every local build rather than whichever
       # stable the runner image happens to carry.
       run: rustup toolchain install
+    - name: Check formatting
+      run: cargo fmt --check
     # --locked: build what Cargo.lock says, and fail rather than quietly
     # resolving new versions if it has fallen out of step with the manifests.
     - name: Build
