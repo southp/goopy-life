@@ -339,8 +339,9 @@ impl Config {
 
     /// Build the provisioner named by `self.provisioner.kind`.
     ///
-    /// `dev_mode` is passed explicitly so callers can override the value from
-    /// the config file (e.g. `gl-cli` forces dev mode unless `--prod` is given).
+    /// `dev_mode` is passed explicitly, but both binaries pass the config's own
+    /// `dev_mode`: it is authoritative (#163). `gl-cli`'s `--prod` only checks
+    /// it. Tests pass either value to exercise both paths.
     ///
     /// Returned boxed because the kind is only known at runtime; the forwarding
     /// impl in `goopy_provisioner` keeps it usable as `GoopyManager`'s generic

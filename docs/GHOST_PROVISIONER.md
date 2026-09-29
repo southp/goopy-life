@@ -459,8 +459,8 @@ rm -rf /opt/goopy-life/ghost-6.63.0
 
 ## Dev mode
 
-With `dev_mode` on (or `gl-cli` without `--prod`), the provisioner skips systemd
-and nginx entirely: it assembles the same instance directory, writes the same
+With `dev_mode` on, the provisioner skips systemd and nginx entirely: it
+assembles the same instance directory, writes the same
 `config.production.json` — with `url` pointing straight at `http://127.0.0.1:{port}`
 since there is no proxy in front — spawns Ghost as a detached background process,
 and records the PID in `{working_dir}/server.pid`. `deprovision` kills that PID
