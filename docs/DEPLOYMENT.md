@@ -203,6 +203,36 @@ expose System Environment Variables* is on (the default). If the footer reads
 footer, the Vercel dashboard's *Deployments* tab shows the commit each deployment
 was built from.
 
+### Usage stats: `GET /stats`
+
+gl-serv counts provisions and answers with the totals, publicly and on the read
+rate limiter:
+
+```bash
+curl -sS https://<dev-api-host>/stats
+{"all_time":{"provisioned":1234,"failed":56},"last_7_days":{"provisioned":140,"failed":3},"today":{"provisioned":21,"failed":0},"window_days":90,"daily":[{"day":"2026-09-29","provisioned":21,"failed":0}]}
+```
+
+What counts:
+
+| Counter | Counted when | Notes |
+|---|---|---|
+| `provisioned` | the spawn sets the instance `Done` | since #151 `Done` means it answered HTTP, so this counts instances a visitor could use |
+| `failed` | a spawn fails and sets the instance `Failed` | once per instance; a failed despawn or sweep is a cleanup problem and is not counted |
+
+- **Days are UTC.** `today` is the current UTC day so far. `last_7_days` is the
+  last seven UTC days, today included.
+- **`daily`** lists only days that have a row, newest first. A day with no
+  activity is left out, not reported as zeros.
+- **`window_days`** is `stats_retention_days` (default 90, minimum 7). The sweep
+  drops daily rows older than that; `all_time` is a separate row and is never
+  pruned.
+- **`gl-cli spawn` counts too.** It runs the same `GoopyManager` code, so a load
+  test run on the host (like #113's) inflates every figure it touches. Nothing
+  filters it out; subtract it by hand if it matters.
+- **Counting starts at deploy.** Migration 4 creates the counters at zero, so
+  nothing provisioned before the first deploy that carries them is counted.
+
 ## The maintenance CLI on the host
 
 `gl-serv` exposes no despawn route, so tearing down one instance by hand,
