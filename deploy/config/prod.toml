@@ -1,14 +1,5 @@
 # Deployed configuration — production.
 #
-# ┌───────────────────────────────────────────────────────────────────────────┐
-# │ PLACEHOLDER. Started as a copy of the dev droplet's configuration. The     │
-# │ lines marked `REVIEW` below are open questions on #147 and still hold      │
-# │ dev's values.                                                              │
-# │                                                                            │
-# │ Answer every REVIEW marker, then remove this banner, before the first      │
-# │ production deploy.                                                         │
-# └───────────────────────────────────────────────────────────────────────────┘
-#
 # This file IS what the production host runs: deploy/push-binary.sh installs it
 # at /opt/goopy-life/config.toml. Edit it here, not there.
 #
@@ -72,11 +63,8 @@ bind_address = "127.0.0.1:3000"
 # cap of 10 on a private box and matters a lot on a public one.
 sweep_interval_secs = 3600
 
-# REVIEW: keep 30 days, or resize? 30 is the shipped default, chosen for a dev
-# droplet where the only reader is whoever is debugging that week. Production
-# may want longer: a public beta's failure rate is a trend worth seeing over a
-# quarter, and the window is also the answer to "how far back can we explain an
-# outage". Size it against real volume and disk, not dev's number.
+# 30, the shipped default, is enough here: long-term counts live in #172's
+# /stats, so this log only has to hold recent failure detail.
 #
 # How many days of instance events to keep (#118). The event log records why a
 # spawn or teardown failed and when the row was reaped, and outlives the
@@ -127,9 +115,9 @@ path = "/opt/goopy-life/goopy.db"
 [allocator]
 # "PlainDir" (plain filesystem) or "Zfs" (ZFS datasets).
 kind = "Zfs"
-# REVIEW: what is the production zpool called? `zpool_ghost` is dev's name,
-# which #147's host checklist reuses. Whichever it is, the binding rule below
-# holds: pool size >= max_provisioned * quota_mb.
+# The pool name matches dev's: the operator creates production's pool as
+# `zpool_ghost` (#147's host checklist), and it must be at least 4 GB — see the
+# binding rule below.
 #
 # The quota was settled by #173 and mirrors dev. #113 measured real usage at
 # ~120 KB per instance (ZFS compression running at 3.36x), so this bounds abuse
@@ -174,10 +162,8 @@ service_user = "goopy"
 # the sweep. The timeout is a real ceiling: no single probe is given more time
 # than the wait has left.
 #
-# REVIEW: is 120 s the right ceiling for production? It is dev's value. #113
-# measured a first boot at ~12 s on the dev droplet (7.6 s of it Ghost's DB
-# migration), slower when several instances boot at once. Too short fails
-# spawns that would have come up; too long holds a visitor on a spinner, and a
-# slot, for an instance that never will.
+# 120 s, dev's value, is ~10x the ~12 s first boot #113 measured (7.6 s of it
+# Ghost's DB migration). That leaves room for several instances booting at
+# once, and a boot that never comes up holds a slot for 2 minutes at most.
 ready_timeout_secs = 120
 ready_poll_ms = 500

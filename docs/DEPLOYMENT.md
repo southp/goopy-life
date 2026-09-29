@@ -454,9 +454,8 @@ Two rules keep it that way:
 
 To roll a config change back, revert the commit and deploy again.
 
-`prod.toml` is currently a placeholder copied from the dev values — there is no
-production host yet. Every line that still names a dev-only value is marked
-`REVIEW`; work through them before the first production deploy.
+A line marked `REVIEW` in `prod.toml` names a value not yet settled for
+production; settle it before the first production deploy.
 
 ### `bind_address` and `api_address`
 
