@@ -1,17 +1,15 @@
 import Accordion from "@/components/Accordion";
+import { formatLifetime } from "@/lib/lifetime";
 
 interface HowItWorksProps {
-	lifeInDays: number | null;
+	lifeInHours: number | null;
 	storageQuotaMb: number | null;
 }
 
 // Server-rendered "How it works" copy. Config values are nullable — when the
 // build-time fetch failed we render `--` placeholders rather than fabricated numbers.
-export default function HowItWorks({ lifeInDays, storageQuotaMb }: HowItWorksProps) {
-	const lifeLabel =
-		lifeInDays === null
-			? "--"
-			: `${lifeInDays} ${lifeInDays === 1 ? "day" : "days"}`;
+export default function HowItWorks({ lifeInHours, storageQuotaMb }: HowItWorksProps) {
+	const lifeLabel = lifeInHours === null ? "--" : formatLifetime(lifeInHours);
 	const storageLabel = storageQuotaMb === null ? "--" : `${storageQuotaMb} MB`;
 
 	return (

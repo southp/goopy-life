@@ -26,7 +26,7 @@ export interface ApiError {
 // Values are nullable: when the build-time fetch fails they fall back to `null`
 // so the UI can render placeholders instead of fabricated numbers.
 export interface ConfigResponse {
-	life_in_days: number | null;
+	life_in_hours: number | null;
 	storage_quota_mb: number | null;
 }
 

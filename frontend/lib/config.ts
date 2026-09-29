@@ -13,7 +13,7 @@ import "server-only";
 import type { ConfigResponse } from "./types";
 
 const CONFIG_UNAVAILABLE: ConfigResponse = {
-	life_in_days: null,
+	life_in_hours: null,
 	storage_quota_mb: null,
 };
 
@@ -34,7 +34,14 @@ export async function fetchConfig(): Promise<ConfigResponse> {
 			);
 			return CONFIG_UNAVAILABLE;
 		}
-		return (await res.json()) as ConfigResponse;
+		// A field the backend does not serve (yet, or any more) arrives as
+		// `undefined`; fold it into `null` so it renders as a placeholder, not as
+		// the word "undefined".
+		const body = (await res.json()) as Partial<ConfigResponse>;
+		return {
+			life_in_hours: body.life_in_hours ?? null,
+			storage_quota_mb: body.storage_quota_mb ?? null,
+		};
 	} catch (err) {
 		console.warn(
 			`[fetchConfig] GET ${apiUrl}/config failed (${err instanceof Error ? err.message : "unknown error"}) — rendering placeholder values.`,
