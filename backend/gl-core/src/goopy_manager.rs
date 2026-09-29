@@ -613,6 +613,7 @@ mod tests {
     use crate::goopy_registry::GoopyRegistry;
     use crate::goopy_registry::sqlite_registry::SqliteRegistry;
     use crate::storage_allocator::{PlainDirAllocator, StorageAllocator};
+    use crate::usage_stats::{UsageCounts, UsageStats};
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
@@ -641,6 +642,9 @@ mod tests {
             Ok(vec![])
         }
         fn update_status(&self, _slug: &str, _new_status: Status) -> Result<(), Error> {
+            Ok(())
+        }
+        fn complete_spawn(&self, _slug: &str) -> Result<(), Error> {
             Ok(())
         }
         fn acquire_port(
@@ -683,6 +687,14 @@ mod tests {
         }
         fn events(&self, _slug: Option<&str>, _limit: u32) -> Result<Vec<InstanceEvent>, Error> {
             Ok(vec![])
+        }
+        // Likewise the usage counters: accepted by `complete_spawn`, never
+        // stored, and read back as zeros.
+        fn usage_stats(&self, today: chrono::NaiveDate) -> Result<UsageStats, Error> {
+            Ok(UsageStats::from_rows(UsageCounts::default(), vec![], today))
+        }
+        fn prune_usage_before(&self, _day: chrono::NaiveDate) -> Result<u32, Error> {
+            Ok(0)
         }
     }
 
@@ -892,6 +904,10 @@ mod tests {
             fn update_status(&self, _: &str, _: Status) -> Result<(), Error> {
                 Err(Error::Invalid)
             }
+            /// Refused like every other status write this double sees.
+            fn complete_spawn(&self, _: &str) -> Result<(), Error> {
+                Err(Error::Invalid)
+            }
             fn acquire_port(&self, slug: &str, s: u32, e: u32) -> Result<u32, Error> {
                 self.0.acquire_port(slug, s, e)
             }
@@ -923,6 +939,12 @@ mod tests {
             }
             fn events(&self, slug: Option<&str>, limit: u32) -> Result<Vec<InstanceEvent>, Error> {
                 self.0.events(slug, limit)
+            }
+            fn usage_stats(&self, today: chrono::NaiveDate) -> Result<UsageStats, Error> {
+                self.0.usage_stats(today)
+            }
+            fn prune_usage_before(&self, day: chrono::NaiveDate) -> Result<u32, Error> {
+                self.0.prune_usage_before(day)
             }
         }
 
@@ -1683,6 +1705,9 @@ mod tests {
         fn update_status(&self, slug: &str, status: Status) -> Result<(), Error> {
             self.0.update_status(slug, status)
         }
+        fn complete_spawn(&self, slug: &str) -> Result<(), Error> {
+            self.0.complete_spawn(slug)
+        }
         fn acquire_port(&self, slug: &str, s: u32, e: u32) -> Result<u32, Error> {
             self.0.acquire_port(slug, s, e)
         }
@@ -1709,6 +1734,12 @@ mod tests {
         }
         fn events(&self, slug: Option<&str>, limit: u32) -> Result<Vec<InstanceEvent>, Error> {
             self.0.events(slug, limit)
+        }
+        fn usage_stats(&self, today: chrono::NaiveDate) -> Result<UsageStats, Error> {
+            self.0.usage_stats(today)
+        }
+        fn prune_usage_before(&self, day: chrono::NaiveDate) -> Result<u32, Error> {
+            self.0.prune_usage_before(day)
         }
     }
 
@@ -1741,6 +1772,9 @@ mod tests {
         fn update_status(&self, slug: &str, status: Status) -> Result<(), Error> {
             self.0.update_status(slug, status)
         }
+        fn complete_spawn(&self, slug: &str) -> Result<(), Error> {
+            self.0.complete_spawn(slug)
+        }
         fn acquire_port(&self, slug: &str, s: u32, e: u32) -> Result<u32, Error> {
             self.0.acquire_port(slug, s, e)
         }
@@ -1764,6 +1798,12 @@ mod tests {
         }
         fn events(&self, slug: Option<&str>, limit: u32) -> Result<Vec<InstanceEvent>, Error> {
             self.0.events(slug, limit)
+        }
+        fn usage_stats(&self, today: chrono::NaiveDate) -> Result<UsageStats, Error> {
+            self.0.usage_stats(today)
+        }
+        fn prune_usage_before(&self, day: chrono::NaiveDate) -> Result<u32, Error> {
+            self.0.prune_usage_before(day)
         }
     }
 
