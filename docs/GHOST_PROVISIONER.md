@@ -270,7 +270,7 @@ timestamp. `rethrowErrors` defaults to false, so nothing propagates.
 The cost is **one error line per instance per day**, in that instance's own
 `content/logs` — no outbound request, no effect on boot, nothing a visitor sees.
 The job is scheduled at a random time in a 24-hour window and instances live
-about a day, so most never reach it. A `Update check failed` line in an
+8 hours (`life_in_hours`), so most never reach it. A `Update check failed` line in an
 instance's log is expected, not a symptom.
 
 ### These keys are version-sensitive — re-check them on every upgrade
@@ -449,7 +449,7 @@ gl-cli list | grep service_version | sort | uniq -c
 ```
 
 Once no instance reports the old version — instances are ephemeral, so this
-happens within `life_in_days` — remove it:
+happens within `life_in_hours` — remove it:
 
 ```bash
 rm -rf /opt/goopy-life/ghost-6.63.0
