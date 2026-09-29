@@ -69,13 +69,31 @@ sweep_interval_secs = 3600
 # and reaps are recorded, at a cap of 10 instances.
 event_retention_days = 30
 
-# Instance caps (#106). max_active is RAM-bound: ~200 MB per Ghost process on a
-# 2 GB droplet leaves room for about 10. max_provisioned is disk-bound and is
-# kept equal to max_active until scale-to-zero (#96) lands, which means the RAM
-# cap is unreachable and a full server answers `server_full`, never
-# `server_busy`. Both must be > 0, and max_active <= max_provisioned.
-max_active = 10
-max_provisioned = 10
+# Instance caps (#106), sized from the #113 load experiment measured on this
+# droplet on 2026-09-23 (1 vCPU / 2 GB RAM / 4 GB swap with zswap).
+#
+# Size the cap from the *serving* ceiling, not the spawn ceiling. They are not
+# the same and the gap is large: this box spawns 29 instances happily and
+# serves none of them. Past ~22 the swap fills, and at 100% swap every
+# instance stops answering HTTP entirely while gl-serv, /capacity and new
+# spawns all still look healthy — a cliff, not a slope.
+#
+#   spawn ceiling   ~= (RAM_mb + swap_mb - 350) / 200   -> 29 here
+#   serving ceiling ~= 70% of the spawn ceiling         -> ~22 here
+#
+# 20 sits below that cliff with margin. Measured cold-touch latency after an
+# idle period was 0.14-0.41 s at 18 instances and 0.13-1.42 s at 22.
+#
+# This depends on the host having 4 GB of swap. On the stock 1 GB the serving
+# ceiling is ~10, and that swap is host state no deploy installs (#167) — a
+# rebuilt box without it would accept 20 and fail the last ten.
+#
+# max_provisioned is kept equal to max_active until scale-to-zero (#96) lands,
+# which means the RAM cap is unreachable and a full server answers
+# `server_full`, never `server_busy`. Both must be > 0, and
+# max_active <= max_provisioned.
+max_active = 20
+max_provisioned = 20
 
 [registry]
 # Registry database path.
@@ -95,14 +113,19 @@ pool = "zpool_ghost"
 # (content/images, media, files), post content and logs.
 #
 # The ceiling is the pool, not the instance: zpool_ghost has ~4.35 GB usable and
-# max_provisioned is 10, so anything above ~445 MB would overcommit. A ZFS quota
-# caps a dataset but reserves nothing, and an overcommitted pool fails worse
-# than a quota does — the pool fills and *every* instance starts erroring, rather
-# than the one greedy instance hitting its own ceiling. 256 MB keeps all 10
-# instances fully backed with room to raise max_provisioned later.
+# max_provisioned is 20 against a 4.5 GB pool, so anything above ~225 MB would
+# overcommit. A ZFS quota caps a dataset but reserves nothing, and an
+# overcommitted pool fails worse than a quota does — the pool fills and *every*
+# instance starts erroring, rather than the one greedy instance hitting its own
+# ceiling. 200 MB keeps all 20 instances fully backed with headroom.
 #
-# Was 32 MB, which was sized for the Hello provisioner's static page.
-quota_mb = 256
+# Generous on purpose: #113 measured real usage at ~120 KB per instance (ZFS
+# compression is running at 3.36x), so this bounds abuse rather than sizing
+# normal use.
+#
+# Was 256 MB, which fully backed only 10 instances; before that 32 MB, sized
+# for the Hello provisioner's static page.
+quota_mb = 200
 
 [provisioner]
 # "Ghost" (real Ghost instances) or "Hello" (PoC page, dev/testing).

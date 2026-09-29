@@ -61,12 +61,12 @@ bind_address = "127.0.0.1:3000"
 
 # How often to sweep expired instances (seconds; 86400 = 24h).
 #
-# This deliberately diverges from gl-core's shipped default, which dropped to
-# 3600 in #117 — the interval is the worst-case delay on reclaiming a capacity
-# slot, so a day meant a full server stayed full for a day. Prod keeps 24h until
-# #147 (go live) sizes it against the real droplet; delete this note when it is
-# cut over.
-sweep_interval_secs = 86400
+# Mirrors dev, and matches gl-core's shipped default since #117. The interval
+# is the worst-case delay on reclaiming a capacity slot: at the previous 86400
+# an expired instance held one of 20 slots for up to a day after it died, so a
+# busy server stayed full long after it had emptied. That mattered little at a
+# cap of 10 on a private box and matters a lot on a public one.
+sweep_interval_secs = 3600
 
 # REVIEW: 30 days is the shipped default, chosen for a dev droplet where the
 # only reader is whoever is debugging that week. Production may want longer —
@@ -80,15 +80,43 @@ sweep_interval_secs = 86400
 # instance. It is append-only; the sweep drops anything past this window.
 event_retention_days = 30
 
-# REVIEW: size these against the production droplet's RAM and disk, which need
-# not match the dev box.
-# Instance caps (#106). max_active is RAM-bound: ~200 MB per Ghost process on a
-# 2 GB droplet leaves room for about 10. max_provisioned is disk-bound and is
-# kept equal to max_active until scale-to-zero (#96) lands, which means the RAM
-# cap is unreachable and a full server answers `server_full`, never
-# `server_busy`. Both must be > 0, and max_active <= max_provisioned.
-max_active = 10
-max_provisioned = 10
+# REVIEW: production runs the same droplet spec and system configuration as dev
+# (1 vCPU / 2 GB RAM / 4 GB swap with zswap enabled), so these mirror dev's
+# values. Before the first production deploy, VERIFY that is actually true —
+# this is a checkpoint, not an open decision:
+#
+#   ssh <prod> 'free -m; cat /proc/swaps; cat /sys/module/zswap/parameters/enabled'
+#
+# Expect ~4095 MB of total swap and zswap `Y`. On the stock 1 GB swap the
+# serving ceiling is ~10, so an unverified box would accept 20 instances and
+# fail the last ten. Swap is host state no deploy installs (#167), and nothing
+# else here will catch its absence.
+#
+# The cap is sized from the *serving* ceiling, never the spawn ceiling. They
+# are not the same and the gap is large. From the #113 load experiment measured
+# on the dev droplet on 2026-09-23:
+#
+#   spawn ceiling   ~= (RAM_mb + swap_mb - 350) / 200
+#   serving ceiling ~= 70% of the spawn ceiling        <- size the cap from THIS
+#
+#   2 GB RAM + 1 GB swap (stock droplet)  -> spawns 14, serves ~10
+#   2 GB RAM + 4 GB swap + zswap          -> spawns 29, serves ~22  (dev runs this)
+#
+# The failure past the serving ceiling is a cliff, not a slope: at 100% swap a
+# box spawns instances happily, gl-serv and /capacity stay healthy, and *every*
+# instance stops answering HTTP. Sizing from the spawn ceiling ships a server
+# that provisions and serves nothing, with no signal pointing at the cause.
+#
+# Also keep max_provisioned * quota_mb below the ZFS pool size, or the quotas
+# overcommit the pool — see the allocator section.
+#
+# max_provisioned is kept equal to max_active until scale-to-zero (#96) lands,
+# which means the RAM cap is unreachable and a full server answers
+# `server_full`, never `server_busy`. Both must be > 0, and
+# max_active <= max_provisioned.
+#
+max_active = 20
+max_provisioned = 20
 
 [registry]
 # Registry database path.
@@ -97,12 +125,23 @@ path = "/opt/goopy-life/goopy.db"
 [allocator]
 # "PlainDir" (plain filesystem) or "Zfs" (ZFS datasets).
 kind = "Zfs"
-# REVIEW: the production pool name and a quota sized for real Ghost installs —
-# 32 MB is a dev-sized placeholder.
+# REVIEW: the production pool name and a quota sized for real Ghost installs.
+#
+# Mirrors dev. #113 measured real usage at ~120 KB per instance (ZFS
+# compression running at 3.36x), so this bounds abuse rather than sizing normal
+# use. The binding rule is max_provisioned * quota_mb <= pool size: an
+# overcommitted pool fills and breaks *every* instance at once, which fails
+# worse than one greedy instance hitting its own quota. 20 * 200 MB = 4 GB
+# against dev's 4.5 GB pool, so production's pool must be at least that.
+#
+# NOTE: production is public and accountless, where dev is not. This lets any
+# anonymous visitor store up to 200 MB for the instance's lifetime. 32 MB was
+# the previous value and remains defensible if that is too generous for a
+# public beta — the Ghost install itself needs almost none of it.
 # Storage pool name (Zfs only).
 pool = "zpool_ghost"
 # Disk quota per instance in MB (Zfs only).
-quota_mb = 32
+quota_mb = 200
 
 [provisioner]
 # REVIEW: production should serve real Ghost instances once #18 lands.
