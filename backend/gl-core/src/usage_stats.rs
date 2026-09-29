@@ -8,6 +8,8 @@
 //!
 //! Days are UTC calendar days.
 
+use std::cmp::Reverse;
+
 use chrono::{Duration, NaiveDate};
 
 /// The two things counted.
@@ -85,7 +87,7 @@ impl UsageStats {
     /// Rows dated after `today` (a clock that stepped back) stay listed but
     /// are counted in neither `today` nor `last_7_days`.
     pub fn from_rows(all_time: UsageCounts, mut daily: Vec<DailyUsage>, today: NaiveDate) -> Self {
-        daily.sort_by(|a, b| b.day.cmp(&a.day));
+        daily.sort_by_key(|row| Reverse(row.day));
 
         let week_start = window_start(today, Self::WEEK_DAYS);
         let mut last_7_days = UsageCounts::default();
