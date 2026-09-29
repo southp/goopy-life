@@ -23,9 +23,13 @@ base_dir = "/opt/goopy-life/data"
 # Public domain — instances are served at {slug}.{domain}.
 domain = "southp.dev"
 
-# REVIEW: production instances are likely to want a different lifetime.
 # How long each goopy lives (hours).
-life_in_hours = 24
+#
+# 8 rather than 24 (#110): when all 20 slots are full, each turns over three
+# times a day instead of once, so a full server serves ~3x the visitors
+# (20 x 24/8). Each instance stores its own lifetime, so a change here reaches
+# only new instances and is easy to undo.
+life_in_hours = 8
 
 # Port range for goopy instances (inclusive).
 port_range_start = 40000
@@ -59,14 +63,14 @@ bind_address = "127.0.0.1:3000"
 # production cannot quietly inherit the wildcard.
 #   api_address = "127.0.0.1:3000"
 
-# How often to sweep expired instances (seconds; 86400 = 24h).
+# How often to sweep expired instances (seconds; 900 = 15 min).
 #
-# Mirrors dev, and matches gl-core's shipped default since #117. The interval
-# is the worst-case delay on reclaiming a capacity slot: at the previous 86400
-# an expired instance held one of 20 slots for up to a day after it died, so a
-# busy server stayed full long after it had emptied. That mattered little at a
-# cap of 10 on a private box and matters a lot on a public one.
-sweep_interval_secs = 3600
+# Mirrors dev. Shorter than gl-core's 3600 default because of the 8-hour
+# lifetime (#110): the interval is the worst-case delay on reclaiming a capacity
+# slot, and at 3600 an expired instance could hold one of 20 slots for nobody
+# for up to an hour, 12% of an 8-hour life. It is also the Retry-After a full
+# server's 503 sends. A sweep with nothing to reap is cheap.
+sweep_interval_secs = 900
 
 # REVIEW: 30 days is the shipped default, chosen for a dev droplet where the
 # only reader is whoever is debugging that week. Production may want longer —
