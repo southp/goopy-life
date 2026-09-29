@@ -51,6 +51,11 @@ max_active = 10
 # "server_busy"; the latter becomes reachable once the two diverge (#96).
 max_provisioned = 10
 
+# How many UTC days of daily usage counts GET /stats keeps (#172), today
+# included. The sweep drops older daily rows; the all-time total is never
+# pruned. Must be >= 7, the span of the weekly figure. Optional; default 90.
+#   stats_retention_days = 90
+
 [registry]
 # Registry data path
 path = "/opt/goopy-life/goopy.db"
@@ -102,7 +107,7 @@ service_user = "goopy"
 provision_burst      = 2
 provision_period_secs = 60
 #
-# Read limit — applies to GET /goopies/:slug, /config, /capacity.
+# Read limit — applies to GET /goopies/:slug, /config, /capacity, /stats.
 # Default: burst of 30, replenishing 1 token every 2s per IP (comfortable for
 # a frontend that polls every couple of seconds).
 read_burst      = 30
