@@ -146,17 +146,35 @@ pool = "zpool_ghost"
 quota_mb = 200
 
 [provisioner]
-# REVIEW: production should serve real Ghost instances once #18 lands.
-# "Hello" (no-op dev provisioner) or "Ghost" (real Ghost install, #18).
-kind = "Hello"
+# "Ghost" (real Ghost instances) or "Hello" (PoC page, dev/testing).
+kind = "Ghost"
+# The prepared base install every instance soft-links against — the same path
+# as dev, prepared by hand on the host (#147's host checklist). Version-stamped
+# on purpose: the provisioner records this path as written, so a stable symlink
+# that later moved would drag every running instance onto a different Ghost on
+# its next restart. Upgrading means preparing a new directory and editing these
+# two keys together — see docs/GHOST_PROVISIONER.md.
+source_dir = "/opt/goopy-life/ghost-6.63.0"
+# Stamped onto every instance as service_version. Must name what source_dir
+# actually holds; nothing cross-checks them at startup.
+version = "6.63.0"
+# Absolute path — systemd does not search PATH for ExecStart. Ghost 6.63.0
+# requires Node ^22.23.1 || ^24.20.0; the host checklist installs 22.23.2.
+node_bin = "/usr/bin/node"
+# Unprivileged user each instance's systemd unit runs as.
+service_user = "goopy"
 
-# Readiness wait — Ghost only, so commented out while kind = "Hello" (#151).
-# A spawn stays Spawning until the instance answers `GET /` with a 200, because
-# Ghost binds its port immediately and then serves its own maintenance page for
-# the whole of first boot. An instance that never answers ends Failed, with its
-# port released and its working dir reapable by the sweep. The timeout is a real
-# ceiling: no single probe is given more time than the wait has left.
-# REVIEW: size the timeout against production's boot times, which will be slower
-# than a dev droplet's if the host runs several instances at once.
-#   ready_timeout_secs = 120   # default
-#   ready_poll_ms      = 500   # default
+# Readiness wait (#151). A spawn stays Spawning until the instance answers
+# `GET /` with a 200, because Ghost binds its port immediately and then serves
+# its own maintenance page for the whole of first boot. An instance that never
+# answers ends Failed, with its port released and its working dir reapable by
+# the sweep. The timeout is a real ceiling: no single probe is given more time
+# than the wait has left.
+#
+# REVIEW: is 120 s the right ceiling for production? It is dev's value. #113
+# measured a first boot at ~12 s on the dev droplet (7.6 s of it Ghost's DB
+# migration), slower when several instances boot at once. Too short fails
+# spawns that would have come up; too long holds a visitor on a spinner, and a
+# slot, for an instance that never will.
+ready_timeout_secs = 120
+ready_poll_ms = 500
