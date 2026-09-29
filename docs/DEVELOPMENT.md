@@ -26,6 +26,12 @@ cargo clippy           # lint
 cargo fmt --check      # format check
 ```
 
+The Rust version is pinned in `backend/rust-toolchain.toml`, and rustup switches
+to it automatically in `backend/`. Local builds, CI and the deploy therefore use
+the same compiler and the same clippy lints. Run `rustup toolchain install` once
+if cargo reports the toolchain as missing. To upgrade, bump `channel` in its own
+PR and fix whatever the new clippy flags in the same diff.
+
 ### gl-core — Core library
 
 The core library provides the trait-based architecture that all other crates build on.

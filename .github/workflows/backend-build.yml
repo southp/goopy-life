@@ -38,6 +38,11 @@ jobs:
       run: |
         truncate -s 512M /tmp/zfs-test-disk.img
         sudo zpool create testpool /tmp/zfs-test-disk.img
+    - name: Install the pinned Rust toolchain
+      # Installs exactly what backend/rust-toolchain.toml names, so this job
+      # lints with the same clippy as every local build rather than whichever
+      # stable the runner image happens to carry.
+      run: rustup toolchain install
     - name: Build
       run: cargo build --verbose
     - name: Run tests (non-ZFS)
