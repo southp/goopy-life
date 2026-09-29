@@ -5,7 +5,7 @@ import { ApiRequestError, getGoopy, spawnGoopy } from '@/lib/api';
 import { LOCALSTORAGE_KEY, POLL_INTERVAL_MS } from '@/lib/constants';
 import { formatExpiry } from '@/lib/expiry';
 import { useCapacity } from '@/lib/useCapacity';
-import type { AppState } from '@/lib/types';
+import type { AppState, GoopyResponse } from '@/lib/types';
 import CapacityIndicator from '@/components/CapacityIndicator';
 import ErrorMessage from '@/components/ErrorMessage';
 import IssueLink from '@/components/IssueLink';
@@ -18,6 +18,11 @@ function errorState(err: unknown): AppState {
 	}
 	const message = err instanceof Error ? err.message : "Unexpected error";
 	return { kind: "error", message, code: null };
+}
+
+/** The done state for a ready instance, from either the poll or a resume. */
+function doneState(data: GoopyResponse): AppState {
+	return { kind: "done", slug: data.slug, url: data.url, expiresAt: data.expires_at };
 }
 
 // The sole interactive element on the page: the "Ghost now!" CTA and its state
@@ -68,12 +73,7 @@ export default function GhostButton() {
 				const data = await getGoopy(pollSlug, controller.signal);
 
 				if (data.status === "Done") {
-					setState({
-						kind: "done",
-						slug: data.slug,
-						url: data.url,
-						expiresAt: data.expires_at,
-					});
+					setState(doneState(data));
 					setPollSlug(null);
 					return;
 				} else if (data.status !== "Spawning") {
@@ -134,12 +134,7 @@ export default function GhostButton() {
 					localStorage.removeItem(LOCALSTORAGE_KEY);
 					setState({ kind: "expired", slug });
 				} else {
-					setState({
-						kind: "done",
-						slug: data.slug,
-						url: data.url,
-						expiresAt: data.expires_at,
-					});
+					setState(doneState(data));
 				}
 			} else if (data.status !== "Spawning") {
 				localStorage.removeItem(LOCALSTORAGE_KEY);
