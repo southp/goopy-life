@@ -18,10 +18,12 @@
 # Base directory for goopy working directories.
 base_dir = "/opt/goopy-life/data"
 
-# REVIEW: production serves goopy.life. deploy/config/prod.api.nginx names this
-# domain too, and CI fails a PR that changes only one of the two.
-# Public domain — instances are served at {slug}.{domain}.
-domain = "southp.dev"
+# Public domain — instances are served at {slug}.{domain}, the api at
+# api.{domain}, and expired instances redirect to https://{domain}/expired.
+# deploy/config/prod.api.nginx names this domain too (server_name and the
+# certificate under /etc/letsencrypt/live/goopy.life/), and CI fails a PR that
+# changes only one of the two.
+domain = "goopy.life"
 
 # REVIEW: production instances are likely to want a different lifetime.
 # How long each goopy lives (days).

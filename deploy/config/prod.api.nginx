@@ -10,22 +10,19 @@
 # the PR that lets them disagree. The site filename is deliberately not the
 # domain: the one it replaced was called api.goopy.life on a host that served
 # api.southp.dev (#139).
-#
-# REVIEW: a copy of dev's, like prod.toml, and tied to prod.toml's `domain` by
-# the same test — change the two together when #147 settles production's name.
 
 server {
     listen 80;
-    server_name api.southp.dev;
+    server_name api.goopy.life;
     return 301 https://$host$request_uri;
 }
 
 server {
     listen 443 ssl;
-    server_name api.southp.dev;
+    server_name api.goopy.life;
 
-    ssl_certificate     /etc/letsencrypt/live/southp.dev/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/southp.dev/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/goopy.life/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/goopy.life/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers HIGH:!aNULL:!MD5;
     ssl_prefer_server_ciphers on;
