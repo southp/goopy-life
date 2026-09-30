@@ -568,6 +568,13 @@ fn newest_event_repeats(conn: &Connection, event: &InstanceEvent) -> Result<bool
     }))
 }
 
+/// A stored count as served. The counters only ever go up, so a negative one
+/// is a hand-damaged row; it reads as zero rather than wrapping to a huge
+/// number in the public `GET /stats`.
+fn count_from(stored: i64) -> u64 {
+    u64::try_from(stored).unwrap_or(0)
+}
+
 /// Count one `counter` against `day` and against the all-time total.
 ///
 /// Callers run this inside the transaction that makes the counted thing true —
@@ -1178,8 +1185,8 @@ impl GoopyRegistry for SqliteRegistry {
                 [],
                 |row| {
                     Ok(UsageCounts {
-                        provisioned: row.get::<_, i64>(0)? as u64,
-                        failed: row.get::<_, i64>(1)? as u64,
+                        provisioned: count_from(row.get(0)?),
+                        failed: count_from(row.get(1)?),
                     })
                 },
             )
@@ -1225,8 +1232,8 @@ impl GoopyRegistry for SqliteRegistry {
                 Ok(DailyUsage {
                     day,
                     counts: UsageCounts {
-                        provisioned: provisioned as u64,
-                        failed: failed as u64,
+                        provisioned: count_from(provisioned),
+                        failed: count_from(failed),
                     },
                 })
             })
@@ -2054,6 +2061,33 @@ mod tests {
                 t - chrono::Duration::days(7)
             ]
         );
+    }
+
+    /// Nothing writes a negative count; a hand-edited one must not wrap to a
+    /// huge number in the public `/stats`.
+    #[test]
+    fn usage_stats_reads_a_negative_count_as_zero() {
+        let r = registry();
+        let t = utc_today();
+        r.pool
+            .get()
+            .unwrap()
+            .execute(
+                "INSERT INTO usage_daily (day, provisioned, failed) VALUES (?1, -5, -5)",
+                params![t.to_string()],
+            )
+            .unwrap();
+        r.pool
+            .get()
+            .unwrap()
+            .execute_batch("UPDATE usage_totals SET provisioned = -5, failed = -5;")
+            .unwrap();
+
+        let stats = r.usage_stats(t).unwrap();
+
+        assert_eq!(stats.all_time, UsageCounts::new(0, 0));
+        assert_eq!(stats.today, UsageCounts::new(0, 0));
+        assert_eq!(stats.daily[0].counts, UsageCounts::new(0, 0));
     }
 
     #[test]
