@@ -205,14 +205,7 @@ where
         std::thread::spawn(move || {
             let _guard = span.enter();
             match provisioner.provision(&goopy_clone) {
-                Ok(_) => {
-                    // `Done` and the provision count commit together (#172),
-                    // so the count is exactly the instances a visitor could
-                    // use: since #151, `Done` means it answered HTTP.
-                    if let Err(e) = registry.complete_spawn(&goopy_clone.slug) {
-                        tracing::error!("spawning: update {} error: {:?}", goopy_clone.slug, e);
-                    }
-                }
+                Ok(_) => Self::mark_done(&registry, &goopy_clone.slug),
                 Err(err) => {
                     tracing::error!(
                         "provisioning for goopy: {} failed: {:?}",
@@ -418,6 +411,26 @@ where
     ///
     /// Not on `NotFound`: that means the row is gone, and the registry already
     /// refuses to record a failure against an instance that no longer exists.
+    /// Mark a provisioned instance `Done`, counting it.
+    ///
+    /// `Done` and the provision count commit together (#172), so the count is
+    /// exactly the instances a visitor could use: since #151, `Done` means it
+    /// answered HTTP. If that write fails, the instance is still running and
+    /// healthy, so it is marked `Done` uncounted rather than left in
+    /// `Spawning` until it expires: one lost count beats a stranded instance.
+    fn mark_done(registry: &Registry, slug: &str) {
+        let Err(e) = registry.complete_spawn(slug) else {
+            return;
+        };
+        tracing::error!(slug, error = ?e, "marking the instance Done with its count failed");
+        if matches!(e, Error::NotFound) {
+            return;
+        }
+        if let Err(e) = registry.update_status(slug, Status::Done) {
+            tracing::error!(slug, error = ?e, "marking the instance Done uncounted failed too");
+        }
+    }
+
     fn record_failure(registry: &Registry, event: &InstanceEvent) {
         let Err(e) = registry.fail_with_event(&event.slug, event) else {
             return;
@@ -2053,6 +2066,20 @@ mod tests {
         let stats = gm.usage_stats().unwrap();
         assert_eq!(stats.today, UsageCounts::new(1, 0));
         assert_eq!(stats.all_time, UsageCounts::new(1, 0));
+    }
+
+    /// The instance is up and answering; a statistic must not keep it out of
+    /// `Done` until it expires.
+    #[test]
+    fn a_spawn_whose_count_write_fails_still_reaches_done() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        registry.break_usage_writes();
+        let gm = manager_with_provisioner(registry, NoopProvisioner);
+
+        let (slug, _) = gm.spawn().unwrap();
+        wait_for_spawn_to_settle(&gm, &slug);
+
+        assert_eq!(gm.get(&slug).unwrap().unwrap().status, Status::Done);
     }
 
     /// Any spawn-phase failure counts, whatever the error; the readiness gate

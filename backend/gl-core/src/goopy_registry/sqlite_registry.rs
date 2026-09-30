@@ -1268,6 +1268,13 @@ impl SqliteRegistry {
         self.in_write_transaction("test bump usage", |tx| bump_usage_in(tx, day, counter))
             .unwrap();
     }
+
+    /// Break every later counter write by removing the table it goes to, so a
+    /// test can watch what happens to the status write it rides with.
+    pub(crate) fn break_usage_writes(&self) {
+        let conn = self.pool.get().unwrap();
+        conn.execute_batch("DROP TABLE usage_daily;").unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -1885,13 +1892,6 @@ mod tests {
     // Usage counters (#172)
     // -------------------------------------------------------------------------
 
-    /// Break the next counter write by removing the table it goes to, so a
-    /// test can watch the status write it rides with roll back.
-    fn break_usage_writes(r: &SqliteRegistry) {
-        let conn = r.pool.get().unwrap();
-        conn.execute_batch("DROP TABLE usage_daily;").unwrap();
-    }
-
     #[test]
     fn usage_stats_on_an_empty_registry_is_all_zeros() {
         let stats = registry().usage_stats(utc_today()).unwrap();
@@ -1937,7 +1937,7 @@ mod tests {
     fn complete_spawn_rolls_back_the_status_when_the_count_write_fails() {
         let r = registry();
         r.save(&make_goopy("u-rollback")).unwrap();
-        break_usage_writes(&r);
+        r.break_usage_writes();
 
         let err = r.complete_spawn("u-rollback").unwrap_err();
 
@@ -2011,7 +2011,7 @@ mod tests {
     fn fail_with_event_rolls_back_status_and_event_when_the_count_write_fails() {
         let r = registry();
         r.save(&make_goopy("u-fail-rollback")).unwrap();
-        break_usage_writes(&r);
+        r.break_usage_writes();
 
         let err = r
             .fail_with_event(
