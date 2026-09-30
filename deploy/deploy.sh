@@ -21,7 +21,7 @@
 # another's settings the first time someone omitted it.
 #
 # One-time setup on your local machine (macOS):
-#   rustup target add x86_64-unknown-linux-musl
+#   (the Rust toolchain and its musl target come from backend/rust-toolchain.toml)
 #   cargo install cargo-zigbuild
 #   brew install zig
 #
@@ -79,7 +79,7 @@ export GL_GIT_SHA="$GIT_SHA"
 export GL_BUILT_AT="$BUILT_AT"
 
 cd "$HERE/../backend"
-cargo zigbuild --release --target x86_64-unknown-linux-musl -p gl-serv -p gl-cli
+cargo zigbuild --locked --release --target x86_64-unknown-linux-musl -p gl-serv -p gl-cli
 "$HERE/push-binary.sh" "$TARGET" \
     target/x86_64-unknown-linux-musl/release/gl-serv \
     target/x86_64-unknown-linux-musl/release/gl-cli \

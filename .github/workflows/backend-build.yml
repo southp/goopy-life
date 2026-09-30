@@ -38,11 +38,20 @@ jobs:
       run: |
         truncate -s 512M /tmp/zfs-test-disk.img
         sudo zpool create testpool /tmp/zfs-test-disk.img
+    - name: Install the pinned Rust toolchain
+      # Installs exactly what backend/rust-toolchain.toml names, so this job
+      # lints with the same clippy as every local build rather than whichever
+      # stable the runner image happens to carry.
+      run: rustup toolchain install
+    - name: Check formatting
+      run: cargo fmt --check
+    # --locked: build what Cargo.lock says, and fail rather than quietly
+    # resolving new versions if it has fallen out of step with the manifests.
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --locked --verbose
     - name: Run tests (non-ZFS)
-      run: cargo test --verbose
+      run: cargo test --locked --verbose
     - name: Run ZFS tests (root required)
-      run: sudo env "PATH=$PATH" "HOME=$HOME" cargo test -p gl-core --verbose -- --ignored
+      run: sudo env "PATH=$PATH" "HOME=$HOME" cargo test --locked -p gl-core --verbose -- --ignored
     - name: Lint
-      run: cargo clippy --all-targets -- -D warnings
+      run: cargo clippy --locked --all-targets -- -D warnings

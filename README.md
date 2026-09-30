@@ -20,10 +20,9 @@ for the full picture and the one-time GitHub setup.
 
 ### Cross-compilation setup (one-time, on macOS)
 
-The droplet runs x86_64 Linux. Install the musl target and `cargo-zigbuild` (uses [Zig](https://ziglang.org/) as the cross-linker — no extra toolchain taps required):
+The droplet runs x86_64 Linux. The musl target comes with the pinned toolchain (`backend/rust-toolchain.toml`); install `cargo-zigbuild` (uses [Zig](https://ziglang.org/) as the cross-linker — no extra toolchain taps required):
 
 ```bash
-rustup target add x86_64-unknown-linux-musl
 cargo install cargo-zigbuild
 brew install zig
 ```

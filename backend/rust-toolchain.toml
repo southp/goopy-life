@@ -1,0 +1,14 @@
+# The one Rust toolchain for this workspace: local builds, both CI workflows and
+# deploy/deploy.sh all run cargo from backend/, so rustup reads this file for
+# every one of them.
+#
+# Without it, CI used whatever stable the runner image carried and local builds
+# used whatever was last `rustup update`d. The two drifted apart (1.98 vs 1.91),
+# and a lint that only the newer clippy knows failed PRs that were clean locally.
+#
+# Bump `channel` in its own PR, together with whatever the new clippy asks for.
+[toolchain]
+channel = "1.98.1"
+components = ["clippy", "rustfmt"]
+# The droplet binaries are static musl builds (backend-deploy.yml, deploy.sh).
+targets = ["x86_64-unknown-linux-musl"]
