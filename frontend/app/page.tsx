@@ -24,7 +24,7 @@ export default async function Home() {
 
 				<div className="info-sections">
 					<HowItWorks
-						lifeInDays={config.life_in_days}
+						lifeInHours={config.life_in_hours}
 						storageQuotaMb={config.storage_quota_mb}
 					/>
 					<TermsOfUse />
