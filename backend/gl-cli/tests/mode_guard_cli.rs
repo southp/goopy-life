@@ -1,6 +1,6 @@
 //! Drives the real `gl-cli` binary through the mode check (#163).
 //!
-//! The unit tests pin `resolve_dev_mode`; these pin the wiring around it,
+//! The unit tests pin `check_prod_assertion`; these pin the wiring around it,
 //! which a refactor of `main` can silently break: that a refused run exits
 //! non-zero *before* the registry is opened, and that a production config
 //! without `--prod` really runs in production mode.
