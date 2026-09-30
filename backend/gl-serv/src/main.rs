@@ -8,7 +8,7 @@ use axum::http::{HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use clap::{CommandFactory, FromArgMatches, Parser};
 use gl_core::config::ProvisionerConfig;
 use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
@@ -112,9 +112,10 @@ fn check_config(path: &std::path::Path) -> Result<(gl_core::Config, String), gl_
         ("allocator", allocator),
         ("registry", cfg.registry.path.display().to_string()),
         ("base_dir", cfg.base_dir.display().to_string()),
-        ("life_in_days", cfg.life_in_days.to_string()),
+        ("life_in_hours", cfg.life_in_hours.to_string()),
         ("sweep_interval_secs", cfg.sweep_interval_secs.to_string()),
         ("event_retention_days", cfg.event_retention_days.to_string()),
+        ("stats_retention_days", cfg.stats_retention_days.to_string()),
         ("max_active", cfg.max_active.to_string()),
         ("max_provisioned", cfg.max_provisioned.to_string()),
     ];
@@ -207,6 +208,7 @@ trait ManagerService: Send + Sync {
     fn get(&self, slug: &str) -> Result<Option<gl_core::Goopy>, gl_core::Error>;
     fn sweep(&self) -> Result<(u32, Vec<gl_core::Error>), gl_core::Error>;
     fn capacity(&self) -> Result<gl_core::Capacity, gl_core::Error>;
+    fn usage_stats(&self) -> Result<gl_core::UsageStats, gl_core::Error>;
 }
 
 impl<R, P> ManagerService for GoopyManager<R, P>
@@ -228,6 +230,10 @@ where
 
     fn capacity(&self) -> Result<gl_core::Capacity, gl_core::Error> {
         GoopyManager::capacity(self)
+    }
+
+    fn usage_stats(&self) -> Result<gl_core::UsageStats, gl_core::Error> {
+        GoopyManager::usage_stats(self)
     }
 }
 
@@ -262,7 +268,7 @@ struct GoopyResponse {
 
 #[derive(serde::Serialize)]
 struct ConfigResponse {
-    life_in_days: i32,
+    life_in_hours: i32,
     storage_quota_mb: u64,
     domain: String,
 }
@@ -319,6 +325,49 @@ struct CapacityResponse {
     max_active: u32,
     provisioned: u32,
     max_provisioned: u32,
+}
+
+/// A provisioned/failed pair, as `GET /stats` reports it for every span.
+#[derive(serde::Serialize)]
+struct UsageCountsResponse {
+    provisioned: u64,
+    failed: u64,
+}
+
+impl From<gl_core::UsageCounts> for UsageCountsResponse {
+    fn from(c: gl_core::UsageCounts) -> Self {
+        Self {
+            provisioned: c.provisioned,
+            failed: c.failed,
+        }
+    }
+}
+
+/// One UTC day in `GET /stats`' `daily` list.
+#[derive(serde::Serialize)]
+struct DailyUsageResponse {
+    /// `YYYY-MM-DD`, UTC.
+    day: String,
+    #[serde(flatten)]
+    counts: UsageCountsResponse,
+}
+
+/// Body of `GET /stats` — how many instances were provisioned, and how many
+/// failed to be (#172).
+///
+/// Counts only: no slugs and no failure `detail`, so nothing here identifies
+/// an instance or leaks the operator-only reason an event carries.
+#[derive(serde::Serialize)]
+struct StatsResponse {
+    all_time: UsageCountsResponse,
+    /// The last seven UTC days, today included.
+    last_7_days: UsageCountsResponse,
+    today: UsageCountsResponse,
+    /// How many UTC days of `daily` rows the sweep keeps, today included.
+    window_days: u32,
+    /// Days that have a row, newest first. A day with no activity has no row
+    /// and is left out rather than zero-filled.
+    daily: Vec<DailyUsageResponse>,
 }
 
 #[derive(serde::Serialize)]
@@ -395,8 +444,8 @@ impl AppError {
     /// `capacity_retry_after_secs` becomes the `Retry-After` header on the 503 a
     /// capacity cap produces. Callers pass [`Config::sweep_interval_secs`],
     /// because the sweep is the only thing that frees a slot: the API exposes no
-    /// despawn endpoint, so capacity is reclaimed when an instance ages past
-    /// `life_in_days` *and* the sweeper next runs. Deriving the hint from config
+    /// despawn endpoint, so capacity is reclaimed when an instance outlives its
+    /// lifetime *and* the sweeper next runs. Deriving the hint from config
     /// rather than a constant also means it follows the operator if they shorten
     /// the interval.
     ///
@@ -470,7 +519,7 @@ async fn get_goopy(
 
     let goopy = goopy.ok_or_else(|| AppError::NotFound("not found".into()))?;
 
-    let expires_at = goopy.created_at + Duration::days(goopy.life_in_days as i64);
+    let expires_at = goopy.expires_at();
     let is_expired = Utc::now() >= expires_at;
 
     let url = if domain == "localhost" {
@@ -534,7 +583,7 @@ async fn alive_check(
         return Ok(deny());
     };
 
-    let expires_at = goopy.created_at + Duration::days(goopy.life_in_days as i64);
+    let expires_at = goopy.expires_at();
     let alive = goopy.status == gl_core::Status::Done && Utc::now() < expires_at;
 
     if alive {
@@ -596,6 +645,37 @@ async fn get_capacity(State(state): State<Arc<AppState>>) -> Result<impl IntoRes
     }))
 }
 
+/// `GET /stats` — provision counts for today, the last seven days and all
+/// time, plus the daily rows behind them (#172).
+///
+/// Public, on the read limiter: the numbers are aggregate counts and carry
+/// nothing that identifies an instance. Days are UTC. Every provision counts,
+/// `gl-cli spawn` included, since it runs the same `GoopyManager` code.
+async fn get_stats(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
+    let stats = tokio::task::spawn_blocking({
+        let state = Arc::clone(&state);
+        move || state.manager.usage_stats()
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("task join error: {e}")))?
+    .map_err(|e| AppError::from_core(e, state.cfg.sweep_interval_secs))?;
+
+    Ok(Json(StatsResponse {
+        all_time: stats.all_time.into(),
+        last_7_days: stats.last_7_days.into(),
+        today: stats.today.into(),
+        window_days: state.cfg.stats_retention_days,
+        daily: stats
+            .daily
+            .into_iter()
+            .map(|d| DailyUsageResponse {
+                day: d.day.to_string(),
+                counts: d.counts.into(),
+            })
+            .collect(),
+    }))
+}
+
 /// `GET /version` — the commit this process was built from.
 ///
 /// Answers "is the thing I merged the thing that is running?" without an ssh
@@ -625,7 +705,7 @@ async fn get_version() -> impl IntoResponse {
 
 async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(ConfigResponse {
-        life_in_days: state.cfg.life_in_days,
+        life_in_hours: state.cfg.life_in_hours,
         storage_quota_mb: state.cfg.allocator.quota_mb,
         domain: state.cfg.domain.clone(),
     })
@@ -826,6 +906,7 @@ fn build_router(
         .route("/config", get(get_config))
         .route("/capacity", get(get_capacity))
         .route("/version", get(get_version))
+        .route("/stats", get(get_stats))
         .layer(read_layer)
         .with_state(Arc::clone(&state));
 
@@ -1090,7 +1171,7 @@ mod tests {
         gl_core::Config {
             base_dir: PathBuf::from("/tmp/goopy-test"),
             domain: domain.to_string(),
-            life_in_days: 7,
+            life_in_hours: 168,
             port_range_start: 9000,
             port_range_end: 9100,
             dev_mode: true,
@@ -1099,6 +1180,7 @@ mod tests {
             api_address: None,
             sweep_interval_secs: 86400,
             event_retention_days: 30,
+            stats_retention_days: 90,
             max_active: 100,
             max_provisioned: 100,
             registry: gl_core::config::RegistryConfig {
@@ -1164,12 +1246,13 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: cfg.base_dir.clone(),
                 domain: cfg.domain.clone(),
-                life_in_days: cfg.life_in_days,
+                life_in_hours: cfg.life_in_hours,
                 port_range_start: cfg.port_range_start,
                 port_range_end: cfg.port_range_end,
                 max_active,
                 max_provisioned,
                 event_retention_days: 30,
+                stats_retention_days: 90,
             },
             registry,
             NoopProvisioner,
@@ -1198,15 +1281,15 @@ mod tests {
     fn seed_goopy(
         registry: &SqliteRegistry,
         slug: &str,
-        life_in_days: i32,
-        days_ago: i64,
+        life_in_hours: i32,
+        hours_ago: i64,
         port: u32,
         status: Status,
     ) -> Goopy {
         let goopy = Goopy {
             slug: slug.to_string(),
-            life_in_days,
-            created_at: Utc::now() - Duration::days(days_ago),
+            life_in_hours,
+            created_at: Utc::now() - Duration::hours(hours_ago),
             working_dir: PathBuf::from(format!("/tmp/goopy-test/{slug}")),
             port,
             status,
@@ -1257,12 +1340,13 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: PathBuf::from("/tmp/goopy-test"),
                 domain: cfg.domain.clone(),
-                life_in_days: cfg.life_in_days,
+                life_in_hours: cfg.life_in_hours,
                 port_range_start: cfg.port_range_start,
                 port_range_end: cfg.port_range_end,
                 max_active: 100,
                 max_provisioned: 100,
                 event_retention_days: 30,
+                stats_retention_days: 90,
             },
             SqliteRegistry::new(Path::new(":memory:")).unwrap(),
             NoopProvisioner,
@@ -1294,7 +1378,7 @@ mod tests {
     async fn spawn_returns_503_with_retry_after_when_provisioned_cap_hit() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         // One Failed goopy fills the (provisioned = 1) cap; Failed still counts.
-        seed_goopy(&registry, "full-server-slug", 7, 0, 9050, Status::Failed);
+        seed_goopy(&registry, "full-server-slug", 8, 0, 9050, Status::Failed);
         let app = make_router_with_caps("goopy.life", registry, 100, 1);
 
         let resp = app
@@ -1326,7 +1410,7 @@ mod tests {
     async fn spawn_returns_503_server_busy_when_active_cap_hit() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         // One resident (Done) goopy fills the (active = 1) cap.
-        seed_goopy(&registry, "busy-server-slug", 7, 0, 9051, Status::Done);
+        seed_goopy(&registry, "busy-server-slug", 8, 0, 9051, Status::Done);
         let app = make_router_with_caps("goopy.life", registry, 1, 100);
 
         let resp = app
@@ -1357,7 +1441,7 @@ mod tests {
     #[tokio::test]
     async fn get_goopy_returns_200_with_subdomain_url() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        seed_goopy(&registry, "happy-little-slug", 7, 0, 9001, Status::Done);
+        seed_goopy(&registry, "happy-little-slug", 8, 0, 9001, Status::Done);
         let app = make_router("goopy.life", registry);
 
         let resp = app
@@ -1380,7 +1464,7 @@ mod tests {
     #[tokio::test]
     async fn get_goopy_localhost_domain_uses_http_port_url() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        seed_goopy(&registry, "local-test-slug", 7, 0, 9042, Status::Done);
+        seed_goopy(&registry, "local-test-slug", 8, 0, 9042, Status::Done);
         let app = make_router("localhost", registry);
 
         let resp = app
@@ -1400,9 +1484,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_goopy_expires_at_uses_instance_life_in_days() {
-        // Config says 7 days, but the goopy was saved with life_in_days = 3.
-        // expires_at must reflect the per-instance value, not the config.
+    async fn get_goopy_expires_at_uses_instance_life_in_hours() {
+        // Config says 168 hours, but the goopy was saved with life_in_hours = 3.
+        // expires_at must reflect the per-instance value, not the config, and
+        // count it in hours.
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         let goopy = seed_goopy(&registry, "short-lived-slug", 3, 0, 9002, Status::Done);
         let app = make_router("goopy.life", registry);
@@ -1421,15 +1506,15 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp.into_body()).await;
 
-        let expected_expires_at = (goopy.created_at + Duration::days(3)).to_rfc3339();
+        let expected_expires_at = (goopy.created_at + Duration::hours(3)).to_rfc3339();
         assert_eq!(body["expires_at"], expected_expires_at);
     }
 
     #[tokio::test]
     async fn get_goopy_is_expired_false_for_live_instance() {
-        // Created now with a 7-day life: is_expired must be false.
+        // Created now with an 8-hour life: is_expired must be false.
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        seed_goopy(&registry, "live-slug", 7, 0, 9010, Status::Done);
+        seed_goopy(&registry, "live-slug", 8, 0, 9010, Status::Done);
         let app = make_router("goopy.life", registry);
 
         let resp = app
@@ -1450,9 +1535,9 @@ mod tests {
 
     #[tokio::test]
     async fn get_goopy_is_expired_true_for_expired_instance() {
-        // Created 10 days ago with a 7-day life: is_expired must be true.
+        // Created 10 hours ago with an 8-hour life: is_expired must be true.
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        seed_goopy(&registry, "old-slug", 7, 10, 9011, Status::Done);
+        seed_goopy(&registry, "old-slug", 8, 10, 9011, Status::Done);
         let app = make_router("goopy.life", registry);
 
         let resp = app
@@ -1500,7 +1585,7 @@ mod tests {
     async fn alive_check_returns_200_for_alive_goopy() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         // Created now, lives 7 days → not expired, status Done
-        seed_goopy(&registry, "alive-slug", 7, 0, 9003, Status::Done);
+        seed_goopy(&registry, "alive-slug", 8, 0, 9003, Status::Done);
         let app = make_router("goopy.life", registry);
 
         let resp = app
@@ -1520,8 +1605,8 @@ mod tests {
     #[tokio::test]
     async fn alive_check_returns_403_for_expired_goopy() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        // Created 10 days ago, lives 7 → expired
-        seed_goopy(&registry, "expired-slug", 7, 10, 9004, Status::Done);
+        // Created 10 hours ago, lives 8 → expired
+        seed_goopy(&registry, "expired-slug", 8, 10, 9004, Status::Done);
         let app = make_router("goopy.life", registry);
 
         let resp = app
@@ -1542,7 +1627,7 @@ mod tests {
     async fn alive_check_returns_403_for_non_done_status() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         // Still spawning → not alive even if within lifetime
-        seed_goopy(&registry, "spawning-slug", 7, 0, 9005, Status::Spawning);
+        seed_goopy(&registry, "spawning-slug", 8, 0, 9005, Status::Spawning);
         let app = make_router("goopy.life", registry);
 
         let resp = app
@@ -1603,7 +1688,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp.into_body()).await;
         assert_eq!(body["domain"], "goopy.life");
-        assert_eq!(body["life_in_days"], 7);
+        assert_eq!(body["life_in_hours"], 168);
         assert_eq!(body["storage_quota_mb"], 0); // PlainDir has no quota
     }
 
@@ -1731,20 +1816,13 @@ mod tests {
         );
     }
 
-    /// `/version` is a read, not a provisioning request: the deploy polls it
-    /// and every visitor's footer fetches it, so it must sit on the loose read
-    /// limiter. With `provision_burst = 1`, a run of reads that would exhaust
-    /// the provisioning budget must all pass.
-    #[tokio::test]
-    async fn get_version_uses_the_loose_read_rate_limit() {
+    /// Assert that `uri` sits on the loose read limiter, not the tight
+    /// provisioning one: with `provision_burst = 1`, a run of reads that would
+    /// exhaust the provisioning budget must all pass.
+    async fn assert_on_read_limiter(uri: &str) {
         let rl = gl_core::config::RateLimitConfig {
             provision_burst: 1,
-            provision_period_secs: 60,
-            read_burst: 100,
-            read_period_secs: 1,
-            alive_burst: 600,
-            alive_period_secs: 1,
-            alive_cache_secs: 5,
+            ..Default::default()
         };
         let app = make_router_with_rl(
             "goopy.life",
@@ -1757,8 +1835,8 @@ mod tests {
                 .clone()
                 .oneshot(
                     Request::builder()
-                        .header("x-real-ip", "203.0.113.11")
-                        .uri("/version")
+                        .header("x-real-ip", "203.0.113.9")
+                        .uri(uri)
                         .body(Body::empty())
                         .unwrap(),
                 )
@@ -1767,9 +1845,17 @@ mod tests {
             assert_eq!(
                 resp.status(),
                 StatusCode::OK,
-                "read #{attempt} must not be throttled by the provisioning limit",
+                "{uri} read #{attempt} must not be throttled by the provisioning limit",
             );
         }
+    }
+
+    /// `/version` is a read, not a provisioning request: the deploy polls it
+    /// and every visitor's footer fetches it, so it must sit on the loose read
+    /// limiter.
+    #[tokio::test]
+    async fn get_version_uses_the_loose_read_rate_limit() {
+        assert_on_read_limiter("/version").await;
     }
 
     // ── get_capacity ──────────────────────────────────────────────────────
@@ -1809,8 +1895,8 @@ mod tests {
     #[tokio::test]
     async fn get_capacity_counts_failed_as_provisioned_but_not_active() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        seed_goopy(&registry, "cap-done", 7, 0, 9401, Status::Done);
-        seed_goopy(&registry, "cap-failed", 7, 0, 9402, Status::Failed);
+        seed_goopy(&registry, "cap-done", 8, 0, 9401, Status::Done);
+        seed_goopy(&registry, "cap-failed", 8, 0, 9402, Status::Failed);
         let app = make_router_with_caps("goopy.life", registry, 10, 10);
 
         let resp = app
@@ -1841,7 +1927,7 @@ mod tests {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         // A Failed row meets a provisioned cap of 1 while leaving active
         // headroom — is_full must still be true, matching what spawn enforces.
-        seed_goopy(&registry, "cap-failed", 7, 0, 9403, Status::Failed);
+        seed_goopy(&registry, "cap-failed", 8, 0, 9403, Status::Failed);
         let app = make_router_with_caps("goopy.life", registry, 10, 1);
 
         let resp = app
@@ -1867,50 +1953,97 @@ mod tests {
     }
 
     /// `/capacity` is polled by every visitor, so it must sit on the loose read
-    /// limiter, not the tight provisioning one. With `provision_burst = 1`, a
-    /// run of reads that would exhaust the provisioning budget must all pass.
+    /// limiter, not the tight provisioning one.
     #[tokio::test]
     async fn get_capacity_uses_the_loose_read_rate_limit() {
-        let rl = gl_core::config::RateLimitConfig {
-            provision_burst: 1,
-            provision_period_secs: 60,
-            read_burst: 100,
-            read_period_secs: 1,
-            alive_burst: 600,
-            alive_period_secs: 1,
-            alive_cache_secs: 5,
-        };
-        let app = make_router_with_rl(
+        assert_on_read_limiter("/capacity").await;
+    }
+
+    // ── get_stats ─────────────────────────────────────────────────────────
+
+    async fn get_stats_body(app: Router) -> Value {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
+                    .uri("/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        body_json(resp.into_body()).await
+    }
+
+    #[tokio::test]
+    async fn get_stats_on_an_empty_database_returns_zeros() {
+        let app = make_router(
             "goopy.life",
             SqliteRegistry::new(Path::new(":memory:")).unwrap(),
-            rl,
         );
 
-        for attempt in 0..5 {
-            let resp = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .header("x-real-ip", "203.0.113.9")
-                        .uri("/capacity")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                resp.status(),
-                StatusCode::OK,
-                "read #{attempt} must not be throttled by the provisioning limit",
-            );
-        }
+        let body = get_stats_body(app).await;
+
+        let zeros = serde_json::json!({ "provisioned": 0, "failed": 0 });
+        assert_eq!(body["all_time"], zeros);
+        assert_eq!(body["last_7_days"], zeros);
+        assert_eq!(body["today"], zeros);
+        assert_eq!(body["window_days"], 90);
+        assert_eq!(body["daily"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_stats_reports_provisions_and_failures_without_slugs() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_goopy(&registry, "stats-done", 8, 0, 9501, Status::Spawning);
+        registry.complete_spawn("stats-done").unwrap();
+        seed_goopy(&registry, "stats-failed", 8, 0, 9502, Status::Spawning);
+        registry
+            .fail_with_event(
+                "stats-failed",
+                &gl_core::InstanceEvent::failed(
+                    "stats-failed",
+                    gl_core::EventPhase::Spawn,
+                    &gl_core::Error::Invalid,
+                ),
+            )
+            .unwrap();
+        let app = make_router("goopy.life", registry);
+
+        let body = get_stats_body(app).await;
+
+        let one_each = serde_json::json!({ "provisioned": 1, "failed": 1 });
+        assert_eq!(body["all_time"], one_each);
+        assert_eq!(body["last_7_days"], one_each);
+        assert_eq!(body["today"], one_each);
+        assert_eq!(
+            body["daily"],
+            serde_json::json!([{
+                "day": Utc::now().date_naive().to_string(),
+                "provisioned": 1,
+                "failed": 1,
+            }])
+        );
+        let text = body.to_string();
+        assert!(
+            !text.contains("stats-done") && !text.contains("stats-failed"),
+            "nothing in /stats may identify an instance: {text}"
+        );
+    }
+
+    /// Public and aggregate, so it belongs on the loose read limiter with
+    /// `/capacity`, not the tight provisioning one.
+    #[tokio::test]
+    async fn get_stats_uses_the_loose_read_rate_limit() {
+        assert_on_read_limiter("/stats").await;
     }
 
     /// A live instance may be cached, briefly.
     #[tokio::test]
     async fn alive_check_allows_caching_a_live_instance() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        seed_goopy(&registry, "live-slug", 7, 0, 9020, Status::Done);
+        seed_goopy(&registry, "live-slug", 8, 0, 9020, Status::Done);
         let app = make_router("goopy.life", registry);
 
         let resp = app
@@ -1942,9 +2075,9 @@ mod tests {
     #[tokio::test]
     async fn alive_check_never_allows_caching_a_denial() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        // Created 10 days ago, lives 7 → expired.
-        seed_goopy(&registry, "expired-slug", 7, 10, 9021, Status::Done);
-        seed_goopy(&registry, "spawning-slug", 7, 0, 9022, Status::Spawning);
+        // Created 10 hours ago, lives 8 → expired.
+        seed_goopy(&registry, "expired-slug", 8, 10, 9021, Status::Done);
+        seed_goopy(&registry, "spawning-slug", 8, 0, 9022, Status::Spawning);
         let app = make_router("goopy.life", registry);
 
         for slug in ["expired-slug", "spawning-slug", "no-such-slug"] {
@@ -1993,7 +2126,7 @@ mod tests {
             alive_cache_secs: 5,
         };
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        seed_goopy(&registry, "busy-slug", 7, 0, 9010, Status::Done);
+        seed_goopy(&registry, "busy-slug", 8, 0, 9010, Status::Done);
         let app = make_router_with_rl("goopy.life", registry, rl);
 
         for attempt in 0..40 {
@@ -2031,7 +2164,7 @@ mod tests {
             alive_cache_secs: 5,
         };
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        seed_goopy(&registry, "busy-slug", 7, 0, 9011, Status::Done);
+        seed_goopy(&registry, "busy-slug", 8, 0, 9011, Status::Done);
         let app = make_router_with_rl("goopy.life", registry, rl);
 
         let mut throttled = false;
@@ -2175,12 +2308,13 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: cfg.base_dir.clone(),
                 domain: cfg.domain.clone(),
-                life_in_days: cfg.life_in_days,
+                life_in_hours: cfg.life_in_hours,
                 port_range_start: cfg.port_range_start,
                 port_range_end: cfg.port_range_end,
                 max_active: 100,
                 max_provisioned: 100,
                 event_retention_days: 30,
+                stats_retention_days: 90,
             },
             SqliteRegistry::new(Path::new(":memory:")).unwrap(),
             NoopProvisioner,
@@ -2196,22 +2330,23 @@ mod tests {
     #[test]
     fn manager_service_sweep_despawns_expired_instance() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        // Expired: created 10 days ago, lives 7 days.
-        seed_goopy(&registry, "sweep-expired", 7, 10, 9010, Status::Done);
+        // Expired: created 10 hours ago, lives 8 hours.
+        seed_goopy(&registry, "sweep-expired", 8, 10, 9010, Status::Done);
         // Alive: created now, lives 7 days.
-        seed_goopy(&registry, "sweep-alive", 7, 0, 9011, Status::Done);
+        seed_goopy(&registry, "sweep-alive", 8, 0, 9011, Status::Done);
 
         let cfg = test_cfg("goopy.life");
         let manager: Arc<dyn ManagerService> = Arc::new(GoopyManager::new(
             GoopyManagerConfig {
                 base_dir: cfg.base_dir.clone(),
                 domain: cfg.domain.clone(),
-                life_in_days: cfg.life_in_days,
+                life_in_hours: cfg.life_in_hours,
                 port_range_start: cfg.port_range_start,
                 port_range_end: cfg.port_range_end,
                 max_active: 100,
                 max_provisioned: 100,
                 event_retention_days: 30,
+                stats_retention_days: 90,
             },
             registry,
             NoopProvisioner,
@@ -2344,6 +2479,9 @@ mod tests {
         fn capacity(&self) -> Result<gl_core::Capacity, gl_core::Error> {
             unimplemented!("the sweeper never reads capacity")
         }
+        fn usage_stats(&self) -> Result<gl_core::UsageStats, gl_core::Error> {
+            unimplemented!("the sweeper never reads usage stats")
+        }
     }
 
     // ── rate limiting ─────────────────────────────────────────────────────
@@ -2456,7 +2594,7 @@ mod tests {
             alive_cache_secs: 5,
         };
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        seed_goopy(&registry, "shared-slug", 7, 0, 9012, Status::Done);
+        seed_goopy(&registry, "shared-slug", 8, 0, 9012, Status::Done);
         let app = make_router_with_rl("goopy.life", registry, rl);
 
         let make_req = |ip: &str| {
@@ -2490,7 +2628,7 @@ mod tests {
     const VALID_CONFIG: &str = r#"
 base_dir = "/tmp/goopy"
 domain = "goopy.life"
-life_in_days = 7
+life_in_hours = 168
 port_range_start = 9000
 port_range_end = 9100
 dev_mode = true

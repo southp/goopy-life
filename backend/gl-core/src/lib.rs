@@ -9,6 +9,7 @@ mod shared_types;
 mod slug_generator;
 pub mod storage_allocator;
 pub mod sys_utils;
+pub mod usage_stats;
 
 pub use config::Config;
 pub use goopy::*;
@@ -20,3 +21,4 @@ pub use storage_allocator::{PlainDirAllocator, StorageAllocator, ZfsAllocator};
 #[cfg(any(test, feature = "test-utils"))]
 pub use sys_utils::{MockCall, MockProbe, MockSysRunner};
 pub use sys_utils::{RealSysRunner, SysRunner};
+pub use usage_stats::{DailyUsage, UsageCounter, UsageCounts, UsageStats};

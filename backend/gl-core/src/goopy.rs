@@ -1,12 +1,14 @@
 use crate::shared_types::*;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Goopy {
     pub slug: String,
-    pub life_in_days: i32,
+    /// How long this instance lives, fixed when it is spawned: `expires_at` is
+    /// `created_at` plus this many hours.
+    pub life_in_hours: i32,
     pub created_at: DateTime<Utc>,
     pub status: Status,
     pub working_dir: PathBuf,
@@ -21,4 +23,11 @@ pub struct Goopy {
     /// is kept apart from `Some("unknown")`, which is a recorded fact (an
     /// unstamped local build did the provisioning).
     pub build_sha: Option<String>,
+}
+
+impl Goopy {
+    /// When this instance expires: `created_at` plus `life_in_hours`.
+    pub fn expires_at(&self) -> DateTime<Utc> {
+        self.created_at + Duration::hours(i64::from(self.life_in_hours))
+    }
 }

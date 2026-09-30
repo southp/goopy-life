@@ -9,6 +9,7 @@ use crate::goopy_provisioner::hello_provisioner::HelloProvisioner;
 use crate::shared_types::{AllocatorKind, Error, ProvisionerKind};
 use crate::storage_allocator::{PlainDirAllocator, StorageAllocator, ZfsAllocator};
 use crate::sys_utils::SysRunner;
+use crate::usage_stats::UsageStats;
 
 // Design note: a fully abstract design would store these as `dyn RegistryConfig` /
 // `dyn AllocatorConfig` traits. We use concrete structs instead — the number of
@@ -172,7 +173,13 @@ impl Default for RateLimitConfig {
 pub struct Config {
     pub base_dir: PathBuf,
     pub domain: String,
-    pub life_in_days: i32,
+    /// How long a new instance lives. Each instance records its own copy, so
+    /// changing this affects only instances spawned afterwards.
+    ///
+    /// Required, with no default: a config still carrying the old
+    /// `life_in_days` must fail to parse rather than start with a guess, so
+    /// `gl-serv --check-config` stops the deploy that would ship it (#110).
+    pub life_in_hours: i32,
     pub port_range_start: u32,
     pub port_range_end: u32,
     pub dev_mode: bool,
@@ -259,6 +266,18 @@ pub struct Config {
     /// the log never having worked.
     #[serde(default = "default_event_retention_days")]
     pub event_retention_days: u32,
+    /// How many UTC days of daily usage counts to keep (#172), today included.
+    ///
+    /// The counters are a row per day plus one all-time row, so storage grows
+    /// with this window, not with the number of instances. The sweep drops
+    /// daily rows older than the window on every run; the all-time total is
+    /// never pruned. `GET /stats` reports it as `window_days`.
+    ///
+    /// Must be at least [`UsageStats::WEEK_DAYS`] (7), which `Config::from_file`
+    /// enforces: the weekly figure sums the last seven days, and a shorter
+    /// window would prune days it still needs.
+    #[serde(default = "default_stats_retention_days")]
+    pub stats_retention_days: u32,
     pub registry: RegistryConfig,
     pub allocator: AllocatorConfig,
     pub provisioner: ProvisionerConfig,
@@ -293,6 +312,14 @@ fn default_max_active() -> u32 {
 /// a holiday still finds its evidence.
 fn default_event_retention_days() -> u32 {
     30
+}
+
+/// Default usage-stats window: 90 days.
+///
+/// A quarter is long enough to see a trend in daily provisions, and at one
+/// small row per day it costs nothing to keep.
+fn default_stats_retention_days() -> u32 {
+    90
 }
 
 /// Default disk-bound total-instance cap. See [`Config::max_provisioned`].
@@ -377,12 +404,13 @@ impl Config {
         GoopyManagerConfig {
             base_dir: self.base_dir.clone(),
             domain: self.domain.clone(),
-            life_in_days: self.life_in_days,
+            life_in_hours: self.life_in_hours,
             port_range_start: self.port_range_start,
             port_range_end: self.port_range_end,
             max_active: self.max_active,
             max_provisioned: self.max_provisioned,
             event_retention_days: self.event_retention_days,
+            stats_retention_days: self.stats_retention_days,
         }
     }
 
@@ -391,8 +419,8 @@ impl Config {
             .map_err(|e| Error::Config(format!("could not read {}: {}", path.display(), e)))?;
         let cfg: Self = toml::from_str(&contents)
             .map_err(|e| Error::Config(format!("could not parse {}: {}", path.display(), e)))?;
-        if cfg.life_in_days <= 0 {
-            return Err(Error::Config("life_in_days must be > 0".into()));
+        if cfg.life_in_hours <= 0 {
+            return Err(Error::Config("life_in_hours must be > 0".into()));
         }
         if cfg.port_range_start >= cfg.port_range_end {
             return Err(Error::Config(
@@ -453,6 +481,15 @@ impl Config {
         // the most misleading state a forensic record can be in.
         if cfg.event_retention_days == 0 {
             return Err(Error::Config("event_retention_days must be > 0".into()));
+        }
+        // `GET /stats` reports the last seven days. A shorter window would
+        // prune days that figure still sums, so it would quietly under-report
+        // rather than fail.
+        if cfg.stats_retention_days < UsageStats::WEEK_DAYS {
+            return Err(Error::Config(format!(
+                "stats_retention_days must be >= {}",
+                UsageStats::WEEK_DAYS
+            )));
         }
         // gl-serv binds this verbatim. Rejecting it here rather than at
         // `TcpListener::bind` is what lets `--check-config` catch it before the
@@ -558,7 +595,7 @@ mod tests {
     const VALID_BASE: &str = r#"
 base_dir = "/tmp/goopy"
 domain = "goopy.life"
-life_in_days = 7
+life_in_hours = 168
 port_range_start = 9000
 port_range_end = 9100
 dev_mode = true
@@ -581,10 +618,11 @@ kind = "PlainDir"
         );
         let cfg = write_config(&toml).expect("should parse");
         assert_eq!(cfg.domain, "goopy.life");
-        assert_eq!(cfg.life_in_days, 7);
+        assert_eq!(cfg.life_in_hours, 168);
         assert_eq!(cfg.port_range_start, 9000);
         assert_eq!(cfg.sweep_interval_secs, 3600);
         assert_eq!(cfg.event_retention_days, 30);
+        assert_eq!(cfg.stats_retention_days, 90);
     }
 
     #[test]
@@ -592,7 +630,7 @@ kind = "PlainDir"
         // Omit `domain`
         let toml = r#"
 base_dir = "/tmp/goopy"
-life_in_days = 7
+life_in_hours = 168
 port_range_start = 40000
 port_range_end = 49999
 dev_mode = false
@@ -747,6 +785,84 @@ kind = "PlainDir"
     }
 
     #[test]
+    fn stats_retention_days_passes_through_to_the_manager_config() {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            with_caps(VALID_BASE, "stats_retention_days = 30")
+        );
+        let cfg = write_config(&toml).expect("an explicit stats window is valid");
+        assert_eq!(cfg.stats_retention_days, 30);
+        assert_eq!(cfg.build_manager_config().stats_retention_days, 30);
+    }
+
+    /// Seven is the floor, and exactly seven is fine: it keeps every day the
+    /// weekly figure sums.
+    #[test]
+    fn stats_retention_of_exactly_a_week_accepted() {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            with_caps(VALID_BASE, "stats_retention_days = 7")
+        );
+        assert_eq!(write_config(&toml).unwrap().stats_retention_days, 7);
+    }
+
+    #[test]
+    fn stats_retention_shorter_than_a_week_rejected() {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            with_caps(VALID_BASE, "stats_retention_days = 6")
+        );
+        let err = write_config(&toml).unwrap_err();
+        assert!(
+            matches!(err, Error::Config(ref s) if s.contains("stats_retention_days must be >= 7")),
+            "got {err:?}"
+        );
+    }
+
+    /// A config written before #110 says `life_in_days`. It must be refused,
+    /// and the refusal must name the field that replaced it.
+    #[test]
+    fn a_config_with_only_life_in_days_is_rejected_naming_life_in_hours() {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            VALID_BASE.replace("life_in_hours = 168", "life_in_days = 7")
+        );
+        let err = write_config(&toml).unwrap_err();
+        assert!(
+            matches!(err, Error::Config(ref s) if s.contains("missing field `life_in_hours`")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn zero_life_in_hours_rejected() {
+        let toml = format!(
+            r#"{}
+[allocator]
+kind = "PlainDir"
+"#,
+            VALID_BASE.replace("life_in_hours = 168", "life_in_hours = 0")
+        );
+        let err = write_config(&toml).unwrap_err();
+        assert!(
+            matches!(err, Error::Config(ref s) if s.contains("life_in_hours must be > 0")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
     fn zero_sweep_interval_rejected() {
         // Left to gl-serv this is a panic while spawning the sweep task, which
         // a deploy only discovers after it has swapped the config in.
@@ -881,7 +997,7 @@ kind = "PlainDir"
         let manager_cfg = cfg.build_manager_config();
         assert_eq!(manager_cfg.base_dir, cfg.base_dir);
         assert_eq!(manager_cfg.domain, cfg.domain);
-        assert_eq!(manager_cfg.life_in_days, cfg.life_in_days);
+        assert_eq!(manager_cfg.life_in_hours, cfg.life_in_hours);
         assert_eq!(manager_cfg.port_range_start, cfg.port_range_start);
         assert_eq!(manager_cfg.port_range_end, cfg.port_range_end);
         // port_range_start and port_range_end are both u32 — assert distinct
@@ -905,7 +1021,7 @@ kind = "PlainDir"
     const GHOST_BASE: &str = r#"
 base_dir = "/tmp/goopy"
 domain = "goopy.life"
-life_in_days = 7
+life_in_hours = 168
 port_range_start = 9000
 port_range_end = 9100
 dev_mode = false
@@ -1091,7 +1207,7 @@ version = "5.87.1"
         provisioner
             .deprovision(&crate::Goopy {
                 slug: "tasty-lucky-clover".to_string(),
-                life_in_days: 7,
+                life_in_hours: 168,
                 created_at: chrono::Utc::now(),
                 working_dir: working_dir.path().to_path_buf(),
                 port: 9000,
@@ -1121,7 +1237,7 @@ version = "5.87.1"
 base_dir = "/tmp/goopy"
 domain = "goopy.life"
 ssl_email = "admin@goopy.life"
-life_in_days = 7
+life_in_hours = 168
 port_range_start = 9000
 port_range_end = 9100
 dev_mode = true
@@ -1142,7 +1258,7 @@ kind = "PlainDir"
 base_dir = "/tmp/goopy"
 domain = "goopy.life"
 ssl_email = "admin@goopy.life"
-life_in_days = 7
+life_in_hours = 168
 provisioner_kind = "Hello"
 port_range_start = 9000
 port_range_end = 9100

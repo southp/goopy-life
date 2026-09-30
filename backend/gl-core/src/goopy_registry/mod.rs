@@ -3,8 +3,9 @@ pub mod sqlite_registry;
 use crate::goopy::Goopy;
 use crate::instance_event::InstanceEvent;
 use crate::shared_types::*;
+use crate::usage_stats::UsageStats;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 
 pub trait GoopyRegistry {
     fn save(&self, gp: &Goopy) -> Result<(), Error>;
@@ -12,6 +13,17 @@ pub trait GoopyRegistry {
     fn delete(&self, slug: &str) -> Result<(), Error>;
     fn list(&self) -> Result<Vec<Goopy>, Error>;
     fn update_status(&self, slug: &str, new_status: Status) -> Result<(), Error>;
+
+    /// Mark `slug` [`Status::Done`] and count one provision against today
+    /// (UTC) and the all-time total, in one transaction (#172).
+    ///
+    /// The spawn thread's success path. Going through here rather than
+    /// [`update_status`] is what keeps the counter honest: an instance counts
+    /// as provisioned exactly when its row says so, never one without the
+    /// other.
+    ///
+    /// [`update_status`]: GoopyRegistry::update_status
+    fn complete_spawn(&self, slug: &str) -> Result<(), Error>;
 
     /// Find the lowest unused port in `[range_start, range_end)`, mark it as
     /// allocated (recording which goopy instance owns it), and return it.
@@ -90,6 +102,13 @@ pub trait GoopyRegistry {
     /// still set, and `Failed` alone already says the instance is stuck. If
     /// retention has since dropped the earlier event, the next failure writes
     /// a fresh one.
+    ///
+    /// A [`EventPhase::Spawn`] event also counts one failed provision against
+    /// today and the all-time total, in the same transaction (#172) — but only
+    /// when the event is actually recorded. Despawn and sweep failures are
+    /// cleanup problems, not failed provisions, and are not counted.
+    ///
+    /// [`EventPhase::Spawn`]: crate::instance_event::EventPhase::Spawn
     fn fail_with_event(&self, slug: &str, event: &InstanceEvent) -> Result<(), Error>;
 
     /// Delete `slug` and append `event`, in one transaction.
@@ -115,4 +134,19 @@ pub trait GoopyRegistry {
     /// failing lately". Note that the results carry `detail`, which is
     /// operator-only — see [`InstanceEvent`].
     fn events(&self, slug: Option<&str>, limit: u32) -> Result<Vec<InstanceEvent>, Error>;
+
+    // -- usage counters (#172) --------------------------------------------
+    //
+    // A daily rollup plus an all-time total. Written only by `complete_spawn`
+    // and `fail_with_event`; see [`crate::usage_stats`].
+
+    /// Read the usage counters as of `today` (a UTC day).
+    ///
+    /// The date is a parameter, not read from the clock, so a test can put
+    /// "today" wherever its fixture rows are. An empty registry reads as zeros.
+    fn usage_stats(&self, today: NaiveDate) -> Result<UsageStats, Error>;
+
+    /// Drop the daily rows dated strictly before `day`, returning how many
+    /// went. The all-time total is never touched.
+    fn prune_usage_before(&self, day: NaiveDate) -> Result<u32, Error>;
 }

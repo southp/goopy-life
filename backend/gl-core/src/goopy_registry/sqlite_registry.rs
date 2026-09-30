@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -10,6 +10,7 @@ use super::GoopyRegistry;
 use crate::goopy::Goopy;
 use crate::instance_event::{EventOutcome, EventPhase, InstanceEvent};
 use crate::shared_types::*;
+use crate::usage_stats::{DailyUsage, UsageCounter, UsageCounts, UsageStats};
 
 /// Ordered list of migration steps.
 ///
@@ -23,7 +24,9 @@ use crate::shared_types::*;
 /// still 0 even though the tables are already present.
 ///
 /// Version 2 adds `instance_events` (#118).  Version 3 adds
-/// `goopies.build_sha` (#119).  A fresh database is fully
+/// `goopies.build_sha` (#119).  Version 4 adds the usage counters,
+/// `usage_daily` and `usage_totals` (#172).  Version 5 measures an instance's
+/// lifetime in hours rather than days (#110).  A fresh database is fully
 /// initialised by walking every step in order, so new steps append here rather
 /// than editing an existing one — an already-migrated database never re-runs a
 /// step it has passed.
@@ -96,6 +99,58 @@ const MIGRATIONS: &[(u32, &str)] = &[
         // `user_version` guard in [`migrate`] makes safe.
         "
     ALTER TABLE goopies ADD COLUMN build_sha TEXT;
+    ",
+    ),
+    (
+        4,
+        // Usage counters (#172): a row per UTC day plus a single all-time row.
+        //
+        // Not derived from `instance_events`, for two reasons. It has no
+        // success row — only failures and reaps are recorded — so it cannot
+        // count what was provisioned. And it is pruned at
+        // `event_retention_days`, which would erase the all-time figure.
+        //
+        // Storage grows with the days kept, not with the instances: the sweep
+        // prunes `usage_daily` to `stats_retention_days`, and `usage_totals` is
+        // one row forever. `CHECK (id = 1)` makes a second totals row
+        // impossible rather than merely unexpected.
+        //
+        // `day` is `YYYY-MM-DD`, so TEXT order is date order, which is what
+        // the retention delete's `day < ?` relies on.
+        //
+        // `IF NOT EXISTS` and `OR IGNORE`, as in steps 1 and 2, keep this
+        // tolerant of a database whose `user_version` was reset under tables
+        // that are still there.
+        "
+    CREATE TABLE IF NOT EXISTS usage_daily (
+        day         TEXT    PRIMARY KEY,
+        provisioned INTEGER NOT NULL DEFAULT 0,
+        failed      INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS usage_totals (
+        id          INTEGER PRIMARY KEY CHECK (id = 1),
+        provisioned INTEGER NOT NULL,
+        failed      INTEGER NOT NULL
+    );
+
+    INSERT OR IGNORE INTO usage_totals (id, provisioned, failed) VALUES (1, 0, 0);
+    ",
+    ),
+    (
+        5,
+        // The lifetime unit becomes hours (#110), so a lifetime can be shorter
+        // than a day.
+        //
+        // The rename and the ×24 are one step so they commit together: every
+        // instance already running keeps exactly the expiry it had, and no
+        // database is ever left with the new name over values still in days.
+        // Not idempotent — `RENAME COLUMN` fails once the column is gone, and
+        // a second `UPDATE` would convert twice — which the `user_version`
+        // guard in [`migrate`] makes safe.
+        "
+    ALTER TABLE goopies RENAME COLUMN life_in_days TO life_in_hours;
+    UPDATE goopies SET life_in_hours = life_in_hours * 24;
     ",
     ),
 ];
@@ -304,7 +359,7 @@ impl SqliteRegistry {
 #[allow(clippy::too_many_arguments)]
 fn parse_row(
     slug: String,
-    life_in_days: i64,
+    life_in_hours: i64,
     created_at_str: String,
     status_str: String,
     working_dir_str: String,
@@ -353,7 +408,7 @@ fn parse_row(
 
     Ok(Goopy {
         slug,
-        life_in_days: life_in_days as i32,
+        life_in_hours: life_in_hours as i32,
         created_at,
         status,
         working_dir: PathBuf::from(working_dir_str),
@@ -513,6 +568,60 @@ fn newest_event_repeats(conn: &Connection, event: &InstanceEvent) -> Result<bool
     }))
 }
 
+/// A stored count as served. The counters only ever go up, so a negative one
+/// is a hand-damaged row; it reads as zero rather than wrapping to a huge
+/// number in the public `GET /stats`.
+fn count_from(stored: i64) -> u64 {
+    u64::try_from(stored).unwrap_or(0)
+}
+
+/// Count one `counter` against `day` and against the all-time total.
+///
+/// Callers run this inside the transaction that makes the counted thing true —
+/// the `Done` or `Failed` status write — so the count cannot drift from the
+/// rows it describes.
+///
+/// One literal statement pair per counter rather than a column name formatted
+/// into shared SQL, so nothing is ever spliced into a statement.
+///
+/// The totals write is an upsert even though migration 4 seeds the row: a
+/// missing totals row must not be able to fail the status write it rides with,
+/// which would leave a working instance stuck in `Spawning` over a statistic.
+fn bump_usage_in(conn: &Connection, day: NaiveDate, counter: UsageCounter) -> Result<(), Error> {
+    let (daily_sql, totals_sql) = match counter {
+        UsageCounter::Provisioned => (
+            "INSERT INTO usage_daily (day, provisioned) VALUES (?1, 1)
+             ON CONFLICT(day) DO UPDATE SET provisioned = provisioned + 1",
+            "INSERT INTO usage_totals (id, provisioned, failed) VALUES (1, 1, 0)
+             ON CONFLICT(id) DO UPDATE SET provisioned = provisioned + 1",
+        ),
+        UsageCounter::Failed => (
+            "INSERT INTO usage_daily (day, failed) VALUES (?1, 1)
+             ON CONFLICT(day) DO UPDATE SET failed = failed + 1",
+            "INSERT INTO usage_totals (id, provisioned, failed) VALUES (1, 0, 1)
+             ON CONFLICT(id) DO UPDATE SET failed = failed + 1",
+        ),
+    };
+
+    conn.execute(daily_sql, params![day.to_string()])
+        .map_err(|e| Error::Registry {
+            context: "count usage (daily)",
+            source: e.into(),
+        })?;
+    conn.execute(totals_sql, []).map_err(|e| Error::Registry {
+        context: "count usage (total)",
+        source: e.into(),
+    })?;
+
+    tracing::debug!(%day, ?counter, "counted usage");
+    Ok(())
+}
+
+/// Today, as the UTC calendar day the usage counters bucket by.
+fn utc_today() -> NaiveDate {
+    Utc::now().date_naive()
+}
+
 /// Rebuild an [`InstanceEvent`] from its stored columns.
 fn parse_event_row(
     slug: String,
@@ -575,12 +684,12 @@ fn parse_event_row(
 fn insert_goopy(conn: &Connection, gp: &Goopy) -> Result<(), Error> {
     let result = conn.execute(
         "INSERT OR FAIL INTO goopies
-         (slug, life_in_days, created_at, status, working_dir, port,
+         (slug, life_in_hours, created_at, status, working_dir, port,
           provisioner_kind, service_version, build_sha)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             gp.slug,
-            gp.life_in_days as i64,
+            i64::from(gp.life_in_hours),
             gp.created_at.to_rfc3339(),
             gp.status.to_string(),
             gp.working_dir.to_string_lossy().as_ref(),
@@ -634,14 +743,14 @@ impl GoopyRegistry for SqliteRegistry {
         })?;
 
         let result = conn.query_row(
-            "SELECT slug, life_in_days, created_at, status, working_dir,
+            "SELECT slug, life_in_hours, created_at, status, working_dir,
                     port, provisioner_kind, service_version, build_sha
              FROM goopies WHERE slug = ?1",
             params![slug],
             |row| {
                 Ok((
                     row.get::<_, String>("slug")?,
-                    row.get::<_, i64>("life_in_days")?,
+                    row.get::<_, i64>("life_in_hours")?,
                     row.get::<_, String>("created_at")?,
                     row.get::<_, String>("status")?,
                     row.get::<_, String>("working_dir")?,
@@ -661,7 +770,7 @@ impl GoopyRegistry for SqliteRegistry {
             }),
             Ok((
                 slug,
-                life_in_days,
+                life_in_hours,
                 created_at_str,
                 status_str,
                 working_dir_str,
@@ -672,7 +781,7 @@ impl GoopyRegistry for SqliteRegistry {
             )) => {
                 let gp = parse_row(
                     slug,
-                    life_in_days,
+                    life_in_hours,
                     created_at_str,
                     status_str,
                     working_dir_str,
@@ -698,6 +807,14 @@ impl GoopyRegistry for SqliteRegistry {
     }
 
     #[tracing::instrument(skip(self))]
+    fn complete_spawn(&self, slug: &str) -> Result<(), Error> {
+        self.in_write_transaction("complete_spawn", |tx| {
+            set_status_in(tx, slug, Status::Done)?;
+            bump_usage_in(tx, utc_today(), UsageCounter::Provisioned)
+        })
+    }
+
+    #[tracing::instrument(skip(self))]
     fn delete(&self, slug: &str) -> Result<(), Error> {
         let conn = self.pool.get().map_err(|e| Error::Registry {
             context: "pool get",
@@ -716,7 +833,7 @@ impl GoopyRegistry for SqliteRegistry {
 
         let mut stmt = conn
             .prepare(
-                "SELECT slug, life_in_days, created_at, status, working_dir,
+                "SELECT slug, life_in_hours, created_at, status, working_dir,
                         port, provisioner_kind, service_version, build_sha
                  FROM goopies ORDER BY created_at",
             )
@@ -729,7 +846,7 @@ impl GoopyRegistry for SqliteRegistry {
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>("slug")?,
-                    row.get::<_, i64>("life_in_days")?,
+                    row.get::<_, i64>("life_in_hours")?,
                     row.get::<_, String>("created_at")?,
                     row.get::<_, String>("status")?,
                     row.get::<_, String>("working_dir")?,
@@ -746,7 +863,7 @@ impl GoopyRegistry for SqliteRegistry {
             .map(|r| {
                 let (
                     slug,
-                    life_in_days,
+                    life_in_hours,
                     created_at_str,
                     status_str,
                     working_dir_str,
@@ -760,7 +877,7 @@ impl GoopyRegistry for SqliteRegistry {
                 })?;
                 parse_row(
                     slug,
-                    life_in_days,
+                    life_in_hours,
                     created_at_str,
                     status_str,
                     working_dir_str,
@@ -947,7 +1064,16 @@ impl GoopyRegistry for SqliteRegistry {
             if newest_event_repeats(tx, event)? {
                 return Ok(());
             }
-            insert_event_in(tx, event)
+            insert_event_in(tx, event)?;
+            // Counted only past the duplicate check above. A spawn fails once
+            // per instance, so a spawn event is never in practice a repeat —
+            // but if one ever were, it would be the same failure seen twice,
+            // and counting it twice would inflate the figure. Despawn and
+            // sweep failures are cleanup problems, not failed provisions.
+            if event.phase == EventPhase::Spawn {
+                bump_usage_in(tx, utc_today(), UsageCounter::Failed)?;
+            }
+            Ok(())
         })
     }
 
@@ -1033,6 +1159,129 @@ impl GoopyRegistry for SqliteRegistry {
 
         Ok(events)
     }
+
+    // -- usage counters (#172) --------------------------------------------
+
+    #[tracing::instrument(skip(self))]
+    fn usage_stats(&self, today: NaiveDate) -> Result<UsageStats, Error> {
+        let mut conn = self.pool.get().map_err(|e| Error::Registry {
+            context: "pool get",
+            source: e.into(),
+        })?;
+
+        // One read transaction so the total and the daily rows come from the
+        // same snapshot: a spawn completing between two autocommit reads would
+        // otherwise show up in one and not the other.
+        let tx = conn.transaction().map_err(|e| Error::Registry {
+            context: "usage stats",
+            source: e.into(),
+        })?;
+
+        // Migration 4 seeds the row, but reading its absence as zero keeps a
+        // hand-damaged table from turning `GET /stats` into a 500.
+        let all_time = tx
+            .query_row(
+                "SELECT provisioned, failed FROM usage_totals WHERE id = 1",
+                [],
+                |row| {
+                    Ok(UsageCounts {
+                        provisioned: count_from(row.get(0)?),
+                        failed: count_from(row.get(1)?),
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| Error::Registry {
+                context: "usage totals",
+                source: e.into(),
+            })?
+            .unwrap_or_default();
+
+        let mut stmt = tx
+            .prepare("SELECT day, provisioned, failed FROM usage_daily")
+            .map_err(|e| Error::Registry {
+                context: "usage daily prepare",
+                source: e.into(),
+            })?;
+
+        let daily = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(|e| Error::Registry {
+                context: "usage daily query",
+                source: e.into(),
+            })?
+            .map(|r| {
+                let (day_str, provisioned, failed) = r.map_err(|e| Error::Registry {
+                    context: "usage daily row",
+                    source: e.into(),
+                })?;
+                let day = day_str.parse::<NaiveDate>().map_err(|_| {
+                    tracing::error!(field = "day", value = %day_str, "usage row parse failed");
+                    Error::RowParse {
+                        slug: String::new(),
+                        field: "day",
+                        value: day_str.clone(),
+                    }
+                })?;
+                Ok(DailyUsage {
+                    day,
+                    counts: UsageCounts {
+                        provisioned: count_from(provisioned),
+                        failed: count_from(failed),
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+
+        Ok(UsageStats::from_rows(all_time, daily, today))
+    }
+
+    #[tracing::instrument(skip(self))]
+    fn prune_usage_before(&self, day: NaiveDate) -> Result<u32, Error> {
+        let conn = self.pool.get().map_err(|e| Error::Registry {
+            context: "pool get",
+            source: e.into(),
+        })?;
+
+        // `YYYY-MM-DD` on both sides, so TEXT comparison is date comparison.
+        // `usage_totals` is deliberately not touched: pruning the window must
+        // never shrink the all-time figure.
+        let n = conn
+            .execute(
+                "DELETE FROM usage_daily WHERE day < ?1",
+                params![day.to_string()],
+            )
+            .map_err(|e| Error::Registry {
+                context: "prune usage",
+                source: e.into(),
+            })?;
+
+        Ok(n as u32)
+    }
+}
+
+#[cfg(test)]
+impl SqliteRegistry {
+    /// Count one `counter` against an arbitrary `day`, as the real write paths
+    /// do against today — for tests that need rows on dates they cannot wait
+    /// for.
+    pub(crate) fn bump_usage_on(&self, day: NaiveDate, counter: UsageCounter) {
+        self.in_write_transaction("test bump usage", |tx| bump_usage_in(tx, day, counter))
+            .unwrap();
+    }
+
+    /// Break every later counter write by removing the table it goes to, so a
+    /// test can watch what happens to the status write it rides with.
+    pub(crate) fn break_usage_writes(&self) {
+        let conn = self.pool.get().unwrap();
+        conn.execute_batch("DROP TABLE usage_daily;").unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -1043,7 +1292,7 @@ mod tests {
     fn make_goopy(slug: &str) -> Goopy {
         Goopy {
             slug: slug.to_string(),
-            life_in_days: 7,
+            life_in_hours: 168,
             created_at: chrono::Utc::now(),
             working_dir: PathBuf::from(format!("/tmp/{slug}")),
             port: 8080,
@@ -1065,7 +1314,7 @@ mod tests {
         r.save(&gp).unwrap();
         let loaded = r.load("test-slug").unwrap().unwrap();
         assert_eq!(loaded.slug, gp.slug);
-        assert_eq!(loaded.life_in_days, gp.life_in_days);
+        assert_eq!(loaded.life_in_hours, gp.life_in_hours);
         assert_eq!(loaded.status, gp.status);
         assert_eq!(loaded.port, gp.port);
         assert_eq!(loaded.working_dir, gp.working_dir);
@@ -1346,8 +1595,8 @@ mod tests {
         {
             let conn = r.pool.get().unwrap();
             conn.execute(
-                "INSERT INTO goopies (slug, life_in_days, created_at, status, working_dir, port, provisioner_kind, service_version) \
-                 VALUES ('bad-ts', 7, 'not-a-date', 'Spawning', '/tmp', 8080, 'Hello', '0.1.0')",
+                "INSERT INTO goopies (slug, life_in_hours, created_at, status, working_dir, port, provisioner_kind, service_version) \
+                 VALUES ('bad-ts', 168, 'not-a-date', 'Spawning', '/tmp', 8080, 'Hello', '0.1.0')",
                 [],
             )
             .unwrap();
@@ -1365,8 +1614,8 @@ mod tests {
         {
             let conn = r.pool.get().unwrap();
             conn.execute(
-                "INSERT INTO goopies (slug, life_in_days, created_at, status, working_dir, port, provisioner_kind, service_version) \
-                 VALUES ('bad-status', 7, '2024-01-01T00:00:00Z', 'Bogus', '/tmp', 8080, 'Hello', '0.1.0')",
+                "INSERT INTO goopies (slug, life_in_hours, created_at, status, working_dir, port, provisioner_kind, service_version) \
+                 VALUES ('bad-status', 168, '2024-01-01T00:00:00Z', 'Bogus', '/tmp', 8080, 'Hello', '0.1.0')",
                 [],
             )
             .unwrap();
@@ -1384,8 +1633,8 @@ mod tests {
         {
             let conn = r.pool.get().unwrap();
             conn.execute(
-                "INSERT INTO goopies (slug, life_in_days, created_at, status, working_dir, port, provisioner_kind, service_version) \
-                 VALUES ('bad-pk', 7, '2024-01-01T00:00:00Z', 'Spawning', '/tmp', 8080, 'Unknown', '0.1.0')",
+                "INSERT INTO goopies (slug, life_in_hours, created_at, status, working_dir, port, provisioner_kind, service_version) \
+                 VALUES ('bad-pk', 168, '2024-01-01T00:00:00Z', 'Spawning', '/tmp', 8080, 'Unknown', '0.1.0')",
                 [],
             )
             .unwrap();
@@ -1644,6 +1893,317 @@ mod tests {
 
         assert_eq!(pruned, 0);
         assert_eq!(r.events(None, 10).unwrap().len(), 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // Usage counters (#172)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn usage_stats_on_an_empty_registry_is_all_zeros() {
+        let stats = registry().usage_stats(utc_today()).unwrap();
+
+        assert_eq!(stats.all_time, UsageCounts::new(0, 0));
+        assert_eq!(stats.last_7_days, UsageCounts::new(0, 0));
+        assert_eq!(stats.today, UsageCounts::new(0, 0));
+        assert!(stats.daily.is_empty());
+    }
+
+    #[test]
+    fn complete_spawn_marks_done_and_counts_one_provision() {
+        let r = registry();
+        r.save(&make_goopy("u-done")).unwrap();
+
+        r.complete_spawn("u-done").unwrap();
+
+        assert_eq!(r.load("u-done").unwrap().unwrap().status, Status::Done);
+        let stats = r.usage_stats(utc_today()).unwrap();
+        assert_eq!(stats.today, UsageCounts::new(1, 0));
+        assert_eq!(stats.all_time, UsageCounts::new(1, 0));
+        assert_eq!(stats.daily.len(), 1);
+        assert_eq!(stats.daily[0].day, utc_today());
+    }
+
+    #[test]
+    fn complete_spawn_on_a_missing_row_counts_nothing() {
+        let r = registry();
+
+        let err = r.complete_spawn("u-never").unwrap_err();
+
+        assert!(matches!(err, Error::NotFound), "{err:?}");
+        assert_eq!(
+            r.usage_stats(utc_today()).unwrap().all_time,
+            UsageCounts::new(0, 0)
+        );
+    }
+
+    /// The acceptance criterion's "one transaction": a count that cannot be
+    /// written takes the status write down with it, so `Done` never appears
+    /// without being counted.
+    #[test]
+    fn complete_spawn_rolls_back_the_status_when_the_count_write_fails() {
+        let r = registry();
+        r.save(&make_goopy("u-rollback")).unwrap();
+        r.break_usage_writes();
+
+        let err = r.complete_spawn("u-rollback").unwrap_err();
+
+        assert!(matches!(err, Error::Registry { .. }), "{err:?}");
+        assert_eq!(
+            r.load("u-rollback").unwrap().unwrap().status,
+            Status::Spawning,
+            "the status write must roll back with the count"
+        );
+    }
+
+    #[test]
+    fn a_spawn_failure_counts_one_failed_provision() {
+        let r = registry();
+        r.save(&make_goopy("u-failed")).unwrap();
+
+        r.fail_with_event(
+            "u-failed",
+            &failure("u-failed", EventPhase::Spawn, &Error::PortExhausted),
+        )
+        .unwrap();
+
+        let stats = r.usage_stats(utc_today()).unwrap();
+        assert_eq!(stats.today, UsageCounts::new(0, 1));
+        assert_eq!(stats.all_time, UsageCounts::new(0, 1));
+    }
+
+    /// Cleanup problems are not failed provisions: the instance was served,
+    /// or never got that far, and either way `provisioned`/`failed` already
+    /// said so when it happened.
+    #[test]
+    fn despawn_and_sweep_failures_are_not_counted() {
+        let r = registry();
+        r.save(&make_goopy("u-cleanup")).unwrap();
+
+        r.fail_with_event(
+            "u-cleanup",
+            &failure("u-cleanup", EventPhase::Despawn, &Error::Invalid),
+        )
+        .unwrap();
+        r.fail_with_event(
+            "u-cleanup",
+            &failure("u-cleanup", EventPhase::Sweep, &Error::NotFound),
+        )
+        .unwrap();
+
+        assert_eq!(r.events(Some("u-cleanup"), 10).unwrap().len(), 2);
+        assert_eq!(
+            r.usage_stats(utc_today()).unwrap().all_time,
+            UsageCounts::new(0, 0)
+        );
+    }
+
+    #[test]
+    fn a_spawn_failure_skipped_as_a_duplicate_is_not_counted_again() {
+        let r = registry();
+        r.save(&make_goopy("u-dup")).unwrap();
+        let event = failure("u-dup", EventPhase::Spawn, &Error::PortExhausted);
+
+        r.fail_with_event("u-dup", &event).unwrap();
+        r.fail_with_event("u-dup", &event).unwrap();
+
+        assert_eq!(r.events(Some("u-dup"), 10).unwrap().len(), 1);
+        assert_eq!(
+            r.usage_stats(utc_today()).unwrap().all_time,
+            UsageCounts::new(0, 1)
+        );
+    }
+
+    #[test]
+    fn fail_with_event_rolls_back_status_and_event_when_the_count_write_fails() {
+        let r = registry();
+        r.save(&make_goopy("u-fail-rollback")).unwrap();
+        r.break_usage_writes();
+
+        let err = r
+            .fail_with_event(
+                "u-fail-rollback",
+                &failure("u-fail-rollback", EventPhase::Spawn, &Error::Invalid),
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, Error::Registry { .. }), "{err:?}");
+        assert_eq!(
+            r.load("u-fail-rollback").unwrap().unwrap().status,
+            Status::Spawning
+        );
+        assert!(r.events(Some("u-fail-rollback"), 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn usage_stats_sums_the_week_and_lists_days_newest_first() {
+        let r = registry();
+        let t = utc_today();
+        r.bump_usage_on(t, UsageCounter::Provisioned);
+        r.bump_usage_on(t - chrono::Duration::days(6), UsageCounter::Failed);
+        r.bump_usage_on(t - chrono::Duration::days(7), UsageCounter::Provisioned);
+
+        let stats = r.usage_stats(t).unwrap();
+
+        assert_eq!(stats.today, UsageCounts::new(1, 0));
+        assert_eq!(
+            stats.last_7_days,
+            UsageCounts::new(1, 1),
+            "day -7 is outside"
+        );
+        assert_eq!(stats.all_time, UsageCounts::new(2, 1));
+        let days: Vec<_> = stats.daily.iter().map(|d| d.day).collect();
+        assert_eq!(
+            days,
+            [
+                t,
+                t - chrono::Duration::days(6),
+                t - chrono::Duration::days(7)
+            ]
+        );
+    }
+
+    /// Nothing writes a negative count; a hand-edited one must not wrap to a
+    /// huge number in the public `/stats`.
+    #[test]
+    fn usage_stats_reads_a_negative_count_as_zero() {
+        let r = registry();
+        let t = utc_today();
+        r.pool
+            .get()
+            .unwrap()
+            .execute(
+                "INSERT INTO usage_daily (day, provisioned, failed) VALUES (?1, -5, -5)",
+                params![t.to_string()],
+            )
+            .unwrap();
+        r.pool
+            .get()
+            .unwrap()
+            .execute_batch("UPDATE usage_totals SET provisioned = -5, failed = -5;")
+            .unwrap();
+
+        let stats = r.usage_stats(t).unwrap();
+
+        assert_eq!(stats.all_time, UsageCounts::new(0, 0));
+        assert_eq!(stats.today, UsageCounts::new(0, 0));
+        assert_eq!(stats.daily[0].counts, UsageCounts::new(0, 0));
+    }
+
+    #[test]
+    fn prune_usage_before_drops_older_days_and_never_the_total() {
+        let r = registry();
+        let t = utc_today();
+        r.bump_usage_on(t - chrono::Duration::days(200), UsageCounter::Provisioned);
+        r.bump_usage_on(t - chrono::Duration::days(90), UsageCounter::Failed);
+        r.bump_usage_on(t - chrono::Duration::days(89), UsageCounter::Provisioned);
+
+        let pruned = r
+            .prune_usage_before(t - chrono::Duration::days(89))
+            .unwrap();
+
+        assert_eq!(pruned, 2, "only days strictly before the cutoff go");
+        let stats = r.usage_stats(t).unwrap();
+        assert_eq!(stats.daily.len(), 1);
+        assert_eq!(stats.daily[0].day, t - chrono::Duration::days(89));
+        assert_eq!(
+            stats.all_time,
+            UsageCounts::new(2, 1),
+            "the total is never pruned"
+        );
+    }
+
+    /// Droplets are at `user_version = 3`; the tables and the seeded totals
+    /// row have to arrive by migration.
+    #[test]
+    fn migration_adds_usage_tables_to_a_version_3_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("v3.db");
+
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            seed_at_version(&conn, MIGRATIONS, 3);
+            assert!(!table_exists(&conn, "usage_daily"));
+        }
+
+        let r = SqliteRegistry::new(&db_path).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        assert_eq!(user_version(&conn), LATEST_VERSION);
+        assert!(table_exists(&conn, "usage_daily"));
+        assert!(table_exists(&conn, "usage_totals"));
+        assert_eq!(
+            r.usage_stats(utc_today()).unwrap().all_time,
+            UsageCounts::new(0, 0)
+        );
+
+        // And the upgraded database counts.
+        r.save(&make_goopy("u-upgraded")).unwrap();
+        r.complete_spawn("u-upgraded").unwrap();
+        assert_eq!(
+            r.usage_stats(utc_today()).unwrap().all_time,
+            UsageCounts::new(1, 0)
+        );
+    }
+
+    /// Build a file database the way the build before #110 left it: every step
+    /// up to 4 applied and stamped, `goopies` still in days, holding one row per
+    /// `(slug, life_in_days)`.
+    fn seed_v4_db(db_path: &Path, rows: &[(&str, i64)]) {
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        seed_at_version(&conn, MIGRATIONS, 4);
+        for (slug, days) in rows {
+            conn.execute(
+                "INSERT INTO goopies (slug, life_in_days, created_at, status, working_dir, port, provisioner_kind, service_version) \
+                 VALUES (?1, ?2, '2026-09-29T10:00:00Z', 'Done', '/tmp/v4', 8080, 'Hello', '0.1.0')",
+                params![slug, days],
+            )
+            .unwrap();
+        }
+    }
+
+    /// Instances running when step 5 lands must expire exactly when they
+    /// would have: the column changes unit, and every value with it.
+    #[test]
+    fn migration_converts_the_lifetime_to_hours_keeping_every_expiry() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("v4.db");
+        seed_v4_db(&db_path, &[("one-day", 1), ("one-week", 7)]);
+
+        let r = SqliteRegistry::new(&db_path).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        assert_eq!(user_version(&conn), LATEST_VERSION);
+        assert!(column_exists(&conn, "goopies", "life_in_hours"));
+        assert!(!column_exists(&conn, "goopies", "life_in_days"));
+
+        for (slug, days, hours) in [("one-day", 1, 24), ("one-week", 7, 168)] {
+            let gp = r.load(slug).unwrap().expect("the row survives migration");
+            assert_eq!(gp.life_in_hours, hours, "{slug}");
+            assert_eq!(
+                gp.expires_at(),
+                gp.created_at + chrono::Duration::days(days),
+                "{slug} must keep the expiry it had"
+            );
+        }
+    }
+
+    #[test]
+    fn usage_totals_holds_at_most_one_row() {
+        let r = registry();
+        let conn = r.pool.get().unwrap();
+
+        let err = conn
+            .execute(
+                "INSERT INTO usage_totals (id, provisioned, failed) VALUES (2, 0, 0)",
+                [],
+            )
+            .unwrap_err();
+
+        assert!(
+            matches!(err, rusqlite::Error::SqliteFailure(e, _) if e.code == rusqlite::ErrorCode::ConstraintViolation),
+            "{err:?}"
+        );
     }
 
     /// Existing droplets are at `user_version = 1`, so the table has to arrive
@@ -1930,10 +2490,11 @@ mod tests {
         n > 0
     }
 
-    /// Apply the SQL of every step up to and including `through`, then stamp
-    /// `user_version`, to simulate a DB left behind by an older build.
-    fn seed_at_version(conn: &Connection, through: u32) {
-        for &(target, sql) in TEST_MIGRATIONS {
+    /// Apply the SQL of every step in `migrations` up to and including
+    /// `through`, then stamp `user_version`, to simulate a DB left behind by an
+    /// older build.
+    fn seed_at_version(conn: &Connection, migrations: &[(u32, &str)], through: u32) {
+        for &(target, sql) in migrations {
             if target > through {
                 break;
             }
@@ -1974,7 +2535,7 @@ mod tests {
     #[test]
     fn migrate_from_v1_applies_only_remaining_steps() {
         for_each_backing(|conn| {
-            seed_at_version(conn, 1);
+            seed_at_version(conn, TEST_MIGRATIONS, 1);
 
             migrate(conn, TEST_MIGRATIONS).unwrap();
 
@@ -1987,7 +2548,7 @@ mod tests {
     #[test]
     fn migrate_from_v2_applies_only_remaining_steps() {
         for_each_backing(|conn| {
-            seed_at_version(conn, 2);
+            seed_at_version(conn, TEST_MIGRATIONS, 2);
 
             // Step 1 and 2 are non-idempotent DDL, so this only succeeds if
             // both are skipped.
@@ -2001,7 +2562,7 @@ mod tests {
     #[test]
     fn migrate_on_up_to_date_db_is_a_noop() {
         for_each_backing(|conn| {
-            seed_at_version(conn, 3);
+            seed_at_version(conn, TEST_MIGRATIONS, 3);
 
             // Every step is non-idempotent, so re-running any of them would
             // surface as an error here.
@@ -2114,7 +2675,7 @@ mod tests {
     #[test]
     fn migrate_skips_a_step_applied_by_another_process() {
         for_each_backing(|conn| {
-            seed_at_version(conn, 1);
+            seed_at_version(conn, TEST_MIGRATIONS, 1);
 
             // Simulate the other process having finished step 2.  Its DDL is
             // applied here too, so re-running step 2 would fail with

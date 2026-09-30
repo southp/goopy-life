@@ -3,6 +3,7 @@ use crate::goopy_provisioner::*;
 use crate::goopy_registry::*;
 use crate::instance_event::*;
 use crate::shared_types::*;
+use crate::usage_stats::{UsageStats, window_start};
 
 use chrono::{Duration, Utc};
 use std::path::PathBuf;
@@ -12,7 +13,7 @@ use std::sync::Arc;
 pub struct GoopyManagerConfig {
     pub base_dir: PathBuf,
     pub domain: String,
-    pub life_in_days: i32,
+    pub life_in_hours: i32,
     pub port_range_start: u32,
     pub port_range_end: u32,
     /// RAM-bound cap on resident (Spawning + Done) instances. See [`Config::max_active`].
@@ -22,6 +23,9 @@ pub struct GoopyManagerConfig {
     /// How long an instance event is kept before the sweep drops it. See
     /// [`Config::event_retention_days`].
     pub event_retention_days: u32,
+    /// How many UTC days of daily usage counts the sweep keeps, today
+    /// included. See [`Config::stats_retention_days`].
+    pub stats_retention_days: u32,
 }
 
 /// A point-in-time reading of both instance caps and how much of each is used.
@@ -86,12 +90,13 @@ pub struct GoopyManager<
 > {
     pub base_dir: PathBuf,
     pub domain: String,
-    pub goopy_life_in_days: i32,
+    pub goopy_life_in_hours: i32,
     pub port_range_start: u32,
     pub port_range_end: u32,
     pub max_active: u32,
     pub max_provisioned: u32,
     pub event_retention_days: u32,
+    pub stats_retention_days: u32,
 
     registry: Arc<Registry>,
     provisioner: Arc<Provisioner>,
@@ -106,12 +111,13 @@ where
         Self {
             base_dir: config.base_dir,
             domain: config.domain,
-            goopy_life_in_days: config.life_in_days,
+            goopy_life_in_hours: config.life_in_hours,
             port_range_start: config.port_range_start,
             port_range_end: config.port_range_end,
             max_active: config.max_active,
             max_provisioned: config.max_provisioned,
             event_retention_days: config.event_retention_days,
+            stats_retention_days: config.stats_retention_days,
             registry: Arc::new(registry),
             provisioner: Arc::new(provisioner),
         }
@@ -119,7 +125,7 @@ where
 
     #[tracing::instrument(skip(self))]
     pub fn spawn(&self) -> Result<(String, u32), Error> {
-        if self.goopy_life_in_days <= 0 {
+        if self.goopy_life_in_hours <= 0 {
             return Err(Error::Invalid);
         }
 
@@ -140,7 +146,7 @@ where
 
             let candidate = Goopy {
                 slug: slug.clone(),
-                life_in_days: self.goopy_life_in_days,
+                life_in_hours: self.goopy_life_in_hours,
                 created_at: Utc::now(),
                 working_dir: self.base_dir.join(&slug),
                 port,
@@ -199,11 +205,7 @@ where
         std::thread::spawn(move || {
             let _guard = span.enter();
             match provisioner.provision(&goopy_clone) {
-                Ok(_) => {
-                    if let Err(e) = registry.update_status(&goopy_clone.slug, Status::Done) {
-                        tracing::error!("spawning: update {} error: {:?}", goopy_clone.slug, e);
-                    }
-                }
+                Ok(_) => Self::mark_done(&registry, &goopy_clone.slug),
                 Err(err) => {
                     tracing::error!(
                         "provisioning for goopy: {} failed: {:?}",
@@ -397,6 +399,26 @@ where
         }
     }
 
+    /// Mark a provisioned instance `Done`, counting it.
+    ///
+    /// `Done` and the provision count commit together (#172), so the count is
+    /// exactly the instances a visitor could use: since #151, `Done` means it
+    /// answered HTTP. If that write fails, the instance is still running and
+    /// healthy, so it is marked `Done` uncounted rather than left in
+    /// `Spawning` until it expires: one lost count beats a stranded instance.
+    fn mark_done(registry: &Registry, slug: &str) {
+        let Err(e) = registry.complete_spawn(slug) else {
+            return;
+        };
+        tracing::error!(slug, error = ?e, "marking the instance Done with its count failed");
+        if matches!(e, Error::NotFound) {
+            return;
+        }
+        if let Err(e) = registry.update_status(slug, Status::Done) {
+            tracing::error!(slug, error = ?e, "marking the instance Done uncounted failed too");
+        }
+    }
+
     /// Mark `event.slug` `Failed` and record why, keeping the why even when
     /// the status write is what fails.
     ///
@@ -454,6 +476,15 @@ where
         self.registry.events(slug, limit)
     }
 
+    /// Read the usage counters as of today (UTC): provisions and failed
+    /// provisions for today, the last seven days and all time (#172).
+    ///
+    /// Every provision counts, `gl-cli spawn` included — it runs this same
+    /// code — so a load test run on the host inflates the figures.
+    pub fn usage_stats(&self) -> Result<UsageStats, Error> {
+        self.registry.usage_stats(Utc::now().date_naive())
+    }
+
     /// Read the current usage of both caps.
     ///
     /// The two counts are read independently, so they are not a consistent
@@ -506,9 +537,43 @@ where
         }
     }
 
+    /// Drop daily usage rows that fall outside the last
+    /// `stats_retention_days` UTC days, today included (#172).
+    ///
+    /// The window is counted in whole days ending today, so a 7-day window
+    /// keeps exactly the days `last_7_days` sums. The all-time total is a
+    /// separate row and is never pruned.
+    ///
+    /// Handled like [`prune_events`]: housekeeping, outside the sweep's
+    /// `(swept, errors)` result, logged and carried past on failure. Missing
+    /// one costs a few extra rows until the next sweep.
+    ///
+    /// [`prune_events`]: GoopyManager::prune_events
+    fn prune_usage(&self, now: chrono::DateTime<Utc>) {
+        let keep_from = window_start(now.date_naive(), self.stats_retention_days);
+
+        match self.registry.prune_usage_before(keep_from) {
+            Ok(0) => {}
+            Ok(pruned) => {
+                tracing::info!(
+                    pruned,
+                    retention_days = self.stats_retention_days,
+                    "sweep: dropped expired daily usage rows"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = ?e,
+                    retention_days = self.stats_retention_days,
+                    "sweep: pruning daily usage rows failed",
+                );
+            }
+        }
+    }
+
     /// Despawn all expired goopy instances and reap all `Failed` instances.
     ///
-    /// **Expired instances** are those where `now > created_at + life_in_days`.
+    /// **Expired instances** are those where `now > created_at + life_in_hours`.
     /// **Failed instances** are reaped regardless of age — a `Failed` status
     /// means provisioning failed and it is safe to delete.  `Suspended`
     /// instances are intentionally left alone; they hold valid data on disk and
@@ -535,8 +600,9 @@ where
     /// `nginx -t` and a reload. That cost is what #109 (batch the reloads) buys
     /// back; until then a sweep over a full registry is the slow case to watch.
     ///
-    /// Also enforces retention on the instance event log — see
-    /// `prune_events`, which is deliberately outside the returned counts.
+    /// Also enforces retention on the instance event log and on the daily
+    /// usage counts — see `prune_events` and `prune_usage`, which are
+    /// deliberately outside the returned counts.
     ///
     /// Meant to be called periodically (e.g. via `tokio::time::interval` in
     /// `gl-serv`), from a context where blocking is acceptable.
@@ -546,6 +612,7 @@ where
     pub fn sweep(&self) -> Result<(u32, Vec<Error>), Error> {
         let now = Utc::now();
         self.prune_events(now);
+        self.prune_usage(now);
         let goopies = self.list()?;
         let mut swept = 0u32;
         let mut errors: Vec<Error> = Vec::new();
@@ -562,7 +629,7 @@ where
                 );
                 true
             } else {
-                let expires_at = gp.created_at + Duration::days(gp.life_in_days as i64);
+                let expires_at = gp.expires_at();
                 if now > expires_at {
                     tracing::info!(
                         slug = %gp.slug,
@@ -613,6 +680,7 @@ mod tests {
     use crate::goopy_registry::GoopyRegistry;
     use crate::goopy_registry::sqlite_registry::SqliteRegistry;
     use crate::storage_allocator::{PlainDirAllocator, StorageAllocator};
+    use crate::usage_stats::{UsageCounter, UsageCounts};
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
@@ -641,6 +709,9 @@ mod tests {
             Ok(vec![])
         }
         fn update_status(&self, _slug: &str, _new_status: Status) -> Result<(), Error> {
+            Ok(())
+        }
+        fn complete_spawn(&self, _slug: &str) -> Result<(), Error> {
             Ok(())
         }
         fn acquire_port(
@@ -684,6 +755,14 @@ mod tests {
         fn events(&self, _slug: Option<&str>, _limit: u32) -> Result<Vec<InstanceEvent>, Error> {
             Ok(vec![])
         }
+        // Likewise the usage counters: accepted by `complete_spawn`, never
+        // stored, and read back as zeros.
+        fn usage_stats(&self, today: chrono::NaiveDate) -> Result<UsageStats, Error> {
+            Ok(UsageStats::from_rows(UsageCounts::default(), vec![], today))
+        }
+        fn prune_usage_before(&self, _day: chrono::NaiveDate) -> Result<u32, Error> {
+            Ok(0)
+        }
     }
 
     struct NoopProvisioner;
@@ -710,23 +789,24 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: PathBuf::from("/tmp"),
                 domain: "test.example".into(),
-                life_in_days: 7,
+                life_in_hours: 168,
                 port_range_start: 9000,
                 port_range_end: 9100,
                 max_active: 100,
                 max_provisioned: 100,
                 event_retention_days: 30,
+                stats_retention_days: 90,
             },
             registry,
             NoopProvisioner,
         )
     }
 
-    fn make_goopy(slug: &str, days_ago: i64, port: u32, status: Status) -> Goopy {
+    fn make_goopy(slug: &str, hours_ago: i64, port: u32, status: Status) -> Goopy {
         Goopy {
             slug: slug.to_string(),
-            life_in_days: 7,
-            created_at: Utc::now() - Duration::days(days_ago),
+            life_in_hours: 8,
+            created_at: Utc::now() - Duration::hours(hours_ago),
             working_dir: PathBuf::from(format!("/tmp/{slug}")),
             port,
             status,
@@ -737,18 +817,19 @@ mod tests {
     }
 
     #[test]
-    fn spawn_rejects_non_positive_life_in_days() {
+    fn spawn_rejects_non_positive_life_in_hours() {
         for bad in [0i32, -1, i32::MIN] {
             let gm = GoopyManager::new(
                 GoopyManagerConfig {
                     base_dir: PathBuf::from("/tmp"),
                     domain: "test.example".into(),
-                    life_in_days: bad,
+                    life_in_hours: bad,
                     port_range_start: 9000,
                     port_range_end: 9100,
                     max_active: 100,
                     max_provisioned: 100,
                     event_retention_days: 30,
+                    stats_retention_days: 90,
                 },
                 SqliteRegistry::new(Path::new(":memory:")).unwrap(),
                 NoopProvisioner,
@@ -756,7 +837,7 @@ mod tests {
             let err = gm.spawn().unwrap_err();
             assert!(
                 matches!(err, Error::Invalid),
-                "expected Invalid for life_in_days={bad}"
+                "expected Invalid for life_in_hours={bad}"
             );
         }
     }
@@ -768,12 +849,13 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: PathBuf::from("/tmp/test-goopy"),
                 domain: "test.example".into(),
-                life_in_days: 7,
+                life_in_hours: 168,
                 port_range_start: 8080,
                 port_range_end: 9080,
                 max_active: 100,
                 max_provisioned: 100,
                 event_retention_days: 30,
+                stats_retention_days: 90,
             },
             CollideOnceRegistry {
                 save_calls: Mutex::new(0),
@@ -800,7 +882,7 @@ mod tests {
     fn sweep_removes_expired_instances() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
 
-        // Insert an expired goopy: created 10 days ago, lives 7 days
+        // Insert an expired goopy: created 10 hours ago, lives 8 hours
         let expired = make_goopy("expired-slug", 10, 9000, Status::Done);
         registry.save(&expired).unwrap();
         registry.acquire_port("expired-slug", 9000, 9001).unwrap();
@@ -827,6 +909,44 @@ mod tests {
         assert!(gm.get("expired-slug").unwrap().is_none());
         // Alive should remain
         assert!(gm.get("alive-slug").unwrap().is_some());
+    }
+
+    /// The lifetime is counted in hours: three hours old with a two-hour life
+    /// is expired, one hour old is not. Read as days, neither would be.
+    #[test]
+    fn sweep_counts_the_lifetime_in_hours() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        for (slug, hours_ago, port) in [("past-it", 3, 9000), ("still-going", 1, 9001)] {
+            let gp = Goopy {
+                life_in_hours: 2,
+                created_at: Utc::now() - Duration::hours(hours_ago),
+                ..make_goopy(slug, 0, port, Status::Done)
+            };
+            registry.save(&gp).unwrap();
+            registry.acquire_port(slug, port, port + 1).unwrap();
+        }
+
+        let gm = make_test_manager(registry);
+
+        let (swept, errors) = gm.sweep().unwrap();
+        assert_eq!(swept, 1);
+        assert!(errors.is_empty());
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while gm.get("past-it").unwrap().is_some() {
+            assert!(std::time::Instant::now() < deadline, "despawn timed out");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(gm.get("still-going").unwrap().is_some());
+    }
+
+    #[test]
+    fn expires_at_adds_the_lifetime_in_hours_to_created_at() {
+        let gp = Goopy {
+            life_in_hours: 8,
+            ..make_goopy("eight-hours", 0, 9000, Status::Done)
+        };
+        assert_eq!(gp.expires_at() - gp.created_at, Duration::hours(8));
     }
 
     #[test]
@@ -892,6 +1012,10 @@ mod tests {
             fn update_status(&self, _: &str, _: Status) -> Result<(), Error> {
                 Err(Error::Invalid)
             }
+            /// Refused like every other status write this double sees.
+            fn complete_spawn(&self, _: &str) -> Result<(), Error> {
+                Err(Error::Invalid)
+            }
             fn acquire_port(&self, slug: &str, s: u32, e: u32) -> Result<u32, Error> {
                 self.0.acquire_port(slug, s, e)
             }
@@ -924,6 +1048,12 @@ mod tests {
             fn events(&self, slug: Option<&str>, limit: u32) -> Result<Vec<InstanceEvent>, Error> {
                 self.0.events(slug, limit)
             }
+            fn usage_stats(&self, today: chrono::NaiveDate) -> Result<UsageStats, Error> {
+                self.0.usage_stats(today)
+            }
+            fn prune_usage_before(&self, day: chrono::NaiveDate) -> Result<u32, Error> {
+                self.0.prune_usage_before(day)
+            }
         }
 
         let inner = SqliteRegistry::new(Path::new(":memory:")).unwrap();
@@ -935,12 +1065,13 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: PathBuf::from("/tmp"),
                 domain: "test.example".into(),
-                life_in_days: 7,
+                life_in_hours: 168,
                 port_range_start: 9000,
                 port_range_end: 9100,
                 max_active: 100,
                 max_provisioned: 100,
                 event_retention_days: 30,
+                stats_retention_days: 90,
             },
             FailingUpdateRegistry(inner),
             NoopProvisioner,
@@ -1098,7 +1229,7 @@ mod tests {
         // Seed a Failed instance directly, bypassing the spawn flow.
         let failed = Goopy {
             slug: "failed-slug".to_string(),
-            life_in_days: 7,
+            life_in_hours: 168,
             created_at: Utc::now(),
             working_dir: working_dir.clone(),
             port: 9050,
@@ -1115,12 +1246,13 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: base_dir.path().to_path_buf(),
                 domain: "test.example".into(),
-                life_in_days: 7,
+                life_in_hours: 168,
                 port_range_start: 9050,
                 port_range_end: 9051,
                 max_active: 100,
                 max_provisioned: 100,
                 event_retention_days: 30,
+                stats_retention_days: 90,
             },
             registry,
             DirCleaningProvisioner,
@@ -1180,12 +1312,13 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: PathBuf::from("/tmp"),
                 domain: "test.example".into(),
-                life_in_days: 7,
+                life_in_hours: 168,
                 port_range_start: 9060,
                 port_range_end: 9062,
                 max_active: 100,
                 max_provisioned: 100,
                 event_retention_days: 30,
+                stats_retention_days: 90,
             },
             registry,
             NoopProvisioner,
@@ -1278,12 +1411,13 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: PathBuf::from("/tmp"),
                 domain: "test.example".into(),
-                life_in_days: 7,
+                life_in_hours: 168,
                 port_range_start: 9000,
                 port_range_end: 9100,
                 max_active,
                 max_provisioned,
                 event_retention_days: 30,
+                stats_retention_days: 90,
             },
             registry,
             provisioner,
@@ -1683,6 +1817,9 @@ mod tests {
         fn update_status(&self, slug: &str, status: Status) -> Result<(), Error> {
             self.0.update_status(slug, status)
         }
+        fn complete_spawn(&self, slug: &str) -> Result<(), Error> {
+            self.0.complete_spawn(slug)
+        }
         fn acquire_port(&self, slug: &str, s: u32, e: u32) -> Result<u32, Error> {
             self.0.acquire_port(slug, s, e)
         }
@@ -1709,6 +1846,12 @@ mod tests {
         }
         fn events(&self, slug: Option<&str>, limit: u32) -> Result<Vec<InstanceEvent>, Error> {
             self.0.events(slug, limit)
+        }
+        fn usage_stats(&self, today: chrono::NaiveDate) -> Result<UsageStats, Error> {
+            self.0.usage_stats(today)
+        }
+        fn prune_usage_before(&self, day: chrono::NaiveDate) -> Result<u32, Error> {
+            self.0.prune_usage_before(day)
         }
     }
 
@@ -1741,6 +1884,9 @@ mod tests {
         fn update_status(&self, slug: &str, status: Status) -> Result<(), Error> {
             self.0.update_status(slug, status)
         }
+        fn complete_spawn(&self, slug: &str) -> Result<(), Error> {
+            self.0.complete_spawn(slug)
+        }
         fn acquire_port(&self, slug: &str, s: u32, e: u32) -> Result<u32, Error> {
             self.0.acquire_port(slug, s, e)
         }
@@ -1764,6 +1910,12 @@ mod tests {
         }
         fn events(&self, slug: Option<&str>, limit: u32) -> Result<Vec<InstanceEvent>, Error> {
             self.0.events(slug, limit)
+        }
+        fn usage_stats(&self, today: chrono::NaiveDate) -> Result<UsageStats, Error> {
+            self.0.usage_stats(today)
+        }
+        fn prune_usage_before(&self, day: chrono::NaiveDate) -> Result<u32, Error> {
+            self.0.prune_usage_before(day)
         }
     }
 
@@ -1900,6 +2052,76 @@ mod tests {
         );
     }
 
+    // ── usage counters (#172) ─────────────────────────────────────────────
+
+    #[test]
+    fn a_spawn_that_reaches_done_counts_one_provision() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let gm = manager_with_provisioner(registry, NoopProvisioner);
+
+        let (slug, _) = gm.spawn().unwrap();
+        wait_for_spawn_to_settle(&gm, &slug);
+
+        assert_eq!(gm.get(&slug).unwrap().unwrap().status, Status::Done);
+        let stats = gm.usage_stats().unwrap();
+        assert_eq!(stats.today, UsageCounts::new(1, 0));
+        assert_eq!(stats.all_time, UsageCounts::new(1, 0));
+    }
+
+    /// The instance is up and answering; a statistic must not keep it out of
+    /// `Done` until it expires.
+    #[test]
+    fn a_spawn_whose_count_write_fails_still_reaches_done() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        registry.break_usage_writes();
+        let gm = manager_with_provisioner(registry, NoopProvisioner);
+
+        let (slug, _) = gm.spawn().unwrap();
+        wait_for_spawn_to_settle(&gm, &slug);
+
+        assert_eq!(gm.get(&slug).unwrap().unwrap().status, Status::Done);
+    }
+
+    /// Any spawn-phase failure counts, whatever the error; the readiness gate
+    /// (#151) refusing an instance is one such failure.
+    #[test]
+    fn a_spawn_that_fails_counts_one_failure() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let gm = manager_with_provisioner(registry, UnprovisionableProvisioner);
+
+        let (slug, _) = gm.spawn().unwrap();
+        wait_for_spawn_to_settle(&gm, &slug);
+
+        assert_eq!(gm.get(&slug).unwrap().unwrap().status, Status::Failed);
+        let stats = gm.usage_stats().unwrap();
+        assert_eq!(stats.today, UsageCounts::new(0, 1));
+        assert_eq!(stats.all_time, UsageCounts::new(0, 1));
+    }
+
+    /// A teardown that fails is a cleanup problem: the instance was already
+    /// counted when it was provisioned, and must not be counted again.
+    #[test]
+    fn a_failed_despawn_changes_neither_count() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let gm = manager_with_provisioner(
+            registry,
+            UndeprovisionableProvisioner {
+                deprovision_calls: Arc::new(Mutex::new(0)),
+            },
+        );
+        let (slug, _) = gm.spawn().unwrap();
+        wait_for_spawn_to_settle(&gm, &slug);
+        let before = gm.usage_stats().unwrap();
+        assert_eq!(before.all_time, UsageCounts::new(1, 0));
+
+        gm.despawn_blocking(&slug).unwrap_err();
+
+        assert_eq!(gm.get(&slug).unwrap().unwrap().status, Status::Failed);
+        let after = gm.usage_stats().unwrap();
+        assert_eq!(after.all_time, before.all_time);
+        assert_eq!(after.today, before.today);
+    }
+
     /// Append-only means unbounded unless something trims it, and the sweep is
     /// the only periodic task there is.
     #[test]
@@ -1920,6 +2142,33 @@ mod tests {
         let left = gm.events(None, 10).unwrap();
         assert_eq!(left.len(), 1, "only the stale event should go: {left:?}");
         assert_eq!(left[0].slug, "recent");
+    }
+
+    /// The acceptance criterion: after a sweep no daily row is older than the
+    /// window, and the all-time figure has not moved.
+    #[test]
+    fn sweep_drops_usage_days_past_the_window_but_keeps_the_total() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let today = Utc::now().date_naive();
+        // 90-day window, as `manager_with` configures: today and the 89 days
+        // before it are kept.
+        let oldest_kept = today - Duration::days(89);
+        registry.bump_usage_on(today - Duration::days(200), UsageCounter::Provisioned);
+        registry.bump_usage_on(today - Duration::days(90), UsageCounter::Failed);
+        registry.bump_usage_on(oldest_kept, UsageCounter::Provisioned);
+        registry.bump_usage_on(today, UsageCounter::Provisioned);
+
+        let gm = manager_with_provisioner(registry, NoopProvisioner);
+        let before = gm.usage_stats().unwrap().all_time;
+        let (swept, errors) = gm.sweep().unwrap();
+
+        assert_eq!(swept, 0, "a prune is not a reap");
+        assert!(errors.is_empty());
+        let after = gm.usage_stats().unwrap();
+        let days: Vec<_> = after.daily.iter().map(|d| d.day).collect();
+        assert_eq!(days, [today, oldest_kept]);
+        assert_eq!(after.all_time, before, "the total is never pruned");
+        assert_eq!(after.all_time, UsageCounts::new(3, 1));
     }
 
     /// Retention is housekeeping, not a reap: a prune must not show up in the
