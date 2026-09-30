@@ -221,14 +221,16 @@ sudo -u goopy /opt/goopy-life/bin/gl-cli \
     --config /opt/goopy-life/config.toml --prod list
 ```
 
-Two arguments, both load-bearing:
+Two arguments:
 
 - **`--config /opt/goopy-life/config.toml`** — the default is `./config.toml`,
   which does not exist in the directory an operator is likely standing in.
-- **`--prod`** — without it the CLI runs in **dev mode whatever the config
-  says**, and a dev-mode despawn kills a detached process instead of removing
-  the systemd unit and the nginx sites. The instance disappears from the
-  registry and its real resources stay behind. `gl-cli --help` repeats this.
+- **`--prod`** — an assertion, not a mode switch. The mode comes from
+  `dev_mode` in the config, the same rule `gl-serv` follows. With `--prod`,
+  a config that sets `dev_mode = true` is refused — exit 1, naming the file —
+  before the registry is opened or a provisioner is built, so a `--config`
+  pointed at the wrong file fails loudly instead of running a dev-mode
+  teardown on a real host (#163).
 
 Run it as `goopy`: that account owns the registry, the working directories and
 the `sudoers` rules the provisioner needs. As any other user it either cannot

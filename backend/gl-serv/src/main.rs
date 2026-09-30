@@ -993,7 +993,7 @@ async fn main() {
         std::process::exit(1);
     });
 
-    let provisioner = cfg.build_provisioner(cfg.dev_mode, Arc::new(RealSysRunner));
+    let provisioner = cfg.build_provisioner(Arc::new(RealSysRunner));
 
     let registry = SqliteRegistry::new(&cfg.registry.path).unwrap_or_else(|e| {
         tracing::error!("failed to open SQLite registry: {e}");

@@ -504,6 +504,7 @@ dependencies = [
  "clap",
  "gl-core",
  "indicatif",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
  "url",
