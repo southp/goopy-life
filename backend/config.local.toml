@@ -23,8 +23,8 @@ base_dir = "./.local/data"
 # Instances are served at {slug}.{domain}; localhost keeps that resolvable.
 domain = "localhost"
 
-# How long each goopy lives (days).
-life_in_days = 7
+# How long each goopy lives (hours).
+life_in_hours = 168
 
 # Port range for goopy instances (inclusive). High and unprivileged, so it does
 # not collide with anything a dev machine is likely to be running.

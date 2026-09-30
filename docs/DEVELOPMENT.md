@@ -172,7 +172,7 @@ Key settings:
 |---------|-------------|
 | `base_dir` | Working directory for instance data |
 | `domain` | Public domain (e.g. `goopy.life`) |
-| `life_in_days` | Instance TTL |
+| `life_in_hours` | Instance lifetime, in hours; each instance keeps the value it was spawned with |
 | `provisioner.kind` | `"Hello"` or `"Ghost"` |
 | `port_range_start` / `port_range_end` | Port allocation range |
 | `dev_mode` | Skips systemd/nginx/ZFS operations |

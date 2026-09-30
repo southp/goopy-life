@@ -381,7 +381,7 @@ mod tests {
         let toml = r#"
 base_dir = "/tmp/goopy"
 domain = "goopy.life"
-life_in_days = 7
+life_in_hours = 168
 port_range_start = 9000
 port_range_end = 9100
 dev_mode = false

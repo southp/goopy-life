@@ -18,8 +18,9 @@ base_dir = "/opt/goopy-life/data"
 # Public domain — instances are served at {slug}.{domain}.
 domain = "southp.dev"
 
-# How long each goopy lives (days).
-life_in_days = 1
+# How long each goopy lives (hours). 8, as in production, so dev behaves
+# like it (#110).
+life_in_hours = 8
 
 # Port range for goopy instances (inclusive).
 port_range_start = 40000
@@ -49,13 +50,13 @@ bind_address = "127.0.0.1:3000"
 # commented out. Uncomment only if nginx must reach gl-serv somewhere else.
 #   api_address = "127.0.0.1:3000"
 
-# How often to sweep expired and Failed instances (seconds; 3600 = 1h).
+# How often to sweep expired and Failed instances (seconds; 900 = 15 min).
 #
-# Matches the shipped default since #117, which also made the first sweep run
-# at startup instead of one full interval later. Stated explicitly anyway: the
-# interval is the worst-case delay on reclaiming a wedged slot, so it is worth
-# being deliberate about on the box that runs at a cap of 10.
-sweep_interval_secs = 3600
+# Shorter than the shipped 3600 default to suit the 8-hour lifetime (#110),
+# the same as production. The interval is the worst-case delay on reclaiming a
+# wedged slot, and an hour of it would be up to 12% of an instance's life.
+# Since #117 the first sweep also runs at startup.
+sweep_interval_secs = 900
 
 # How many days of instance events to keep (#118).
 #

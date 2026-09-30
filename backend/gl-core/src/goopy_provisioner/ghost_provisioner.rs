@@ -341,7 +341,7 @@ impl GhostProvisioner {
             // The cost is therefore one error line per instance per day, in the
             // instance's own content/logs — no outbound request, no effect on
             // boot, nothing the visitor sees. The job is scheduled at a random
-            // time in a 24h window and instances live about a day, so most
+            // time in a 24h window and instances live 8 hours (#110), so most
             // never reach it at all. That is the better end of the trade: the
             // alternative is leaving the default and letting every sandbox make
             // a daily call to a third party.
@@ -552,7 +552,7 @@ mod tests {
     fn test_goopy(working_dir: &Path, port: u32) -> Goopy {
         Goopy {
             slug: "tasty-lucky-clover".to_string(),
-            life_in_days: 7,
+            life_in_hours: 168,
             created_at: chrono::Utc::now(),
             working_dir: working_dir.to_path_buf(),
             port,
@@ -873,7 +873,7 @@ mod tests {
         );
     }
 
-    /// Every instance is handed to a stranger for a day, so none of these may
+    /// Every instance is handed to a stranger for hours, so none of these may
     /// regress independently of the others. Reading them off one rendered
     /// config is what makes "this sandbox is not reported to anyone" checkable
     /// in one place rather than spread across four tests.

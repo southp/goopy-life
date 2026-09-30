@@ -25,7 +25,8 @@ use crate::usage_stats::{DailyUsage, UsageCounter, UsageCounts, UsageStats};
 ///
 /// Version 2 adds `instance_events` (#118).  Version 3 adds
 /// `goopies.build_sha` (#119).  Version 4 adds the usage counters,
-/// `usage_daily` and `usage_totals` (#172).  A fresh database is fully
+/// `usage_daily` and `usage_totals` (#172).  Version 5 measures an instance's
+/// lifetime in hours rather than days (#110).  A fresh database is fully
 /// initialised by walking every step in order, so new steps append here rather
 /// than editing an existing one — an already-migrated database never re-runs a
 /// step it has passed.
@@ -134,6 +135,22 @@ const MIGRATIONS: &[(u32, &str)] = &[
     );
 
     INSERT OR IGNORE INTO usage_totals (id, provisioned, failed) VALUES (1, 0, 0);
+    ",
+    ),
+    (
+        5,
+        // The lifetime unit becomes hours (#110), so a lifetime can be shorter
+        // than a day.
+        //
+        // The rename and the ×24 are one step so they commit together: every
+        // instance already running keeps exactly the expiry it had, and no
+        // database is ever left with the new name over values still in days.
+        // Not idempotent — `RENAME COLUMN` fails once the column is gone, and
+        // a second `UPDATE` would convert twice — which the `user_version`
+        // guard in [`migrate`] makes safe.
+        "
+    ALTER TABLE goopies RENAME COLUMN life_in_days TO life_in_hours;
+    UPDATE goopies SET life_in_hours = life_in_hours * 24;
     ",
     ),
 ];
@@ -342,7 +359,7 @@ impl SqliteRegistry {
 #[allow(clippy::too_many_arguments)]
 fn parse_row(
     slug: String,
-    life_in_days: i64,
+    life_in_hours: i64,
     created_at_str: String,
     status_str: String,
     working_dir_str: String,
@@ -391,7 +408,7 @@ fn parse_row(
 
     Ok(Goopy {
         slug,
-        life_in_days: life_in_days as i32,
+        life_in_hours: life_in_hours as i32,
         created_at,
         status,
         working_dir: PathBuf::from(working_dir_str),
@@ -660,12 +677,12 @@ fn parse_event_row(
 fn insert_goopy(conn: &Connection, gp: &Goopy) -> Result<(), Error> {
     let result = conn.execute(
         "INSERT OR FAIL INTO goopies
-         (slug, life_in_days, created_at, status, working_dir, port,
+         (slug, life_in_hours, created_at, status, working_dir, port,
           provisioner_kind, service_version, build_sha)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             gp.slug,
-            gp.life_in_days as i64,
+            i64::from(gp.life_in_hours),
             gp.created_at.to_rfc3339(),
             gp.status.to_string(),
             gp.working_dir.to_string_lossy().as_ref(),
@@ -719,14 +736,14 @@ impl GoopyRegistry for SqliteRegistry {
         })?;
 
         let result = conn.query_row(
-            "SELECT slug, life_in_days, created_at, status, working_dir,
+            "SELECT slug, life_in_hours, created_at, status, working_dir,
                     port, provisioner_kind, service_version, build_sha
              FROM goopies WHERE slug = ?1",
             params![slug],
             |row| {
                 Ok((
                     row.get::<_, String>("slug")?,
-                    row.get::<_, i64>("life_in_days")?,
+                    row.get::<_, i64>("life_in_hours")?,
                     row.get::<_, String>("created_at")?,
                     row.get::<_, String>("status")?,
                     row.get::<_, String>("working_dir")?,
@@ -746,7 +763,7 @@ impl GoopyRegistry for SqliteRegistry {
             }),
             Ok((
                 slug,
-                life_in_days,
+                life_in_hours,
                 created_at_str,
                 status_str,
                 working_dir_str,
@@ -757,7 +774,7 @@ impl GoopyRegistry for SqliteRegistry {
             )) => {
                 let gp = parse_row(
                     slug,
-                    life_in_days,
+                    life_in_hours,
                     created_at_str,
                     status_str,
                     working_dir_str,
@@ -809,7 +826,7 @@ impl GoopyRegistry for SqliteRegistry {
 
         let mut stmt = conn
             .prepare(
-                "SELECT slug, life_in_days, created_at, status, working_dir,
+                "SELECT slug, life_in_hours, created_at, status, working_dir,
                         port, provisioner_kind, service_version, build_sha
                  FROM goopies ORDER BY created_at",
             )
@@ -822,7 +839,7 @@ impl GoopyRegistry for SqliteRegistry {
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>("slug")?,
-                    row.get::<_, i64>("life_in_days")?,
+                    row.get::<_, i64>("life_in_hours")?,
                     row.get::<_, String>("created_at")?,
                     row.get::<_, String>("status")?,
                     row.get::<_, String>("working_dir")?,
@@ -839,7 +856,7 @@ impl GoopyRegistry for SqliteRegistry {
             .map(|r| {
                 let (
                     slug,
-                    life_in_days,
+                    life_in_hours,
                     created_at_str,
                     status_str,
                     working_dir_str,
@@ -853,7 +870,7 @@ impl GoopyRegistry for SqliteRegistry {
                 })?;
                 parse_row(
                     slug,
-                    life_in_days,
+                    life_in_hours,
                     created_at_str,
                     status_str,
                     working_dir_str,
@@ -1261,7 +1278,7 @@ mod tests {
     fn make_goopy(slug: &str) -> Goopy {
         Goopy {
             slug: slug.to_string(),
-            life_in_days: 7,
+            life_in_hours: 168,
             created_at: chrono::Utc::now(),
             working_dir: PathBuf::from(format!("/tmp/{slug}")),
             port: 8080,
@@ -1283,7 +1300,7 @@ mod tests {
         r.save(&gp).unwrap();
         let loaded = r.load("test-slug").unwrap().unwrap();
         assert_eq!(loaded.slug, gp.slug);
-        assert_eq!(loaded.life_in_days, gp.life_in_days);
+        assert_eq!(loaded.life_in_hours, gp.life_in_hours);
         assert_eq!(loaded.status, gp.status);
         assert_eq!(loaded.port, gp.port);
         assert_eq!(loaded.working_dir, gp.working_dir);
@@ -1564,8 +1581,8 @@ mod tests {
         {
             let conn = r.pool.get().unwrap();
             conn.execute(
-                "INSERT INTO goopies (slug, life_in_days, created_at, status, working_dir, port, provisioner_kind, service_version) \
-                 VALUES ('bad-ts', 7, 'not-a-date', 'Spawning', '/tmp', 8080, 'Hello', '0.1.0')",
+                "INSERT INTO goopies (slug, life_in_hours, created_at, status, working_dir, port, provisioner_kind, service_version) \
+                 VALUES ('bad-ts', 168, 'not-a-date', 'Spawning', '/tmp', 8080, 'Hello', '0.1.0')",
                 [],
             )
             .unwrap();
@@ -1583,8 +1600,8 @@ mod tests {
         {
             let conn = r.pool.get().unwrap();
             conn.execute(
-                "INSERT INTO goopies (slug, life_in_days, created_at, status, working_dir, port, provisioner_kind, service_version) \
-                 VALUES ('bad-status', 7, '2024-01-01T00:00:00Z', 'Bogus', '/tmp', 8080, 'Hello', '0.1.0')",
+                "INSERT INTO goopies (slug, life_in_hours, created_at, status, working_dir, port, provisioner_kind, service_version) \
+                 VALUES ('bad-status', 168, '2024-01-01T00:00:00Z', 'Bogus', '/tmp', 8080, 'Hello', '0.1.0')",
                 [],
             )
             .unwrap();
@@ -1602,8 +1619,8 @@ mod tests {
         {
             let conn = r.pool.get().unwrap();
             conn.execute(
-                "INSERT INTO goopies (slug, life_in_days, created_at, status, working_dir, port, provisioner_kind, service_version) \
-                 VALUES ('bad-pk', 7, '2024-01-01T00:00:00Z', 'Spawning', '/tmp', 8080, 'Unknown', '0.1.0')",
+                "INSERT INTO goopies (slug, life_in_hours, created_at, status, working_dir, port, provisioner_kind, service_version) \
+                 VALUES ('bad-pk', 168, '2024-01-01T00:00:00Z', 'Spawning', '/tmp', 8080, 'Unknown', '0.1.0')",
                 [],
             )
             .unwrap();
@@ -2071,10 +2088,7 @@ mod tests {
 
         {
             let conn = rusqlite::Connection::open(&db_path).unwrap();
-            for (_, sql) in &MIGRATIONS[..3] {
-                conn.execute_batch(sql).unwrap();
-            }
-            conn.execute_batch("PRAGMA user_version = 3;").unwrap();
+            seed_at_version(&conn, MIGRATIONS, 3);
             assert!(!table_exists(&conn, "usage_daily"));
         }
 
@@ -2096,6 +2110,48 @@ mod tests {
             r.usage_stats(utc_today()).unwrap().all_time,
             UsageCounts::new(1, 0)
         );
+    }
+
+    /// Build a file database the way the build before #110 left it: every step
+    /// up to 4 applied and stamped, `goopies` still in days, holding one row per
+    /// `(slug, life_in_days)`.
+    fn seed_v4_db(db_path: &Path, rows: &[(&str, i64)]) {
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        seed_at_version(&conn, MIGRATIONS, 4);
+        for (slug, days) in rows {
+            conn.execute(
+                "INSERT INTO goopies (slug, life_in_days, created_at, status, working_dir, port, provisioner_kind, service_version) \
+                 VALUES (?1, ?2, '2026-09-29T10:00:00Z', 'Done', '/tmp/v4', 8080, 'Hello', '0.1.0')",
+                params![slug, days],
+            )
+            .unwrap();
+        }
+    }
+
+    /// Instances running when step 5 lands must expire exactly when they
+    /// would have: the column changes unit, and every value with it.
+    #[test]
+    fn migration_converts_the_lifetime_to_hours_keeping_every_expiry() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("v4.db");
+        seed_v4_db(&db_path, &[("one-day", 1), ("one-week", 7)]);
+
+        let r = SqliteRegistry::new(&db_path).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        assert_eq!(user_version(&conn), LATEST_VERSION);
+        assert!(column_exists(&conn, "goopies", "life_in_hours"));
+        assert!(!column_exists(&conn, "goopies", "life_in_days"));
+
+        for (slug, days, hours) in [("one-day", 1, 24), ("one-week", 7, 168)] {
+            let gp = r.load(slug).unwrap().expect("the row survives migration");
+            assert_eq!(gp.life_in_hours, hours, "{slug}");
+            assert_eq!(
+                gp.expires_at(),
+                gp.created_at + chrono::Duration::days(days),
+                "{slug} must keep the expiry it had"
+            );
+        }
     }
 
     #[test]
@@ -2400,10 +2456,11 @@ mod tests {
         n > 0
     }
 
-    /// Apply the SQL of every step up to and including `through`, then stamp
-    /// `user_version`, to simulate a DB left behind by an older build.
-    fn seed_at_version(conn: &Connection, through: u32) {
-        for &(target, sql) in TEST_MIGRATIONS {
+    /// Apply the SQL of every step in `migrations` up to and including
+    /// `through`, then stamp `user_version`, to simulate a DB left behind by an
+    /// older build.
+    fn seed_at_version(conn: &Connection, migrations: &[(u32, &str)], through: u32) {
+        for &(target, sql) in migrations {
             if target > through {
                 break;
             }
@@ -2444,7 +2501,7 @@ mod tests {
     #[test]
     fn migrate_from_v1_applies_only_remaining_steps() {
         for_each_backing(|conn| {
-            seed_at_version(conn, 1);
+            seed_at_version(conn, TEST_MIGRATIONS, 1);
 
             migrate(conn, TEST_MIGRATIONS).unwrap();
 
@@ -2457,7 +2514,7 @@ mod tests {
     #[test]
     fn migrate_from_v2_applies_only_remaining_steps() {
         for_each_backing(|conn| {
-            seed_at_version(conn, 2);
+            seed_at_version(conn, TEST_MIGRATIONS, 2);
 
             // Step 1 and 2 are non-idempotent DDL, so this only succeeds if
             // both are skipped.
@@ -2471,7 +2528,7 @@ mod tests {
     #[test]
     fn migrate_on_up_to_date_db_is_a_noop() {
         for_each_backing(|conn| {
-            seed_at_version(conn, 3);
+            seed_at_version(conn, TEST_MIGRATIONS, 3);
 
             // Every step is non-idempotent, so re-running any of them would
             // surface as an error here.
@@ -2584,7 +2641,7 @@ mod tests {
     #[test]
     fn migrate_skips_a_step_applied_by_another_process() {
         for_each_backing(|conn| {
-            seed_at_version(conn, 1);
+            seed_at_version(conn, TEST_MIGRATIONS, 1);
 
             // Simulate the other process having finished step 2.  Its DDL is
             // applied here too, so re-running step 2 would fail with

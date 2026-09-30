@@ -13,7 +13,7 @@ use std::sync::Arc;
 pub struct GoopyManagerConfig {
     pub base_dir: PathBuf,
     pub domain: String,
-    pub life_in_days: i32,
+    pub life_in_hours: i32,
     pub port_range_start: u32,
     pub port_range_end: u32,
     /// RAM-bound cap on resident (Spawning + Done) instances. See [`Config::max_active`].
@@ -90,7 +90,7 @@ pub struct GoopyManager<
 > {
     pub base_dir: PathBuf,
     pub domain: String,
-    pub goopy_life_in_days: i32,
+    pub goopy_life_in_hours: i32,
     pub port_range_start: u32,
     pub port_range_end: u32,
     pub max_active: u32,
@@ -111,7 +111,7 @@ where
         Self {
             base_dir: config.base_dir,
             domain: config.domain,
-            goopy_life_in_days: config.life_in_days,
+            goopy_life_in_hours: config.life_in_hours,
             port_range_start: config.port_range_start,
             port_range_end: config.port_range_end,
             max_active: config.max_active,
@@ -125,7 +125,7 @@ where
 
     #[tracing::instrument(skip(self))]
     pub fn spawn(&self) -> Result<(String, u32), Error> {
-        if self.goopy_life_in_days <= 0 {
+        if self.goopy_life_in_hours <= 0 {
             return Err(Error::Invalid);
         }
 
@@ -146,7 +146,7 @@ where
 
             let candidate = Goopy {
                 slug: slug.clone(),
-                life_in_days: self.goopy_life_in_days,
+                life_in_hours: self.goopy_life_in_hours,
                 created_at: Utc::now(),
                 working_dir: self.base_dir.join(&slug),
                 port,
@@ -560,7 +560,7 @@ where
 
     /// Despawn all expired goopy instances and reap all `Failed` instances.
     ///
-    /// **Expired instances** are those where `now > created_at + life_in_days`.
+    /// **Expired instances** are those where `now > created_at + life_in_hours`.
     /// **Failed instances** are reaped regardless of age — a `Failed` status
     /// means provisioning failed and it is safe to delete.  `Suspended`
     /// instances are intentionally left alone; they hold valid data on disk and
@@ -616,7 +616,7 @@ where
                 );
                 true
             } else {
-                let expires_at = gp.created_at + Duration::days(gp.life_in_days as i64);
+                let expires_at = gp.expires_at();
                 if now > expires_at {
                     tracing::info!(
                         slug = %gp.slug,
@@ -776,7 +776,7 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: PathBuf::from("/tmp"),
                 domain: "test.example".into(),
-                life_in_days: 7,
+                life_in_hours: 168,
                 port_range_start: 9000,
                 port_range_end: 9100,
                 max_active: 100,
@@ -789,11 +789,11 @@ mod tests {
         )
     }
 
-    fn make_goopy(slug: &str, days_ago: i64, port: u32, status: Status) -> Goopy {
+    fn make_goopy(slug: &str, hours_ago: i64, port: u32, status: Status) -> Goopy {
         Goopy {
             slug: slug.to_string(),
-            life_in_days: 7,
-            created_at: Utc::now() - Duration::days(days_ago),
+            life_in_hours: 8,
+            created_at: Utc::now() - Duration::hours(hours_ago),
             working_dir: PathBuf::from(format!("/tmp/{slug}")),
             port,
             status,
@@ -804,13 +804,13 @@ mod tests {
     }
 
     #[test]
-    fn spawn_rejects_non_positive_life_in_days() {
+    fn spawn_rejects_non_positive_life_in_hours() {
         for bad in [0i32, -1, i32::MIN] {
             let gm = GoopyManager::new(
                 GoopyManagerConfig {
                     base_dir: PathBuf::from("/tmp"),
                     domain: "test.example".into(),
-                    life_in_days: bad,
+                    life_in_hours: bad,
                     port_range_start: 9000,
                     port_range_end: 9100,
                     max_active: 100,
@@ -824,7 +824,7 @@ mod tests {
             let err = gm.spawn().unwrap_err();
             assert!(
                 matches!(err, Error::Invalid),
-                "expected Invalid for life_in_days={bad}"
+                "expected Invalid for life_in_hours={bad}"
             );
         }
     }
@@ -836,7 +836,7 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: PathBuf::from("/tmp/test-goopy"),
                 domain: "test.example".into(),
-                life_in_days: 7,
+                life_in_hours: 168,
                 port_range_start: 8080,
                 port_range_end: 9080,
                 max_active: 100,
@@ -869,7 +869,7 @@ mod tests {
     fn sweep_removes_expired_instances() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
 
-        // Insert an expired goopy: created 10 days ago, lives 7 days
+        // Insert an expired goopy: created 10 hours ago, lives 8 hours
         let expired = make_goopy("expired-slug", 10, 9000, Status::Done);
         registry.save(&expired).unwrap();
         registry.acquire_port("expired-slug", 9000, 9001).unwrap();
@@ -896,6 +896,44 @@ mod tests {
         assert!(gm.get("expired-slug").unwrap().is_none());
         // Alive should remain
         assert!(gm.get("alive-slug").unwrap().is_some());
+    }
+
+    /// The lifetime is counted in hours: three hours old with a two-hour life
+    /// is expired, one hour old is not. Read as days, neither would be.
+    #[test]
+    fn sweep_counts_the_lifetime_in_hours() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        for (slug, hours_ago, port) in [("past-it", 3, 9000), ("still-going", 1, 9001)] {
+            let gp = Goopy {
+                life_in_hours: 2,
+                created_at: Utc::now() - Duration::hours(hours_ago),
+                ..make_goopy(slug, 0, port, Status::Done)
+            };
+            registry.save(&gp).unwrap();
+            registry.acquire_port(slug, port, port + 1).unwrap();
+        }
+
+        let gm = make_test_manager(registry);
+
+        let (swept, errors) = gm.sweep().unwrap();
+        assert_eq!(swept, 1);
+        assert!(errors.is_empty());
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while gm.get("past-it").unwrap().is_some() {
+            assert!(std::time::Instant::now() < deadline, "despawn timed out");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(gm.get("still-going").unwrap().is_some());
+    }
+
+    #[test]
+    fn expires_at_adds_the_lifetime_in_hours_to_created_at() {
+        let gp = Goopy {
+            life_in_hours: 8,
+            ..make_goopy("eight-hours", 0, 9000, Status::Done)
+        };
+        assert_eq!(gp.expires_at() - gp.created_at, Duration::hours(8));
     }
 
     #[test]
@@ -1014,7 +1052,7 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: PathBuf::from("/tmp"),
                 domain: "test.example".into(),
-                life_in_days: 7,
+                life_in_hours: 168,
                 port_range_start: 9000,
                 port_range_end: 9100,
                 max_active: 100,
@@ -1178,7 +1216,7 @@ mod tests {
         // Seed a Failed instance directly, bypassing the spawn flow.
         let failed = Goopy {
             slug: "failed-slug".to_string(),
-            life_in_days: 7,
+            life_in_hours: 168,
             created_at: Utc::now(),
             working_dir: working_dir.clone(),
             port: 9050,
@@ -1195,7 +1233,7 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: base_dir.path().to_path_buf(),
                 domain: "test.example".into(),
-                life_in_days: 7,
+                life_in_hours: 168,
                 port_range_start: 9050,
                 port_range_end: 9051,
                 max_active: 100,
@@ -1261,7 +1299,7 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: PathBuf::from("/tmp"),
                 domain: "test.example".into(),
-                life_in_days: 7,
+                life_in_hours: 168,
                 port_range_start: 9060,
                 port_range_end: 9062,
                 max_active: 100,
@@ -1360,7 +1398,7 @@ mod tests {
             GoopyManagerConfig {
                 base_dir: PathBuf::from("/tmp"),
                 domain: "test.example".into(),
-                life_in_days: 7,
+                life_in_hours: 168,
                 port_range_start: 9000,
                 port_range_end: 9100,
                 max_active,
