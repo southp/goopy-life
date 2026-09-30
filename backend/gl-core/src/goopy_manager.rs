@@ -399,18 +399,6 @@ where
         }
     }
 
-    /// Mark `event.slug` `Failed` and record why, keeping the why even when
-    /// the status write is what fails.
-    ///
-    /// `fail_with_event` commits both or neither, so if the status flip errors
-    /// — `SQLITE_BUSY` past the busy timeout while gl-cli holds the write lock,
-    /// say — the reason is rolled back with it and survives only in a journal
-    /// nobody can read (#116). The event is retried on its own: a lock that
-    /// timed out may have cleared, and a reason next to a stale status beats a
-    /// stale status with no reason.
-    ///
-    /// Not on `NotFound`: that means the row is gone, and the registry already
-    /// refuses to record a failure against an instance that no longer exists.
     /// Mark a provisioned instance `Done`, counting it.
     ///
     /// `Done` and the provision count commit together (#172), so the count is
@@ -431,6 +419,18 @@ where
         }
     }
 
+    /// Mark `event.slug` `Failed` and record why, keeping the why even when
+    /// the status write is what fails.
+    ///
+    /// `fail_with_event` commits both or neither, so if the status flip errors
+    /// — `SQLITE_BUSY` past the busy timeout while gl-cli holds the write lock,
+    /// say — the reason is rolled back with it and survives only in a journal
+    /// nobody can read (#116). The event is retried on its own: a lock that
+    /// timed out may have cleared, and a reason next to a stale status beats a
+    /// stale status with no reason.
+    ///
+    /// Not on `NotFound`: that means the row is gone, and the registry already
+    /// refuses to record a failure against an instance that no longer exists.
     fn record_failure(registry: &Registry, event: &InstanceEvent) {
         let Err(e) = registry.fail_with_event(&event.slug, event) else {
             return;
