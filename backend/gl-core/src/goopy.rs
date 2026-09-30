@@ -28,6 +28,6 @@ pub struct Goopy {
 impl Goopy {
     /// When this instance expires: `created_at` plus `life_in_hours`.
     pub fn expires_at(&self) -> DateTime<Utc> {
-        self.created_at + Duration::hours(self.life_in_hours as i64)
+        self.created_at + Duration::hours(i64::from(self.life_in_hours))
     }
 }

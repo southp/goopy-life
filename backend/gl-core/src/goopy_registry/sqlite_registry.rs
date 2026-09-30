@@ -682,7 +682,7 @@ fn insert_goopy(conn: &Connection, gp: &Goopy) -> Result<(), Error> {
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             gp.slug,
-            gp.life_in_hours as i64,
+            i64::from(gp.life_in_hours),
             gp.created_at.to_rfc3339(),
             gp.status.to_string(),
             gp.working_dir.to_string_lossy().as_ref(),
