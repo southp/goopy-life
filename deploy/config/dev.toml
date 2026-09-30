@@ -96,6 +96,14 @@ event_retention_days = 30
 max_active = 20
 max_provisioned = 20
 
+# How many days of daily usage rows `GET /stats` keeps (#172). Only the per-day
+# breakdown is windowed; the all-time total is never pruned. The sweep drops
+# older days on every run. Must be >= 7, the span of the weekly figure.
+#
+# 120 rather than the shipped 90: a judgment call, not a measurement. At one
+# small row per day, the extra month costs nothing.
+stats_retention_days = 120
+
 [registry]
 # Registry database path.
 path = "/opt/goopy-life/goopy.db"
