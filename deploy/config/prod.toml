@@ -1,13 +1,5 @@
 # Deployed configuration — production.
 #
-# ┌───────────────────────────────────────────────────────────────────────────┐
-# │ PLACEHOLDER. This is a verbatim copy of the dev droplet's configuration,   │
-# │ taken so the file exists and parses. There is no production host yet, and  │
-# │ the lines marked `REVIEW` below still name dev-only values.                │
-# │                                                                            │
-# │ Work through every REVIEW marker before the first production deploy.       │
-# └───────────────────────────────────────────────────────────────────────────┘
-#
 # This file IS what the production host runs: deploy/push-binary.sh installs it
 # at /opt/goopy-life/config.toml. Edit it here, not there.
 #
@@ -18,10 +10,12 @@
 # Base directory for goopy working directories.
 base_dir = "/opt/goopy-life/data"
 
-# REVIEW: production serves goopy.life. deploy/config/prod.api.nginx names this
-# domain too, and CI fails a PR that changes only one of the two.
-# Public domain — instances are served at {slug}.{domain}.
-domain = "southp.dev"
+# Public domain — instances are served at {slug}.{domain}, the api at
+# api.{domain}, and expired instances redirect to https://{domain}/expired.
+# deploy/config/prod.api.nginx names this domain too (server_name and the
+# certificate under /etc/letsencrypt/live/goopy.life/), and CI fails a PR that
+# changes only one of the two.
+domain = "goopy.life"
 
 # How long each goopy lives (hours).
 #
@@ -39,9 +33,10 @@ port_range_end = 49999
 # processes. Never true here.
 dev_mode = false
 
-# REVIEW: must match the production frontend origin, not the dev one.
-# Allowed CORS origin: the Vercel frontend.
-cors_origin = "https://southp.dev"
+# Allowed CORS origin: the Vercel frontend, which lives at https://{domain}.
+# gl-core already assumes that address in every instance's expiry redirect
+# (`return 302 https://{domain}/expired;`).
+cors_origin = "https://goopy.life"
 
 # Address and port gl-serv listens on. Loopback on purpose (#149): nginx is the
 # only thing that should reach gl-serv, and a caller arriving any other way
@@ -72,29 +67,24 @@ bind_address = "127.0.0.1:3000"
 # server's 503 sends. A sweep with nothing to reap is cheap.
 sweep_interval_secs = 900
 
-# REVIEW: 30 days is the shipped default, chosen for a dev droplet where the
-# only reader is whoever is debugging that week. Production may want longer —
-# a public beta's failure rate is a trend worth seeing over a quarter, and the
-# window is also the answer to "how far back can we explain an outage". Size it
-# against real volume and disk before the first production deploy rather than
-# inheriting dev's number.
+# 30, the shipped default, is enough here: long-term counts live in #172's
+# /stats, so this log only has to hold recent failure detail.
 #
 # How many days of instance events to keep (#118). The event log records why a
 # spawn or teardown failed and when the row was reaped, and outlives the
 # instance. It is append-only; the sweep drops anything past this window.
 event_retention_days = 30
 
-# REVIEW: production runs the same droplet spec and system configuration as dev
-# (1 vCPU / 2 GB RAM / 4 GB swap with zswap enabled), so these mirror dev's
-# values. Before the first production deploy, VERIFY that is actually true —
-# this is a checkpoint, not an open decision:
+# Instance caps. PRECONDITION: these values are only valid on a host with dev's
+# spec and system configuration — 1 vCPU / 2 GB RAM, 4 GB of swap, and zswap
+# enabled (#147's host checklist, section 3). Check it on the host:
 #
 #   ssh <prod> 'free -m; cat /proc/swaps; cat /sys/module/zswap/parameters/enabled'
 #
 # Expect ~4095 MB of total swap and zswap `Y`. On the stock 1 GB swap the
-# serving ceiling is ~10, so an unverified box would accept 20 instances and
-# fail the last ten. Swap is host state no deploy installs (#167), and nothing
-# else here will catch its absence.
+# serving ceiling is ~10, and nothing errors: the box accepts all 20 instances
+# and then stops serving every one of them. Swap is host state no deploy
+# installs (#167), and nothing else here will catch its absence.
 #
 # The cap is sized from the *serving* ceiling, never the spawn ceiling. They
 # are not the same and the gap is large. From the #113 load experiment measured
@@ -137,14 +127,17 @@ path = "/opt/goopy-life/goopy.db"
 [allocator]
 # "PlainDir" (plain filesystem) or "Zfs" (ZFS datasets).
 kind = "Zfs"
-# REVIEW: the production pool name and a quota sized for real Ghost installs.
+# The pool name matches dev's: the operator creates production's pool as
+# `zpool_ghost` (#147's host checklist), and it must be at least 4 GB — see the
+# binding rule below.
 #
-# Mirrors dev. #113 measured real usage at ~120 KB per instance (ZFS
-# compression running at 3.36x), so this bounds abuse rather than sizing normal
-# use. The binding rule is max_provisioned * quota_mb <= pool size: an
-# overcommitted pool fills and breaks *every* instance at once, which fails
-# worse than one greedy instance hitting its own quota. 20 * 200 MB = 4 GB
-# against dev's 4.5 GB pool, so production's pool must be at least that.
+# The quota was settled by #173 and mirrors dev. #113 measured real usage at
+# ~120 KB per instance (ZFS compression running at 3.36x), so this bounds abuse
+# rather than sizing normal use. The binding rule is max_provisioned * quota_mb
+# <= pool size: an overcommitted pool fills and breaks *every* instance at once,
+# which fails worse than one greedy instance hitting its own quota.
+# 20 * 200 MB = 4 GB against dev's 4.5 GB pool, so production's pool must be at
+# least that.
 #
 # NOTE: production is public and accountless, where dev is not. This lets any
 # anonymous visitor store up to 200 MB for the instance's lifetime. 32 MB was
@@ -156,17 +149,33 @@ pool = "zpool_ghost"
 quota_mb = 200
 
 [provisioner]
-# REVIEW: production should serve real Ghost instances once #18 lands.
-# "Hello" (no-op dev provisioner) or "Ghost" (real Ghost install, #18).
-kind = "Hello"
+# "Ghost" (real Ghost instances) or "Hello" (PoC page, dev/testing).
+kind = "Ghost"
+# The prepared base install every instance soft-links against — the same path
+# as dev, prepared by hand on the host (#147's host checklist). Version-stamped
+# on purpose: the provisioner records this path as written, so a stable symlink
+# that later moved would drag every running instance onto a different Ghost on
+# its next restart. Upgrading means preparing a new directory and editing these
+# two keys together — see docs/GHOST_PROVISIONER.md.
+source_dir = "/opt/goopy-life/ghost-6.63.0"
+# Stamped onto every instance as service_version. Must name what source_dir
+# actually holds; nothing cross-checks them at startup.
+version = "6.63.0"
+# Absolute path — systemd does not search PATH for ExecStart. Ghost 6.63.0
+# requires Node ^22.23.1 || ^24.20.0; the host checklist installs 22.23.2.
+node_bin = "/usr/bin/node"
+# Unprivileged user each instance's systemd unit runs as.
+service_user = "goopy"
 
-# Readiness wait — Ghost only, so commented out while kind = "Hello" (#151).
-# A spawn stays Spawning until the instance answers `GET /` with a 200, because
-# Ghost binds its port immediately and then serves its own maintenance page for
-# the whole of first boot. An instance that never answers ends Failed, with its
-# port released and its working dir reapable by the sweep. The timeout is a real
-# ceiling: no single probe is given more time than the wait has left.
-# REVIEW: size the timeout against production's boot times, which will be slower
-# than a dev droplet's if the host runs several instances at once.
-#   ready_timeout_secs = 120   # default
-#   ready_poll_ms      = 500   # default
+# Readiness wait (#151). A spawn stays Spawning until the instance answers
+# `GET /` with a 200, because Ghost binds its port immediately and then serves
+# its own maintenance page for the whole of first boot. An instance that never
+# answers ends Failed, with its port released and its working dir reapable by
+# the sweep. The timeout is a real ceiling: no single probe is given more time
+# than the wait has left.
+#
+# 120 s, dev's value, is ~10x the ~12 s first boot #113 measured (7.6 s of it
+# Ghost's DB migration). That leaves room for several instances booting at
+# once, and a boot that never comes up holds a slot for 2 minutes at most.
+ready_timeout_secs = 120
+ready_poll_ms = 500

@@ -109,6 +109,31 @@ fn no_deployed_config_binds_a_wildcard() {
     }
 }
 
+/// The frontend lives at `https://{domain}`, and gl-core already assumes so:
+/// every instance's expiry redirect is `https://{domain}/expired`
+/// (`goopy_provisioner/nginx.rs`). `cors_origin` has to name that same
+/// address, or the browser refuses every API response the frontend asks for.
+/// #147 moved production's `domain` to goopy.life and left `cors_origin` on
+/// dev's southp.dev, and nothing noticed — so the two are pinned together here,
+/// like the api site's `server_name` below.
+///
+/// Deployed configs only. A local run serves the frontend from
+/// `http://localhost:3000` with `domain = "localhost"`, which is correct there.
+#[test]
+fn every_deployed_config_allows_its_domains_origin() {
+    for path in deployed_configs() {
+        let cfg = Config::from_file(&path).expect("deployed configs parse");
+        let origin = format!("https://{}", cfg.domain);
+        assert_eq!(
+            cfg.cors_origin,
+            origin,
+            "{}: cors_origin is not {origin}, the frontend its domain {} implies",
+            path.display(),
+            cfg.domain
+        );
+    }
+}
+
 #[test]
 fn the_local_config_enables_dev_mode() {
     let cfg = Config::from_file(&local_config()).expect("the local config parses");

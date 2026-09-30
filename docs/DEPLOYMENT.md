@@ -367,6 +367,88 @@ Outside a git checkout it refuses to deploy at all rather than stamping
 and pass without having verified anything. `push-binary.sh` rejects
 `GL_GIT_SHA=unknown` for the same reason, whoever calls it.
 
+## Production
+
+Production is one droplet serving `goopy.life`: the api at `api.goopy.life`,
+instances at `{slug}.goopy.life`. Nothing deploys it automatically. Its files
+are `deploy/config/prod.*`.
+
+### First deploy
+
+Run in this order. Steps 1–3 run from your machine, at the repo root.
+
+| # | Command | Run as | What it does |
+|---|---|---|---|
+| 0 | the [#147 host checklist](https://github.com/southp/goopy-life/issues/147#issuecomment-5885857718) | admin | host state nothing below creates (see [What lives on the host](#what-lives-on-the-host)) |
+| 1 | `./deploy/admin-apply.sh <admin@host> prod` | admin, password sudo | installs `/etc/sudoers.d/goopy` and `goopy-cache.conf` |
+| 2 | `./deploy/deploy.sh goopy@<host> prod` | `goopy` | builds, ships, restarts, checks `/version` |
+| 3 | `./deploy/check-host.sh goopy@<host> prod` | either | read-only; expect `matches prod` |
+
+- **Step 1 comes before step 2, always.** The deploy compares the host's sudoers
+  drop-in with `deploy/sudoers.goopy` and stops, before changing anything, until
+  they match. A deploy never installs that file itself.
+- **Step 2 as `goopy`, never as the admin account.** The sudoers rules name
+  `goopy` only.
+- **Step 2 checks itself.** It fails unless `GET /version` on the host reports
+  the commit it just built (see [Verifying a deploy](#verifying-a-deploy)).
+
+Then check the public side by hand:
+
+```bash
+curl -sS https://api.goopy.life/version    # sha_full = the commit you deployed
+curl -sS https://api.goopy.life/capacity   # total = 20
+```
+
+### Later deploys
+
+- `check-host.sh` first shows what the deploy is about to replace.
+- If `deploy/sudoers.goopy` or `deploy/nginx/goopy-cache.conf` changed since the
+  last deploy, re-run `admin-apply.sh` first. Otherwise the sudoers comparison
+  stops the deploy.
+- Deploy from a clean checkout. A dirty tree deploys as `<sha>-dirty`, which
+  `/version` then reports.
+
+### Rollback
+
+Re-run the deploy from the previous commit:
+
+```bash
+git worktree add .worktrees/rollback <previous-commit>
+.worktrees/rollback/deploy/deploy.sh goopy@<host> prod
+curl -sS https://api.goopy.life/version   # sha_full = <previous-commit>
+```
+
+- **Binary and config roll back together.** `deploy.sh` ships that commit's
+  `prod.toml` and host artifacts beside its binaries.
+- **`/version` confirms it.** The deploy fails unless the host reports the commit
+  it built, so a rollback that did not take is a red run, not a silent one.
+- **A registry migration blocks rollback.** An older gl-serv refuses a database
+  a newer one has migrated (`SchemaVersionTooNew`). `--check-config` does not
+  open the registry, so that deploy passes the gate, restarts into a crash loop,
+  and fails at `is-active` with the API down. Check whether `MIGRATIONS` in
+  `backend/gl-core/src/goopy_registry/sqlite_registry.rs` grew between the two
+  commits. If it did, roll forward with a fix instead.
+- **A sudoers change blocks rollback too.** If `deploy/sudoers.goopy` differs
+  between the two commits, the deploy stops at the drift check. Run
+  `admin-apply.sh` from the rollback checkout first.
+
+### What lives on the host
+
+The deploy ships binaries, config and the [host artifacts](#host-artifacts).
+`admin-apply.sh` ships the root-owned pair. **Everything else is set up once by
+hand**, following the
+[#147 host checklist](https://github.com/southp/goopy-life/issues/147#issuecomment-5885857718).
+`check-host.sh` compares files only, so it cannot tell if any of this is missing:
+
+| Host state | Why it matters |
+|---|---|
+| Swap (4 GB) + zswap | the caps of 20 assume it. Without it the box serves ~10, and nothing errors |
+| DNS for `api.` and `*.goopy.life`, wildcard cert at `/etc/letsencrypt/live/goopy.life/` | the api site and every instance site hardcode that path |
+| Cloud firewall: 80/443 open, 3000 closed | defence in depth for the loopback bind |
+| `goopy` account, ZFS pool, `/var/cache/nginx`, `/opt/goopy-life/` | the deploy and the provisioner write into these |
+| Node 22.23.2 + Ghost 6.63.0 at `/opt/goopy-life/ghost-6.63.0` | `prod.toml`'s `source_dir` and `node_bin` |
+| Vercel production env: `NEXT_PUBLIC_GL_API_URL`, `GL_CONFIG_API_URL` = `https://api.goopy.life` | the frontend; see [Frontend](#frontend--vercel-git-integration) |
+
 ## Configuration
 
 Each environment's configuration is version-controlled in
@@ -404,9 +486,8 @@ Two rules keep it that way:
 
 To roll a config change back, revert the commit and deploy again.
 
-`prod.toml` is currently a placeholder copied from the dev values — there is no
-production host yet. Every line that still names a dev-only value is marked
-`REVIEW`; work through them before the first production deploy.
+A line marked `REVIEW` in `prod.toml` names a value not yet settled for
+production; settle it before the first production deploy.
 
 ### `bind_address` and `api_address`
 
