@@ -1282,14 +1282,14 @@ mod tests {
         registry: &SqliteRegistry,
         slug: &str,
         life_in_hours: i32,
-        days_ago: i64,
+        hours_ago: i64,
         port: u32,
         status: Status,
     ) -> Goopy {
         let goopy = Goopy {
             slug: slug.to_string(),
             life_in_hours,
-            created_at: Utc::now() - Duration::days(days_ago),
+            created_at: Utc::now() - Duration::hours(hours_ago),
             working_dir: PathBuf::from(format!("/tmp/goopy-test/{slug}")),
             port,
             status,
@@ -1378,7 +1378,7 @@ mod tests {
     async fn spawn_returns_503_with_retry_after_when_provisioned_cap_hit() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         // One Failed goopy fills the (provisioned = 1) cap; Failed still counts.
-        seed_goopy(&registry, "full-server-slug", 7, 0, 9050, Status::Failed);
+        seed_goopy(&registry, "full-server-slug", 8, 0, 9050, Status::Failed);
         let app = make_router_with_caps("goopy.life", registry, 100, 1);
 
         let resp = app
@@ -1410,7 +1410,7 @@ mod tests {
     async fn spawn_returns_503_server_busy_when_active_cap_hit() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         // One resident (Done) goopy fills the (active = 1) cap.
-        seed_goopy(&registry, "busy-server-slug", 7, 0, 9051, Status::Done);
+        seed_goopy(&registry, "busy-server-slug", 8, 0, 9051, Status::Done);
         let app = make_router_with_caps("goopy.life", registry, 1, 100);
 
         let resp = app
@@ -1441,7 +1441,7 @@ mod tests {
     #[tokio::test]
     async fn get_goopy_returns_200_with_subdomain_url() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        seed_goopy(&registry, "happy-little-slug", 7, 0, 9001, Status::Done);
+        seed_goopy(&registry, "happy-little-slug", 8, 0, 9001, Status::Done);
         let app = make_router("goopy.life", registry);
 
         let resp = app
@@ -1464,7 +1464,7 @@ mod tests {
     #[tokio::test]
     async fn get_goopy_localhost_domain_uses_http_port_url() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        seed_goopy(&registry, "local-test-slug", 7, 0, 9042, Status::Done);
+        seed_goopy(&registry, "local-test-slug", 8, 0, 9042, Status::Done);
         let app = make_router("localhost", registry);
 
         let resp = app
@@ -1512,9 +1512,9 @@ mod tests {
 
     #[tokio::test]
     async fn get_goopy_is_expired_false_for_live_instance() {
-        // Created now with a 7-day life: is_expired must be false.
+        // Created now with an 8-hour life: is_expired must be false.
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        seed_goopy(&registry, "live-slug", 7, 0, 9010, Status::Done);
+        seed_goopy(&registry, "live-slug", 8, 0, 9010, Status::Done);
         let app = make_router("goopy.life", registry);
 
         let resp = app
@@ -1535,9 +1535,9 @@ mod tests {
 
     #[tokio::test]
     async fn get_goopy_is_expired_true_for_expired_instance() {
-        // Created 10 days ago with a 7-day life: is_expired must be true.
+        // Created 10 hours ago with an 8-hour life: is_expired must be true.
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        seed_goopy(&registry, "old-slug", 7, 10, 9011, Status::Done);
+        seed_goopy(&registry, "old-slug", 8, 10, 9011, Status::Done);
         let app = make_router("goopy.life", registry);
 
         let resp = app
@@ -1585,7 +1585,7 @@ mod tests {
     async fn alive_check_returns_200_for_alive_goopy() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         // Created now, lives 7 days → not expired, status Done
-        seed_goopy(&registry, "alive-slug", 7, 0, 9003, Status::Done);
+        seed_goopy(&registry, "alive-slug", 8, 0, 9003, Status::Done);
         let app = make_router("goopy.life", registry);
 
         let resp = app
@@ -1605,8 +1605,8 @@ mod tests {
     #[tokio::test]
     async fn alive_check_returns_403_for_expired_goopy() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        // Created 10 days ago, lives 7 → expired
-        seed_goopy(&registry, "expired-slug", 7, 10, 9004, Status::Done);
+        // Created 10 hours ago, lives 8 → expired
+        seed_goopy(&registry, "expired-slug", 8, 10, 9004, Status::Done);
         let app = make_router("goopy.life", registry);
 
         let resp = app
@@ -1627,7 +1627,7 @@ mod tests {
     async fn alive_check_returns_403_for_non_done_status() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         // Still spawning → not alive even if within lifetime
-        seed_goopy(&registry, "spawning-slug", 7, 0, 9005, Status::Spawning);
+        seed_goopy(&registry, "spawning-slug", 8, 0, 9005, Status::Spawning);
         let app = make_router("goopy.life", registry);
 
         let resp = app
@@ -1895,8 +1895,8 @@ mod tests {
     #[tokio::test]
     async fn get_capacity_counts_failed_as_provisioned_but_not_active() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        seed_goopy(&registry, "cap-done", 7, 0, 9401, Status::Done);
-        seed_goopy(&registry, "cap-failed", 7, 0, 9402, Status::Failed);
+        seed_goopy(&registry, "cap-done", 8, 0, 9401, Status::Done);
+        seed_goopy(&registry, "cap-failed", 8, 0, 9402, Status::Failed);
         let app = make_router_with_caps("goopy.life", registry, 10, 10);
 
         let resp = app
@@ -1927,7 +1927,7 @@ mod tests {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         // A Failed row meets a provisioned cap of 1 while leaving active
         // headroom — is_full must still be true, matching what spawn enforces.
-        seed_goopy(&registry, "cap-failed", 7, 0, 9403, Status::Failed);
+        seed_goopy(&registry, "cap-failed", 8, 0, 9403, Status::Failed);
         let app = make_router_with_caps("goopy.life", registry, 10, 1);
 
         let resp = app
@@ -1996,9 +1996,9 @@ mod tests {
     #[tokio::test]
     async fn get_stats_reports_provisions_and_failures_without_slugs() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        seed_goopy(&registry, "stats-done", 7, 0, 9501, Status::Spawning);
+        seed_goopy(&registry, "stats-done", 8, 0, 9501, Status::Spawning);
         registry.complete_spawn("stats-done").unwrap();
-        seed_goopy(&registry, "stats-failed", 7, 0, 9502, Status::Spawning);
+        seed_goopy(&registry, "stats-failed", 8, 0, 9502, Status::Spawning);
         registry
             .fail_with_event(
                 "stats-failed",
@@ -2043,7 +2043,7 @@ mod tests {
     #[tokio::test]
     async fn alive_check_allows_caching_a_live_instance() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        seed_goopy(&registry, "live-slug", 7, 0, 9020, Status::Done);
+        seed_goopy(&registry, "live-slug", 8, 0, 9020, Status::Done);
         let app = make_router("goopy.life", registry);
 
         let resp = app
@@ -2075,9 +2075,9 @@ mod tests {
     #[tokio::test]
     async fn alive_check_never_allows_caching_a_denial() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        // Created 10 days ago, lives 7 → expired.
-        seed_goopy(&registry, "expired-slug", 7, 10, 9021, Status::Done);
-        seed_goopy(&registry, "spawning-slug", 7, 0, 9022, Status::Spawning);
+        // Created 10 hours ago, lives 8 → expired.
+        seed_goopy(&registry, "expired-slug", 8, 10, 9021, Status::Done);
+        seed_goopy(&registry, "spawning-slug", 8, 0, 9022, Status::Spawning);
         let app = make_router("goopy.life", registry);
 
         for slug in ["expired-slug", "spawning-slug", "no-such-slug"] {
@@ -2126,7 +2126,7 @@ mod tests {
             alive_cache_secs: 5,
         };
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        seed_goopy(&registry, "busy-slug", 7, 0, 9010, Status::Done);
+        seed_goopy(&registry, "busy-slug", 8, 0, 9010, Status::Done);
         let app = make_router_with_rl("goopy.life", registry, rl);
 
         for attempt in 0..40 {
@@ -2164,7 +2164,7 @@ mod tests {
             alive_cache_secs: 5,
         };
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        seed_goopy(&registry, "busy-slug", 7, 0, 9011, Status::Done);
+        seed_goopy(&registry, "busy-slug", 8, 0, 9011, Status::Done);
         let app = make_router_with_rl("goopy.life", registry, rl);
 
         let mut throttled = false;
@@ -2330,10 +2330,10 @@ mod tests {
     #[test]
     fn manager_service_sweep_despawns_expired_instance() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        // Expired: created 10 days ago, lives 7 days.
-        seed_goopy(&registry, "sweep-expired", 7, 10, 9010, Status::Done);
+        // Expired: created 10 hours ago, lives 8 hours.
+        seed_goopy(&registry, "sweep-expired", 8, 10, 9010, Status::Done);
         // Alive: created now, lives 7 days.
-        seed_goopy(&registry, "sweep-alive", 7, 0, 9011, Status::Done);
+        seed_goopy(&registry, "sweep-alive", 8, 0, 9011, Status::Done);
 
         let cfg = test_cfg("goopy.life");
         let manager: Arc<dyn ManagerService> = Arc::new(GoopyManager::new(
@@ -2594,7 +2594,7 @@ mod tests {
             alive_cache_secs: 5,
         };
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
-        seed_goopy(&registry, "shared-slug", 7, 0, 9012, Status::Done);
+        seed_goopy(&registry, "shared-slug", 8, 0, 9012, Status::Done);
         let app = make_router_with_rl("goopy.life", registry, rl);
 
         let make_req = |ip: &str| {

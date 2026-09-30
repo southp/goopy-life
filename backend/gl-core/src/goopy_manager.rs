@@ -789,11 +789,11 @@ mod tests {
         )
     }
 
-    fn make_goopy(slug: &str, days_ago: i64, port: u32, status: Status) -> Goopy {
+    fn make_goopy(slug: &str, hours_ago: i64, port: u32, status: Status) -> Goopy {
         Goopy {
             slug: slug.to_string(),
-            life_in_hours: 168,
-            created_at: Utc::now() - Duration::days(days_ago),
+            life_in_hours: 8,
+            created_at: Utc::now() - Duration::hours(hours_ago),
             working_dir: PathBuf::from(format!("/tmp/{slug}")),
             port,
             status,
@@ -869,7 +869,7 @@ mod tests {
     fn sweep_removes_expired_instances() {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
 
-        // Insert an expired goopy: created 10 days ago, lives 7 days
+        // Insert an expired goopy: created 10 hours ago, lives 8 hours
         let expired = make_goopy("expired-slug", 10, 9000, Status::Done);
         registry.save(&expired).unwrap();
         registry.acquire_port("expired-slug", 9000, 9001).unwrap();
