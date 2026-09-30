@@ -126,6 +126,10 @@ Statuses:
 
 Next.js application deployed on Vercel.
 
+The Node major version is pinned by `engines.node` in `frontend/package.json`.
+CI's `setup-node` reads it, Vercel reads it (it overrides the project setting),
+and `yarn install` refuses to run on a Node outside it. Change it there only.
+
 - The landing page lets users create a goopy with one click.
 - `GET /config` is fetched at Vercel build time (App Router Server Component with `force-static`) to obtain runtime settings from gl-serv. The server-only `GL_CONFIG_API_URL` env var (no `NEXT_PUBLIC_` prefix) points to `api.goopy.life` and is required — the build fails if it is unset. Browser-side calls use `NEXT_PUBLIC_GL_API_URL`.
 - CORS on gl-serv is configured to accept requests from the Vercel origin.
