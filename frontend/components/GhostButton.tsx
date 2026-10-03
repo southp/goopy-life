@@ -217,7 +217,7 @@ export default function GhostButton() {
 			const admin = adminUrl(state.url);
 			return (
 				<div className="go-button-done-message">
-					<p>Your Ghost is ready. Set up your admin account at:</p>
+					<p>Your Ghost is ready at:</p>
 					<a className="go-button-url" href={admin}>
 						{admin}
 					</a>
