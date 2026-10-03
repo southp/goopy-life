@@ -25,7 +25,7 @@
 #   cargo install --locked cargo-zigbuild@0.22.3
 #   brew install zig@0.16
 #
-# See README.md for full cross-compilation setup instructions.
+# See docs/DEPLOYMENT.md for full cross-compilation setup instructions.
 set -euo pipefail
 
 TARGET=${1:?"Usage: deploy.sh user@droplet <env> [ssh-port]"}
@@ -46,7 +46,7 @@ fi
 
 # The cross-compile tools link the binaries this script ships, so a deploy uses
 # exactly these versions rather than whatever was last installed. Checked before
-# anything is built or sent. Bump them here and in README.md together.
+# anything is built or sent. Bump them here and in docs/DEPLOYMENT.md together.
 ZIGBUILD_VERSION="0.22.3"
 ZIG_VERSION="0.16"
 if [[ "$(cargo-zigbuild --version 2>/dev/null)" != "cargo-zigbuild $ZIGBUILD_VERSION" ]]; then
