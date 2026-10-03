@@ -408,3 +408,20 @@ body {
 a.version-sha:hover {
 	color: #aaa;
 }
+
+.github-link {
+	display: inline-block;
+	margin-right: 0.5rem;
+	color: #666;
+	vertical-align: middle;
+}
+
+.github-link:hover {
+	color: #aaa;
+}
+
+.github-link svg {
+	display: block;
+	width: 1rem;
+	height: 1rem;
+}
