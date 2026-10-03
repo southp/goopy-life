@@ -18,6 +18,48 @@ a code change:
 - **Backend dev droplet** — the `dev` [GitHub Environment](https://github.com/southp/goopy-life/settings/environments).
 - **Frontend** — the Vercel project's Git integration (project `goopy-life-frontend-dev`).
 
+## Before the first deploy
+
+The `deploy/` directory contains all artifacts needed to run the service on the droplet.
+Two things are set up by hand, once: the cross-compile toolchain on your machine,
+and the droplet itself.
+
+### Cross-compilation setup (one-time, on macOS)
+
+The droplet runs x86_64 Linux. The musl target comes with the pinned toolchain (`backend/rust-toolchain.toml`); install `cargo-zigbuild` (uses [Zig](https://ziglang.org/) as the cross-linker — no extra toolchain taps required). Both link the production binary, so they are pinned, and `deploy/deploy.sh` refuses to run with other versions:
+
+```bash
+cargo install --locked cargo-zigbuild@0.22.3
+brew install zig@0.16
+```
+
+### Droplet setup (one-time)
+
+The service runs as a dedicated `goopy` account, which is also the account you deploy as — the sudoers drop-in below names it explicitly, so deploying as any other user fails with a password prompt.
+
+```bash
+# 0. Create the service account and authorise your deploy key for it
+sudo useradd --system --create-home --shell /bin/bash goopy
+ssh-copy-id goopy@<droplet>
+
+# 1. From your machine, as an admin with password sudo: install the sudoers
+#    drop-in and the nginx cache zone. No deploy installs these — the drop-in
+#    grants the deploy its rights — and every deploy checks the drop-in.
+./deploy/admin-apply.sh <admin>@<droplet> <env>
+
+# 2. Set the ZFS pool mountpoint to match base_dir in config.toml (default: /opt/goopy-life/data).
+#    gl-serv creates/destroys child datasets via sudo (sudoers rules restrict to zpool_ghost/*).
+#    NoNewPrivileges is intentionally omitted from the unit to allow this; see issue #90 for
+#    the long-term fix (privilege-separated ZFS helper).
+sudo zfs set mountpoint=/opt/goopy-life/data zpool_ghost
+
+# 3. Give the deploy account ownership of the service directory. The deploy
+#    writes /opt/goopy-life/config.toml directly, so this must not be root-owned.
+sudo install -d -o goopy -g goopy /opt/goopy-life /opt/goopy-life/bin
+```
+
+There is no step for `config.toml`, the systemd unit or the api nginx site: they are version-controlled — the unit at [`deploy/gl-serv.service`](../deploy/gl-serv.service), the rest per environment under [`deploy/config/`](../deploy/config/) — and installed by the deploy itself. After the first deploy, `./deploy/check-host.sh goopy@<droplet> <env>` confirms the host matches the repo. See [Host artifacts](#host-artifacts).
+
 ## Backend — automated dev deploys
 
 `.github/workflows/backend-deploy.yml` runs on every push to `trunk` under
@@ -33,7 +75,7 @@ and the nginx cache zone are applied by an admin with `deploy/admin-apply.sh`
 (see [Applying the root-owned artifacts](#applying-the-root-owned-artifacts)) —
 the deploy checks the sudoers drop-in and fails until that has run. The ZFS pool
 is still one-time manual setup (see the
-[droplet setup](../README.md#droplet-setup-one-time) steps).
+[droplet setup](#droplet-setup-one-time) steps).
 
 ### One-time setup
 
@@ -346,9 +388,10 @@ your machine, add to the droplet's entry in `~/.ssh/config`:
 ControlMaster auto
 ControlPath ~/.ssh/cm-%C
 ControlPersist 60
-``` Requires the
-one-time local toolchain setup in the
-[README](../README.md#cross-compilation-setup-one-time-on-macos).
+```
+
+Requires the one-time local toolchain setup in
+[Cross-compilation setup](#cross-compilation-setup-one-time-on-macos).
 
 The environment argument is required. It has no default because the config
 reaches the host: a default would let an omitted argument reconfigure one
@@ -552,7 +595,7 @@ needs it.
 
 This is also why a host's *first* deploy never creates the drop-in: the deploy
 needs its rules before it can install anything. A new host gets it from
-`admin-apply.sh` during the [droplet setup](../README.md#droplet-setup-one-time),
+`admin-apply.sh` during the [droplet setup](#droplet-setup-one-time),
 and the first deploy is what verifies it.
 
 Two more things stop a deploy, because it cannot fix either: a file in
