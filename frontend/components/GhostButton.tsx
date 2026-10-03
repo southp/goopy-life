@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { adminUrl } from '@/lib/admin';
 import { ApiRequestError, getGoopy, spawnGoopy } from '@/lib/api';
 import { LOCALSTORAGE_KEY, POLL_INTERVAL_MS } from '@/lib/constants';
 import { formatExpiry } from '@/lib/expiry';
@@ -211,11 +212,14 @@ export default function GhostButton() {
 
 		case "done": {
 			const availableUntil = formatExpiry(state.expiresAt, new Date());
+			// Link the admin dashboard rather than the site: claiming the admin
+			// account is the first thing anyone has to do with a fresh Ghost.
+			const admin = adminUrl(state.url);
 			return (
 				<div className="go-button-done-message">
 					<p>Your Ghost is ready at:</p>
-					<a className="go-button-url" href={state.url}>
-						{state.url}
+					<a className="go-button-url" href={admin}>
+						{admin}
 					</a>
 					{availableUntil !== null && (
 						<p className="expiry-message">Available until {availableUntil}</p>
