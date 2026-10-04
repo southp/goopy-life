@@ -89,7 +89,7 @@ pub struct GhostConfig {
     ///
     /// See [`readiness`] for why the wait exists. The default has an order of
     /// magnitude of headroom over the ~13 s a lone Ghost took to boot on the
-    /// dev droplet, because a loaded host is slow rather than broken.
+    /// dev host, because a loaded host is slow rather than broken.
     #[serde(default = "default_ready_timeout_secs")]
     pub ready_timeout_secs: u64,
     /// Gap between readiness probes, in milliseconds.
@@ -244,7 +244,7 @@ impl GhostProvisioner {
                 "useNullAsDefault": true,
             },
             // Sandboxes are throwaway, so no mail service is configured.
-            // "Direct" attempts SMTP straight from the droplet, which providers
+            // "Direct" attempts SMTP straight from the host, which providers
             // block on port 25 — so assume mail never leaves.
             "mail": {
                 "transport": "Direct",
@@ -731,7 +731,7 @@ mod tests {
     /// leaving it at Ghost's default makes the owner account created at setup
     /// impossible to log in with, and the admin UI unreachable. The failure is
     /// a 500 from `POST /ghost/api/admin/session/`, nowhere near provisioning,
-    /// which is why it is pinned here rather than left to a droplet to find.
+    /// which is why it is pinned here rather than left to a host to find.
     #[test]
     fn prod_config_disables_staff_device_verification() {
         let source = fake_ghost_source();
@@ -912,7 +912,7 @@ mod tests {
     }
 
     /// Dev instances are just as exposed as production ones — they run on a
-    /// public droplet under a real hostname — so the same keys apply.
+    /// public host under a real hostname — so the same keys apply.
     #[test]
     fn dev_config_also_disables_the_phone_homes() {
         let source = fake_ghost_source();
@@ -1124,7 +1124,7 @@ mod tests {
         );
     }
 
-    /// Measured on the dev droplet: a fully booted Ghost 6.63.0 answers `301`,
+    /// Measured on the dev host: a fully booted Ghost 6.63.0 answers `301`,
     /// not `200`, to a bare loopback request, because it enforces its canonical
     /// `https://{slug}.{domain}` url. The probe takes a shortcut around nginx
     /// and so has to carry the origin nginx would have forwarded, or the wait

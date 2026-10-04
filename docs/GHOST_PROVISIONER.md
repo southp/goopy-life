@@ -14,7 +14,7 @@ install**, and **upgrade it**.
 
 A Ghost install is around 540 MB, almost all of it `node_modules`. Installing
 one per sandbox would make provisioning slow and put a hard ceiling on how many
-instances fit on the droplet. Instead each instance directory is assembled from
+instances fit on the host. Instead each instance directory is assembled from
 the shared install in two parts.
 
 ### The soft-link boundary
@@ -344,7 +344,7 @@ Taking the shortcut around nginx costs the probe the request context nginx would
 have added, and Ghost does not treat that as cosmetic. It enforces its
 configured canonical `url`: a request that looks like it arrived on the wrong
 scheme is answered with a `301` to the right one, **however healthy the instance
-is**. Measured against Ghost 6.63.0 on the dev droplet, probing `GET /` on the
+is**. Measured against Ghost 6.63.0 on the dev host, probing `GET /` on the
 instance's own port:
 
 | what the probe sends | booting | booted |
@@ -377,7 +377,7 @@ Two keys under `[provisioner]`, when `kind = "Ghost"`:
 | `ready_timeout_secs` | `120` | how long an instance may take to serve before the spawn is given up on |
 | `ready_poll_ms` | `500` | gap between probes |
 
-One Ghost booting alone on the dev droplet took ~13 s, so the default timeout is
+One Ghost booting alone on the dev host took ~13 s, so the default timeout is
 an order of magnitude of headroom. Raise it if the host runs several instances
 at once, or if `zpool` IO is contended — a loaded host is slow, not broken.
 Lowering it below a measured boot time throws away sandboxes seconds before they

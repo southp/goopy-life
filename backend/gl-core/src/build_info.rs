@@ -1,7 +1,7 @@
 //! Which commit this binary was built from.
 //!
 //! Exists so that "is the thing I merged the thing that is running?" has an
-//! answer that does not involve ssh'ing to a droplet and reading file mtimes.
+//! answer that does not involve ssh'ing to a host and reading file mtimes.
 //! `gl-serv` serves these values from `GET /version`, and
 //! `deploy/push-binary.sh` compares what it built against what the restarted
 //! service reports — turning the post-deploy check from a liveness check into

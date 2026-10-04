@@ -157,10 +157,10 @@ is gitignored — delete that directory to reset to a clean slate. For local
 changes you would rather not share, `backend/config.toml` is gitignored.
 
 **Deployed configurations** live in [`deploy/config/`](../deploy/config/) and are
-installed on the droplets by the deploy, not edited on the host — see
+installed on each host by the deploy, not edited there — see
 [DEPLOYMENT.md](DEPLOYMENT.md#configuration). The local config is deliberately
 not among them: that directory is the set `deploy.sh` can ship, and
-`dev_mode = true` on a real droplet would skip systemd, nginx and ZFS.
+`dev_mode = true` on a real host would skip systemd, nginx and ZFS.
 
 `config.local.toml` doubles as the reference for every field: gl-cli and gl-serv
 read the same `Config`, so any configuration that works for one works for the
@@ -186,9 +186,9 @@ Key settings:
 
 ## Deployment
 
-- **Infrastructure:** DigitalOcean droplet with ZFS.
-- **Backend:** The droplet runs gl-serv. The dev droplet is deployed automatically on every merge to `trunk`; production is a manual cross-compile + scp.
-- **Frontend:** Deployed on Vercel via its GitHub integration. The droplet serves only gl-serv and local static pages (e.g. `/expired`).
+- **Infrastructure:** any online x86_64 Linux host with systemd, nginx and ZFS; today, a DigitalOcean droplet.
+- **Backend:** The host runs gl-serv. The dev host is deployed automatically on every merge to `trunk`; production is a manual cross-compile + scp.
+- **Frontend:** Deployed on Vercel via its GitHub integration. The host serves only gl-serv and local static pages (e.g. `/expired`).
 - **API domain:** `api.goopy.life`.
 
 Full details, including the one-time GitHub setup: [DEPLOYMENT.md](DEPLOYMENT.md).

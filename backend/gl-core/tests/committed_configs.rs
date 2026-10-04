@@ -2,7 +2,7 @@
 //!
 //! Two kinds are covered, for the same reason and with different rules:
 //!
-//! * `deploy/config/*.toml` are installed verbatim on the droplets, so a field
+//! * `deploy/config/*.toml` are installed verbatim on the hosts, so a field
 //!   gl-core starts requiring without a matching edit there is not a stale
 //!   fixture — it is a service that will not boot.
 //! * `backend/config.local.toml` is what a developer runs locally. Committing
@@ -12,7 +12,7 @@
 //! Checking both here moves that failure from deploy time on a live host, or
 //! from a confusing first afternoon on a new checkout, to review time on a
 //! branch. This is the check that would have caught #63, which replaced the
-//! flat `provisioner_kind` key with a `[provisioner]` table: the dev droplet's
+//! flat `provisioner_kind` key with a `[provisioner]` table: the dev host's
 //! config kept the old spelling and stayed unparseable until a deploy months
 //! later crash-looped gl-serv with `missing field provisioner`.
 
@@ -43,7 +43,7 @@ fn deployed_configs() -> Vec<PathBuf> {
 
 /// The committed local development configuration. It lives outside
 /// `deploy/config/` deliberately: that directory is the deployable set, and
-/// `dev_mode = true` on a real droplet would skip systemd, nginx and ZFS.
+/// `dev_mode = true` on a real host would skip systemd, nginx and ZFS.
 fn local_config() -> PathBuf {
     repo_root().join("backend/config.local.toml")
 }
@@ -310,7 +310,7 @@ fn assert_every_value(
 }
 
 /// The api site used to be a single prod-shaped file that no deploy installed,
-/// and the dev droplet quietly ran a different one under the same name (#139).
+/// and the dev host quietly ran a different one under the same name (#139).
 /// Per-environment files fix that only as long as each still describes its
 /// own environment — so `server_name` and the certificate path are pinned to
 /// the `domain` in the `.toml` shipped beside it. The per-instance sites derive

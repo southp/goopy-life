@@ -2,7 +2,7 @@
 //!
 //! A `goopies` row carries `status = Failed` and nothing else, and the sweep
 //! reaps `Failed` rows — so the row that says *something went wrong* is deleted
-//! before anyone asks *what*. Ten such rows wedged the dev droplet at its
+//! before anyone asks *what*. Ten such rows wedged the dev host at its
 //! capacity cap for two and a half months in 2026, and by the time they were
 //! looked at there was nothing left to look at: the `tracing::error!` had gone
 //! to a journal neither account on the host can read, and had long since

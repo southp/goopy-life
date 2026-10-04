@@ -1612,7 +1612,7 @@ mod tests {
     // ── the failure outlives the instance (#118) ──────────────────────────
 
     /// A provisioner whose `provision` always fails, reproducing a spawn that
-    /// ends `Failed` — the state the June droplet was stuck in ten times over.
+    /// ends `Failed` — the state the dev host in June was stuck in ten times over.
     struct UnprovisionableProvisioner;
 
     impl GoopyProvisioner for UnprovisionableProvisioner {

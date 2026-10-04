@@ -5,7 +5,7 @@
 #
 # The host half runs for real against a scratch directory standing in for the
 # host's filesystem (its ROOT), with stub visudo, nginx and systemctl
-# whose verdicts each case chooses. No droplet, no root, no network required.
+# whose verdicts each case chooses. No host, no root, no network required.
 set -uo pipefail
 
 DEPLOY_DIR="$(cd "$(dirname "$0")/.." && pwd)"

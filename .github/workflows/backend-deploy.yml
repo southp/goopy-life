@@ -1,6 +1,6 @@
 name: Deploy backend to dev
 
-# The dev droplet tracks trunk automatically; production is deployed by hand
+# The dev host tracks trunk automatically; production is deployed by hand
 # with deploy/deploy.sh. Host, user and port live in the `dev` GitHub
 # Environment, so pointing this at a different box is a settings change rather
 # than a code change — see docs/DEPLOYMENT.md.
@@ -10,7 +10,7 @@ on:
     paths:
       - 'backend/**'
       # Local-only development config: it is never shipped anywhere, so editing
-      # it should not rebuild and redeploy the droplet. Backend build still
+      # it should not rebuild and redeploy the host. Backend build still
       # runs on it — that is what parses it.
       - '!backend/config.local.toml'
       - 'deploy/push-binary.sh'
@@ -25,7 +25,7 @@ on:
       - 'deploy/sudoers.goopy'
       - '.github/workflows/backend-deploy.yml'
   # Lets a maintainer re-run a deploy without an empty commit, e.g. after
-  # rotating the deploy key or rebuilding the droplet.
+  # rotating the deploy key or rebuilding the host.
   workflow_dispatch:
 
 # Two merges in quick succession would otherwise race to install over each
@@ -77,7 +77,7 @@ jobs:
         run: rustup toolchain install
 
       - name: Install musl cross-compilation toolchain
-        # The droplet gets a fully static musl binary, matching what
+        # The host gets a fully static musl binary, matching what
         # deploy/deploy.sh produces locally via cargo-zigbuild. musl-tools
         # supplies musl-gcc, which rusqlite's bundled SQLite needs to compile.
         run: |
@@ -95,7 +95,7 @@ jobs:
 
       - name: Build release binaries
         # gl-cli is built here, not on a path of its own: it links the same
-        # gl-core as gl-serv, so the droplet must never hold a pair built from
+        # gl-core as gl-serv, so the host must never hold a pair built from
         # different commits.
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
@@ -126,7 +126,7 @@ jobs:
           chmod 700 ~/.ssh
           # known_hosts is pinned rather than StrictHostKeyChecking=no: the
           # binary is installed with sudo on the far end, so accepting an
-          # unverified host key would hand root on the droplet to anyone who can
+          # unverified host key would hand root on the host to anyone who can
           # win a DNS or BGP race against the runner.
           printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_deploy
@@ -136,7 +136,7 @@ jobs:
           printf 'IdentityFile ~/.ssh/id_deploy\nIdentitiesOnly yes\nStrictHostKeyChecking yes\n' > ~/.ssh/config
           printf 'ControlMaster auto\nControlPath ~/.ssh/cm-%%C\nControlPersist 60\n' >> ~/.ssh/config
 
-      - name: Deploy to the dev droplet
+      - name: Deploy to the dev host
         # Same script the manual production deploy uses, so the two paths cannot
         # drift apart. dev.toml is named explicitly here rather than defaulted
         # inside the script: this workflow is the only thing that may deploy the

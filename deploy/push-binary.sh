@@ -10,7 +10,7 @@
 # `GET /version` on the host. Set GL_GIT_SHA to that commit; it is required,
 # because a defaulted one would turn the assertion into one that always passes.
 #
-# gl-cli is the droplet's maintenance CLI: despawning one instance by hand,
+# gl-cli is the host's maintenance CLI: despawning one instance by hand,
 # listing what exists and driving alloc/dealloc have no route on gl-serv. It
 # ships from this same deploy rather than a path of its own because it links
 # gl-core, so it shares the registry schema and the provisioner with gl-serv --
@@ -20,12 +20,12 @@
 # This is the single source of truth for the remote half of a deploy. Both
 # callers share it on purpose:
 #   - deploy/deploy.sh                        (manual, production)
-#   - .github/workflows/backend-deploy.yml    (automated, dev droplet)
+#   - .github/workflows/backend-deploy.yml    (automated, dev host)
 # The install command below is pinned verbatim in deploy/sudoers.goopy, so a
-# copy that drifted in one caller would fail with a sudo denial on the droplet
+# copy that drifted in one caller would fail with a sudo denial on the host
 # rather than anything self-explanatory.
 #
-# The config is shipped rather than hand-maintained on the droplet, which makes
+# The config is shipped rather than hand-maintained on the host, which makes
 # this script the only writer of the remote file: a hand-edit there is
 # overwritten by the next deploy. Edit deploy/config/<env>.toml instead. A
 # config that drifts from the schema the binary expects is a crash loop —
@@ -142,7 +142,7 @@ run ssh -p "$PORT" "$TARGET" "$(drift_check_command deploy "" "${HOST_ARTIFACT_S
 # The other half of that: this execs from /tmp, so a host that mounts /tmp
 # noexec fails here with `Permission denied` -- a message that reads like a
 # config failure and is not one. The install below only *reads* /tmp/gl-serv,
-# so it never had this dependency. /tmp is a plain tmpfs on the droplets today
+# so it never had this dependency. /tmp is a plain tmpfs on the hosts today
 # (rw,nosuid,nodev); if one is ever hardened, stage the binary somewhere
 # executable and update the install path pinned in deploy/sudoers.goopy to
 # match -- the two have to move together.
@@ -233,7 +233,7 @@ run ssh -p "$PORT" "$TARGET" "sleep 8; systemctl is-active --quiet gl-serv"
 #      `--max-time` keeps a wedged socket from hanging the deploy forever. curl
 #      is the one host tool this step assumes.
 #   3. Compare. The match is on the full sha inside the JSON body rather than
-#      via a parser, so the check needs no jq on the droplet.
+#      via a parser, so the check needs no jq on the host.
 #
 # There is no `set -e` in the remote shell, so every step ends its own failure
 # explicitly, and the mismatch branch prints what /version actually said -- a

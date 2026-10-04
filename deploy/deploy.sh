@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Usage: ./deploy/deploy.sh user@droplet <env> [ssh-port]
+# Usage: ./deploy/deploy.sh user@host <env> [ssh-port]
 #
 #   env   the environment to deploy, naming a file in deploy/config/
 #         (e.g. `dev` -> deploy/config/dev.toml)
 #
-# Manual deploy path — this is how production gets updated. The dev droplet is
+# Manual deploy path — this is how production gets updated. The dev host is
 # deployed automatically on every merge to trunk by
 # .github/workflows/backend-deploy.yml; see docs/DEPLOYMENT.md.
 #
@@ -13,7 +13,7 @@
 # and restarts the systemd service.
 #
 # gl-cli is built from the same invocation as gl-serv rather than separately:
-# the two link the same gl-core, so a droplet must never hold a pair built from
+# the two link the same gl-core, so a host must never hold a pair built from
 # different commits.
 #
 # The environment is a required argument with no default: the config is shipped
@@ -28,8 +28,8 @@
 # See docs/DEPLOYMENT.md for full cross-compilation setup instructions.
 set -euo pipefail
 
-TARGET=${1:?"Usage: deploy.sh user@droplet <env> [ssh-port]"}
-ENVIRONMENT=${2:?"Usage: deploy.sh user@droplet <env> [ssh-port]"}
+TARGET=${1:?"Usage: deploy.sh user@host <env> [ssh-port]"}
+ENVIRONMENT=${2:?"Usage: deploy.sh user@host <env> [ssh-port]"}
 PORT=${3:-22}
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -60,7 +60,7 @@ if [[ "$ZIG_FOUND" != "$ZIG_VERSION."* ]]; then
 fi
 
 # Stamp the build with the commit it is made from, so `GET /version` on the
-# droplet can be compared against what this run built (see push-binary.sh) and
+# host can be compared against what this run built (see push-binary.sh) and
 # so "which commit is serving?" has an answer that is not a guess at file
 # mtimes.
 #

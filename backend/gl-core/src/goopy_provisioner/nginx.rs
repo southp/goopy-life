@@ -285,7 +285,7 @@ mod tests {
     fn render_site_redirects_expired_instances_to_the_configured_domain() {
         // A domain other than goopy.life on purpose: the redirect used to be a
         // literal, and a test passing "goopy.life" could not tell the two apart.
-        // The dev droplet serves southp.dev, so its expired instances were sent
+        // The dev host serves southp.dev, so its expired instances were sent
         // to a production site that does not know them (#132).
         let cfg = render_site("tasty-lucky-clover", "southp.dev", 9876, "127.0.0.1:3000");
         assert!(

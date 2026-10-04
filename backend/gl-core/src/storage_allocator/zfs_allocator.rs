@@ -189,7 +189,7 @@ mod tests {
 
         // Mountpoint is inherited from the pool root (no -o mountpoint= is passed to
         // zfs create). The pool must be configured with the correct mountpoint via
-        // `zfs set mountpoint=<base_dir> <pool>` during one-time droplet setup.
+        // `zfs set mountpoint=<base_dir> <pool>` during one-time host setup.
 
         // Cleanup
         std::process::Command::new("zfs")

@@ -61,7 +61,7 @@ pub(crate) struct InstanceOrigin<'a> {
 
 /// Default ceiling on how long an instance may take to serve.
 ///
-/// One measurement of one Ghost booting alone on the dev droplet took ~13 s
+/// One measurement of one Ghost booting alone on the dev host took ~13 s
 /// (#151). The budget is an order of magnitude above that because a host
 /// running several instances, or one competing for IO, is slow rather than
 /// broken — and the cost of waiting too long is a spinner, while the cost of
@@ -295,7 +295,7 @@ mod tests {
         assert!(matches!(err, Error::ReadinessTimeout { .. }), "got {err:?}");
     }
 
-    /// What the dev droplet actually answers when the probe arrives without the
+    /// What the dev host actually answers when the probe arrives without the
     /// headers nginx sets. Pinned so that a future change to the request cannot
     /// quietly reintroduce a wait that a healthy instance can never satisfy.
     #[test]
