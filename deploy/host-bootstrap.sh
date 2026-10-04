@@ -48,11 +48,33 @@ NODESOURCE_KEY_URL=https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
 # Compared after download: a key served by anyone else is refused.
 NODESOURCE_KEY_FPR=6F71F525282841EEDAF851B42F59B5F99B1BE0B4
 
+APP_DIR=/opt/goopy-life
+
+# 4 GB of swap with zswap is what the capacity caps of 20 were measured on
+# (#113); a stock 2 GB droplet serves about 10, and nothing errors at 11. Two
+# files because that is exactly what was measured, not because two matter.
+SWAPFILES=(/swapfile:1G /swapfile2:3G)
+# lzo, not zstd: zstd spawned 7% more and answered 2-3x slower from swap (#113).
+ZSWAP_COMPRESSOR=lzo
+ZSWAP_ZPOOL=zsmalloc
+ZSWAP_MAX_POOL_PERCENT=25
+
+# The pool every instance's dataset is created in (prod.toml [allocator]). The
+# binding rule is max_provisioned * quota_mb <= pool size; at 20 * 200 MiB the
+# worst case is 3.9 GiB, about 56% of 8 GB (a 5 GB pool would be 90% full, where
+# ZFS slows down). Allocated in full, so a root disk that fills up cannot stop
+# the pool, which a sparse file would: a pool that cannot write stops every
+# instance at once.
+POOL=zpool_ghost
+POOL_IMG=/var/lib/zfs-ghost.img
+POOL_SIZE_MIB=8192
+
 BASE_PACKAGES=(
     ca-certificates curl gnupg git sqlite3
     fail2ban unattended-upgrades nftables
     nginx
     nodejs
+    zfs-dkms zfsutils-linux linux-headers-amd64
 )
 
 ROOT=${ROOT:-}
@@ -232,7 +254,57 @@ shell_prompt() {
     ensure_line "$home/.bashrc" "PS1=\"\\[\\e[1;97;41m\\] $ENV_LABEL \\[\\e[0m\\] \$PS1\"  # host-bootstrap"
 }
 
-# --- 2. Packages --------------------------------------------------------------
+# --- 2. Swap and zswap --------------------------------------------------------
+
+# Appends to whatever the image's own command line is, rather than replacing it.
+render_zswap_grub() {
+    cat <<EOF
+# Written by deploy/host-bootstrap.sh. Capacity depends on it: see #113.
+GRUB_CMDLINE_LINUX_DEFAULT="\$GRUB_CMDLINE_LINUX_DEFAULT zswap.enabled=1 zswap.compressor=$ZSWAP_COMPRESSOR zswap.zpool=$ZSWAP_ZPOOL zswap.max_pool_percent=$ZSWAP_MAX_POOL_PERCENT"
+EOF
+}
+
+# First, so that everything after it, the ZFS module build and Ghost's install
+# among them, already has the swap.
+setup_swap() {
+    step "swap and zswap"
+    local spec path size params=/sys/module/zswap/parameters
+    for spec in "${SWAPFILES[@]}"; do
+        path=${spec%%:*}
+        size=${spec#*:}
+        if [[ -e $path ]]; then
+            say unchanged "$path"
+        else
+            fallocate -l "$size" "$path"
+            chmod 600 "$path"
+            mkswap "$path" >/dev/null
+            say created "$path ($size)"
+        fi
+        ensure_line /etc/fstab "$path none swap sw 0 0"
+        if ! swapon --show=NAME --noheadings | grep -qxF "$path"; then
+            swapon "$path"
+        fi
+    done
+
+    put_file /etc/default/grub.d/90-goopy-zswap.cfg 0644 < <(render_zswap_grub)
+    if [[ $CHANGED == 1 ]]; then
+        update-grub
+    fi
+    # The command line holds from the next boot; this makes it true now.
+    if [[ $(cat "$params/enabled" 2>/dev/null) != Y ]]; then
+        if { echo "$ZSWAP_COMPRESSOR" >"$params/compressor" \
+            && echo "$ZSWAP_ZPOOL" >"$params/zpool" \
+            && echo "$ZSWAP_MAX_POOL_PERCENT" >"$params/max_pool_percent" \
+            && echo Y >"$params/enabled"; } 2>/dev/null; then
+            say updated "zswap enabled"
+        else
+            warn "zswap could not be enabled before a reboot"
+            NEEDS_REBOOT=1
+        fi
+    fi
+}
+
+# --- 3. Packages --------------------------------------------------------------
 
 setup_packages() {
     step "packages"
@@ -270,7 +342,7 @@ EOF
     fi
 }
 
-# --- 3. ssh, fail2ban, unattended upgrades ------------------------------------
+# --- 4. ssh, fail2ban, unattended upgrades ------------------------------------
 
 render_sshd() {
     cat <<EOF
@@ -320,7 +392,7 @@ EOF
     systemctl enable --now unattended-upgrades
 }
 
-# --- 4. Kernel, resolver, journal, mail ---------------------------------------
+# --- 5. Kernel, resolver, journal, mail ---------------------------------------
 
 render_sysctl() {
     cat <<EOF
@@ -385,7 +457,7 @@ EOF
     fi
 }
 
-# --- 5. Firewall --------------------------------------------------------------
+# --- 6. Firewall --------------------------------------------------------------
 
 # render_nftables <deploy uid> <ghost uid> <www-data uid>
 render_nftables() {
@@ -445,7 +517,7 @@ setup_firewall() {
     fi
 }
 
-# --- 6. nginx -----------------------------------------------------------------
+# --- 7. nginx -----------------------------------------------------------------
 
 setup_nginx() {
     step "nginx"
@@ -484,11 +556,46 @@ EOF
     fi
 }
 
+# --- 8. ZFS pool and the service directory ------------------------------------
+
+setup_zfs() {
+    step "ZFS pool and $APP_DIR"
+    # The deploy writes here directly, so it must not be root's.
+    install -d -m 755 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "$APP_DIR" "$APP_DIR/bin"
+    say ok "$APP_DIR and $APP_DIR/bin owned by $DEPLOY_USER"
+
+    # DKMS builds the module for each kernel whose headers are installed. When
+    # the upgrade above brought a newer kernel, the running one's headers may be
+    # gone from the archive (dev needed them by hand), and the module then loads
+    # only after a reboot into the new one. Allowed to fail for that reason.
+    "${APT[@]}" install "linux-headers-$(uname -r)" || true
+    if ! modprobe zfs 2>/dev/null; then
+        warn "no zfs module for the running kernel $(uname -r): reboot, then run this again"
+        NEEDS_REBOOT=1
+        return
+    fi
+
+    if zpool list -H -o name "$POOL" >/dev/null 2>&1; then
+        say unchanged "pool $POOL"
+    elif [[ -e $POOL_IMG ]]; then
+        zpool import -d "$POOL_IMG" "$POOL"
+        say imported "pool $POOL from $POOL_IMG"
+    else
+        fallocate -l "${POOL_SIZE_MIB}M" "$POOL_IMG"
+        chmod 600 "$POOL_IMG"
+        zpool create -O compression=on -O mountpoint="$APP_DIR/data" "$POOL" "$POOL_IMG"
+        say created "pool $POOL, ${POOL_SIZE_MIB} MiB at $POOL_IMG"
+    fi
+}
+
 # --- Finish -------------------------------------------------------------------
 
 summary() {
     step "summary"
     local pw
+    say swap "$(free -m | awk '/^Swap:/ { print $2 }') MiB (expect ~4095)"
+    say zswap "$(cat /sys/module/zswap/parameters/enabled 2>/dev/null || echo unknown) (expect Y)"
+    say pool "$(zpool list -H -o name,size,health "$POOL" 2>/dev/null || echo missing)"
     say node "$(node --version 2>/dev/null || echo missing)"
     if nft list table inet goopy >/dev/null 2>&1; then
         say firewall "inet goopy loaded"
@@ -517,12 +624,14 @@ summary() {
 main() {
     preflight
     setup_accounts
+    setup_swap
     setup_packages
     setup_ssh
     setup_auto_updates
     harden_host
     setup_firewall
     setup_nginx
+    setup_zfs
     summary
 }
 

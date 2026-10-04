@@ -177,6 +177,40 @@ else
     fail sysctl_restricts_ptrace_and_leaves_memory_tuning_alone "$sysctl"
 fi
 
+# --- render_zswap_grub --------------------------------------------------------
+
+# GRUB sources the snippet after the image's own settings; it has to add to the
+# command line, not replace it (DigitalOcean's carries its console settings).
+got=$(
+    GRUB_CMDLINE_LINUX_DEFAULT="net.ifnames=0 biosdevname=0"
+    # As GRUB reads it; eval, because bash 3.2 cannot source a process substitution.
+    eval "$(render_zswap_grub)"
+    printf '%s' "$GRUB_CMDLINE_LINUX_DEFAULT"
+)
+expected="net.ifnames=0 biosdevname=0 zswap.enabled=1 zswap.compressor=lzo zswap.zpool=zsmalloc zswap.max_pool_percent=25"
+if [[ $got == "$expected" ]]; then
+    pass zswap_is_appended_to_the_images_command_line
+else
+    fail zswap_is_appended_to_the_images_command_line "got: $got"
+fi
+
+# --- The pool against prod.toml -----------------------------------------------
+
+# The worst case, every provisioned instance at its quota, must leave the pool
+# under 80% of what ZFS can use (it keeps 1/32 back). Raising the caps or the
+# quota in prod.toml without growing the pool fails here, not on the host.
+toml="$DEPLOY_DIR/config/prod.toml"
+max_provisioned=$(sed -nE 's/^max_provisioned[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' "$toml")
+quota_mb=$(sed -nE 's/^quota_mb[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' "$toml")
+worst=$((max_provisioned * quota_mb))
+ceiling=$((POOL_SIZE_MIB * 31 * 80 / (32 * 100)))
+if [[ -n $max_provisioned && -n $quota_mb && $worst -le $ceiling ]]; then
+    pass pool_holds_every_instance_at_its_quota_under_80_percent
+else
+    fail pool_holds_every_instance_at_its_quota_under_80_percent \
+        "max_provisioned=$max_provisioned quota_mb=$quota_mb: worst case $worst MiB, ceiling $ceiling MiB of $POOL_SIZE_MIB"
+fi
+
 rm -rf "$ROOT"
 
 echo
