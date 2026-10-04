@@ -423,8 +423,9 @@ host can do these:
 | API token | **custom scopes, domain read/write only**, for the certificate below. It never goes in the startup script |
 | Alerts | Monitoring: swap above 50%, memory above 90%, disk above 80%. Swap is the early warning for #113's cliff, where the box spawns but no longer serves |
 
-**2. First boot.** cloud-init runs the script as root; it takes several minutes,
-most of them building the ZFS module and installing Ghost. Before the first ssh,
+**2. First boot.** cloud-init runs the script as root. It takes about 30 minutes
+on 1 vCPU, nearly all of it building the ZFS module twice: once for the running
+kernel and once for the newer one the upgrade brings. Before the first ssh,
 compare the host key with the fingerprints cloud-init prints to the droplet's
 console. Then:
 

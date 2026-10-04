@@ -717,8 +717,10 @@ summary() {
     if [[ $NEEDS_REBOOT == 0 && ${#WARNINGS[@]} == 0 ]]; then
         date -u +%FT%TZ >/etc/goopy-bootstrap
         printf '\nComplete; recorded in /etc/goopy-bootstrap.\n'
-    else
+    elif [[ ${#WARNINGS[@]} -gt 0 ]]; then
         printf '\nINCOMPLETE: see the warnings above.\n'
+    else
+        printf '\nINCOMPLETE: a reboot is pending; reboot, then run this again.\n'
     fi
 }
 
