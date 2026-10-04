@@ -684,16 +684,17 @@ EOF
 # config names exists only once it is whole, and a failed run starts over.
 install_ghost() {
     step "Ghost $GHOST_VERSION"
-    local dir=$APP_DIR/ghost-$GHOST_VERSION partial home tgz=ghost-$GHOST_VERSION.tgz
+    local dir=$APP_DIR/ghost-$GHOST_VERSION tgz=ghost-$GHOST_VERSION.tgz
+    local partial=$dir.partial home=$dir.home
     if [[ -f $dir/index.js ]]; then
         say unchanged "$dir"
         return
     fi
-    partial=$dir.partial
-    rm -rf "$partial"
-    install -d -o "$GHOST_USER" -g "$GHOST_USER" "$partial"
-    home=$(mktemp -d)
-    chown "$GHOST_USER:$GHOST_USER" "$home"
+    # Both at fixed names beside the release, so whatever a failed run leaves
+    # (npm's and corepack's caches run to hundreds of MB) is cleared here, by
+    # the next run, instead of piling up in /tmp one run at a time.
+    rm -rf "$partial" "$home"
+    install -d -o "$GHOST_USER" -g "$GHOST_USER" "$partial" "$home"
     # As the unprivileged account: the install runs the dependencies' own build
     # scripts, third-party code with no business running as root. corepack
     # fetches the pnpm the release names; nothing is installed globally.
@@ -703,11 +704,16 @@ install_ghost() {
         "${as_ghost[@]}" npm pack --silent "ghost@$GHOST_VERSION" >/dev/null
         "${as_ghost[@]}" tar xzf "$tgz" --strip-components=1
         rm "$tgz"
-        "${as_ghost[@]}" corepack pnpm install --prod
+        # Exactly the dependency versions the release was tested with: a
+        # lockfile that does not match fails the run instead of being resolved
+        # afresh on the day.
+        "${as_ghost[@]}" corepack pnpm install --prod --frozen-lockfile
     )
     rm -rf "$home"
-    # Read-only to every instance: one that could write here would change the
-    # code every other instance runs.
+    # Root-owned so no instance can write here and change the code every other
+    # instance runs. That holds once instances run as GHOST_USER (#187): the
+    # parent, APP_DIR, is DEPLOY_USER's, so DEPLOY_USER could still swap this
+    # directory for a copy, and DEPLOY_USER is root-equivalent until #90.
     chown -R root:root "$partial"
     chmod -R a+rX "$partial"
     mv "$partial" "$dir"

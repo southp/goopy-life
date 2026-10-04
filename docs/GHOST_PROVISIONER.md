@@ -65,8 +65,10 @@ tar xzf ghost-${GHOST_VERSION}.tgz --strip-components=1 -C "${INSTALL_DIR}"
 # 3. Install Ghost's dependencies, with pnpm, from inside the install dir.
 #    corepack reads the `packageManager` field and fetches the exact pnpm the
 #    release was built with, so there is nothing to install globally.
+#    --frozen-lockfile installs exactly the versions in the release's lockfile,
+#    and fails rather than resolving new ones if it does not match.
 cd "${INSTALL_DIR}"
-corepack pnpm install --prod
+corepack pnpm install --prod --frozen-lockfile
 
 # 4. Confirm the layout the provisioner expects.
 ls index.js core node_modules package.json content/themes
