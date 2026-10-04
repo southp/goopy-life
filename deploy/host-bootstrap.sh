@@ -170,6 +170,8 @@ preflight() {
     # shellcheck source=/dev/null
     . /etc/os-release
     [[ ${VERSION_CODENAME:-} == trixie ]] || die "written for Debian 13 (trixie), found ${PRETTY_NAME:-unknown}"
+    # cloud-init does not promise one; gpg and snap look for it.
+    export HOME=${HOME:-/root}
     exec > >(tee -a /var/log/goopy-bootstrap.log) 2>&1
     printf '\n#### host-bootstrap %s\n' "$(date -u +%FT%TZ)"
 }
@@ -313,8 +315,18 @@ setup_swap() {
 
 # --- 3. Packages --------------------------------------------------------------
 
+# Adds `contrib` to every Components line that lacks it, in a deb822 sources
+# file. zfs-dkms lives there (OpenZFS's licence keeps it out of main), and
+# Debian's image enables main only.
+render_with_contrib() {
+    awk '/^Components:/ && !/(^|[[:space:]])contrib([[:space:]]|$)/ { $0 = $0 " contrib" } { print }' "$1"
+}
+
 setup_packages() {
     step "packages"
+    local sources=/etc/apt/sources.list.d/debian.sources
+    [[ -f $ROOT$sources ]] || die "$sources not found; expected Debian 13's deb822 sources"
+    put_file "$sources" 0644 < <(render_with_contrib "$ROOT$sources")
     "${APT[@]}" update
     "${APT[@]}" install ca-certificates curl gnupg
 

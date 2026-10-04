@@ -124,6 +124,33 @@ else
     fail ensure_line_appends_once "line present $count times, last CHANGED=$CHANGED"
 fi
 
+# --- render_with_contrib ------------------------------------------------------
+
+# Debian 13's stock sources, as the trixie image ships them: main only, which
+# has no zfs-dkms. Each Components line gains contrib once, and nothing else moves.
+cat >"$ROOT/debian.sources" <<'EOF'
+Types: deb
+URIs: http://deb.debian.org/debian
+Suites: trixie trixie-updates
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp
+
+Types: deb
+URIs: http://deb.debian.org/debian-security
+Suites: trixie-security
+Components: main contrib
+Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp
+EOF
+once=$(render_with_contrib "$ROOT/debian.sources")
+render_with_contrib "$ROOT/debian.sources" >"$ROOT/debian.sources.1"
+twice=$(render_with_contrib "$ROOT/debian.sources.1")
+expected=$(sed 's/^Components: main$/Components: main contrib/' "$ROOT/debian.sources")
+if [[ $once == "$expected" && $twice == "$once" ]]; then
+    pass sources_gain_contrib_once
+else
+    fail sources_gain_contrib_once "got:" "$once"
+fi
+
 # --- render_sshd --------------------------------------------------------------
 
 sshd=$(render_sshd)
