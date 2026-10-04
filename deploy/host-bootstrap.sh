@@ -286,12 +286,17 @@ setup_swap() {
     for spec in "${SWAPFILES[@]}"; do
         path=${spec%%:*}
         size=${spec#*:}
+        # Built aside and moved into place, so the file exists only once it is a
+        # swap file: a run that dies halfway leaves a .partial, never a file that
+        # every later run would take as done and fail to swapon.
         if [[ -e $path ]]; then
             say unchanged "$path"
         else
-            fallocate -l "$size" "$path"
-            chmod 600 "$path"
-            mkswap "$path" >/dev/null
+            rm -f "$path.partial"
+            fallocate -l "$size" "$path.partial"
+            chmod 600 "$path.partial"
+            mkswap "$path.partial" >/dev/null
+            mv "$path.partial" "$path"
             say created "$path ($size)"
         fi
         ensure_line /etc/fstab "$path none swap sw 0 0"
@@ -598,12 +603,20 @@ setup_zfs() {
         return
     fi
 
+    # The image cannot be built aside like a swap file: the pool records its
+    # path. So an image is judged by what is in it. One with a ZFS label holds a
+    # pool, and is imported, never replaced; one without is what a failed
+    # `zpool create` leaves behind, and is made again.
     if zpool list -H -o name "$POOL" >/dev/null 2>&1; then
         say unchanged "pool $POOL"
-    elif [[ -e $POOL_IMG ]]; then
+    elif [[ -e $POOL_IMG ]] && zdb -l "$POOL_IMG" >/dev/null 2>&1; then
         zpool import -d "$POOL_IMG" "$POOL"
         say imported "pool $POOL from $POOL_IMG"
     else
+        if [[ -e $POOL_IMG ]]; then
+            rm -f "$POOL_IMG"
+            say removed "$POOL_IMG (no pool in it: left by a failed run)"
+        fi
         fallocate -l "${POOL_SIZE_MIB}M" "$POOL_IMG"
         chmod 600 "$POOL_IMG"
         zpool create -O compression=on -O mountpoint="$APP_DIR/data" "$POOL" "$POOL_IMG"
