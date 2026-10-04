@@ -5,7 +5,7 @@ Two environments, two deployment models:
 | | Backend (`gl-serv`) | Frontend (Next.js) |
 |---|---|---|
 | **Dev** | Automatic — every merge to `trunk` that touches `backend/**` | Automatic — every merge to `trunk` that touches `frontend/**` |
-| **Prod** | Manual — `./deploy/deploy.sh user@droplet` | Vercel production branch (see below) |
+| **Prod** | Manual — `./deploy/deploy.sh user@host` | Vercel production branch (see below) |
 
 Dev is deliberately hands-off so `trunk` is always live somewhere; production
 stays a deliberate act.
@@ -15,37 +15,37 @@ stays a deliberate act.
 Neither host is hardcoded in the repo. Both are settings you can change without
 a code change:
 
-- **Backend dev droplet** — the `dev` [GitHub Environment](https://github.com/southp/goopy-life/settings/environments).
+- **Backend dev host** — the `dev` [GitHub Environment](https://github.com/southp/goopy-life/settings/environments).
 - **Frontend** — the Vercel project's Git integration (project `goopy-life-frontend-dev`).
 
 ## Before the first deploy
 
-The `deploy/` directory contains all artifacts needed to run the service on the droplet.
+The `deploy/` directory contains all artifacts needed to run the service on the host.
 Two things are set up by hand, once: the cross-compile toolchain on your machine,
-and the droplet itself.
+and the host itself.
 
 ### Cross-compilation setup (one-time, on macOS)
 
-The droplet runs x86_64 Linux. The musl target comes with the pinned toolchain (`backend/rust-toolchain.toml`); install `cargo-zigbuild` (uses [Zig](https://ziglang.org/) as the cross-linker — no extra toolchain taps required). Both link the production binary, so they are pinned, and `deploy/deploy.sh` refuses to run with other versions:
+The host runs x86_64 Linux. The musl target comes with the pinned toolchain (`backend/rust-toolchain.toml`); install `cargo-zigbuild` (uses [Zig](https://ziglang.org/) as the cross-linker — no extra toolchain taps required). Both link the production binary, so they are pinned, and `deploy/deploy.sh` refuses to run with other versions:
 
 ```bash
 cargo install --locked cargo-zigbuild@0.22.3
 brew install zig@0.16
 ```
 
-### Droplet setup (one-time)
+### Host setup (one-time)
 
 The service runs as a dedicated `goopy` account, which is also the account you deploy as — the sudoers drop-in below names it explicitly, so deploying as any other user fails with a password prompt.
 
 ```bash
 # 0. Create the service account and authorise your deploy key for it
 sudo useradd --system --create-home --shell /bin/bash goopy
-ssh-copy-id goopy@<droplet>
+ssh-copy-id goopy@<host>
 
 # 1. From your machine, as an admin with password sudo: install the sudoers
 #    drop-in and the nginx cache zone. No deploy installs these — the drop-in
 #    grants the deploy its rights — and every deploy checks the drop-in.
-./deploy/admin-apply.sh <admin>@<droplet> <env>
+./deploy/admin-apply.sh <admin>@<host> <env>
 
 # 2. Set the ZFS pool mountpoint to match base_dir in config.toml (default: /opt/goopy-life/data).
 #    gl-serv creates/destroys child datasets via sudo (sudoers rules restrict to zpool_ghost/*).
@@ -58,7 +58,7 @@ sudo zfs set mountpoint=/opt/goopy-life/data zpool_ghost
 sudo install -d -o goopy -g goopy /opt/goopy-life /opt/goopy-life/bin
 ```
 
-There is no step for `config.toml`, the systemd unit or the api nginx site: they are version-controlled — the unit at [`deploy/gl-serv.service`](../deploy/gl-serv.service), the rest per environment under [`deploy/config/`](../deploy/config/) — and installed by the deploy itself. After the first deploy, `./deploy/check-host.sh goopy@<droplet> <env>` confirms the host matches the repo. See [Host artifacts](#host-artifacts).
+There is no step for `config.toml`, the systemd unit or the api nginx site: they are version-controlled — the unit at [`deploy/gl-serv.service`](../deploy/gl-serv.service), the rest per environment under [`deploy/config/`](../deploy/config/) — and installed by the deploy itself. After the first deploy, `./deploy/check-host.sh goopy@<host> <env>` confirms the host matches the repo. See [Host artifacts](#host-artifacts).
 
 ## Backend — automated dev deploys
 
@@ -75,7 +75,7 @@ and the nginx cache zone are applied by an admin with `deploy/admin-apply.sh`
 (see [Applying the root-owned artifacts](#applying-the-root-owned-artifacts)) —
 the deploy checks the sudoers drop-in and fails until that has run. The ZFS pool
 is still one-time manual setup (see the
-[droplet setup](#droplet-setup-one-time) steps).
+[host setup](#host-setup-one-time) steps).
 
 ### One-time setup
 
@@ -85,7 +85,7 @@ is still one-time manual setup (see the
 ssh-keygen -t ed25519 -N '' -f ~/.ssh/goopy-dev-deploy -C 'github-actions dev deploy'
 ```
 
-**2. Authorise it on the dev droplet** for the `goopy` service account — the
+**2. Authorise it on the dev host** for the `goopy` service account — the
 same account `deploy/sudoers.goopy` grants the `install` and
 `systemctl restart gl-serv` rules to:
 
@@ -93,9 +93,9 @@ same account `deploy/sudoers.goopy` grants the `install` and
 ssh-copy-id -i ~/.ssh/goopy-dev-deploy.pub goopy@<dev-host>
 ```
 
-**3. Capture the droplet's host key** so the runner can verify what it connects
+**3. Capture the dev host's SSH key** so the runner can verify what it connects
 to (the workflow pins `StrictHostKeyChecking yes` — an unverified key would let
-anyone winning a DNS race collect a `sudo install` on the droplet):
+anyone winning a DNS race collect a `sudo install` on the host):
 
 ```bash
 ssh-keyscan -t ed25519 <dev-host>
@@ -107,7 +107,7 @@ ssh-keyscan -t ed25519 <dev-host>
 |---|---|---|
 | Secret | `DEV_SSH_PRIVATE_KEY` | contents of `~/.ssh/goopy-dev-deploy` (the private half, including the BEGIN/END lines) |
 | Secret | `DEV_SSH_KNOWN_HOSTS` | the `ssh-keyscan` output from step 3 |
-| Variable | `DEV_DEPLOY_HOST` | dev droplet hostname or IP |
+| Variable | `DEV_DEPLOY_HOST` | dev host's hostname or IP |
 | Variable | `DEV_DEPLOY_USER` | `goopy` |
 | Variable | `DEV_SSH_PORT` | optional; defaults to `22` |
 
@@ -120,7 +120,7 @@ target from environment settings, not from the YAML.
 ### Re-running a deploy
 
 *Actions → Deploy backend to dev → Run workflow*. Useful after rotating the
-deploy key or rebuilding the droplet, and avoids an empty commit.
+deploy key or rebuilding the host, and avoids an empty commit.
 
 ### Verifying a deploy
 
@@ -371,18 +371,18 @@ to diff against.
 ## Manual production deploy
 
 ```bash
-./deploy/deploy.sh goopy@droplet prod [ssh-port]
+./deploy/deploy.sh goopy@<host> prod [ssh-port]
 ```
 
 Cross-compiles `gl-serv` and `gl-cli` to static musl binaries with
 `cargo-zigbuild`, uploads them with `deploy/config/prod.toml` and production's
 [host artifacts](#host-artifacts), and restarts the service. Run
-`./deploy/check-host.sh goopy@droplet prod` first to see what it is about to
+`./deploy/check-host.sh goopy@<host> prod` first to see what it is about to
 replace.
 
 A deploy makes about a dozen `scp`/`ssh` calls. CI shares one connection
 between them (`ControlMaster` in the workflow's ssh config); to do the same on
-your machine, add to the droplet's entry in `~/.ssh/config`:
+your machine, add to the host's entry in `~/.ssh/config`:
 
 ```
 ControlMaster auto
@@ -412,7 +412,7 @@ and pass without having verified anything. `push-binary.sh` rejects
 
 ## Production
 
-Production is one droplet serving `goopy.life`: the api at `api.goopy.life`,
+Production is one host serving `goopy.life`: the api at `api.goopy.life`,
 instances at `{slug}.goopy.life`. Nothing deploys it automatically. Its files
 are `deploy/config/prod.*`.
 
@@ -497,7 +497,7 @@ hand**, following the
 Each environment's configuration is version-controlled in
 [`deploy/config/`](../deploy/config/) and installed at
 `/opt/goopy-life/config.toml` by the deploy. **The deploy is the only writer of
-that file** — a hand-edit on the droplet is overwritten by the next run, so
+that file** — a hand-edit on the host is overwritten by the next run, so
 changes go through a commit like any other.
 
 | | |
@@ -505,9 +505,9 @@ changes go through a commit like any other.
 | `deploy/config/dev.toml` | shipped automatically on every merge to `trunk` |
 | `deploy/config/prod.toml` | shipped by the manual production deploy |
 
-This exists because the file used to live only on the droplet. It drifted:
+This exists because the file used to live only on the host. It drifted:
 #63 replaced the flat `provisioner_kind` key with a `[provisioner]` table, the
-droplet's copy kept the old spelling, and the next deploy to read it crash-looped
+host's copy kept the old spelling, and the next deploy to read it crash-looped
 gl-serv with `missing field provisioner` while nginx served 502.
 
 Two rules keep it that way:
@@ -567,7 +567,7 @@ how it is reached, and it is the only writer of each (#139):
 | `deploy/config/<env>.api.nginx` | `/etc/nginx/sites-available/gl-serv-api`, linked from `sites-enabled` | the api site |
 | `deploy/sudoers.goopy` | `/etc/sudoers.d/goopy` | **compared, never installed** — see below |
 
-They used to be tracked and never installed, and the dev droplet ran an api
+They used to be tracked and never installed, and the dev host ran an api
 site named `api.goopy.life` that served `api.southp.dev` from a different
 certificate — a file with the right name and the wrong contents, which nothing
 noticed.
@@ -595,7 +595,7 @@ needs it.
 
 This is also why a host's *first* deploy never creates the drop-in: the deploy
 needs its rules before it can install anything. A new host gets it from
-`admin-apply.sh` during the [droplet setup](#droplet-setup-one-time),
+`admin-apply.sh` during the [host setup](#host-setup-one-time),
 and the first deploy is what verifies it.
 
 Two more things stop a deploy, because it cannot fix either: a file in
@@ -641,7 +641,7 @@ sudo for every account) and arrives by an atomic rename; anything rejected after
 the fact is put back to the previous copy.
 
 When to run it: after merging a change to either file, **before** the deploy
-that follows — for the dev droplet that deploy starts on merge, so run it just
+that follows — for the dev host that deploy starts on merge, so run it just
 before merging. Then `check-host.sh` confirms the host matches.
 
 ### Migrating a host from before #139
@@ -661,7 +661,7 @@ carries it, and `check-host.sh` should report the host clean.
 
 `deploy/push-binary.sh` supports `DRY_RUN=1`, which prints the `scp`/`ssh`
 commands instead of running them. The test suite drives it that way — no
-droplet, network or key needed:
+host, network or key needed:
 
 ```bash
 ./deploy/tests/push-binary.test.sh

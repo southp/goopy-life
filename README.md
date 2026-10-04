@@ -57,5 +57,5 @@ instances and then delete that directory. Deleting it first leaves their process
 ## Docs
 
 - [Development](docs/DEVELOPMENT.md) — architecture, crates, configuration reference
-- [Deployment](docs/DEPLOYMENT.md) — the droplets, Vercel, and production
+- [Deployment](docs/DEPLOYMENT.md) — the hosts, Vercel, and production
 - [Ghost provisioner](docs/GHOST_PROVISIONER.md) — preparing and upgrading the base Ghost install
