@@ -462,8 +462,9 @@ sudo certbot renew --dry-run                 # renewal works, and reloads nginx
 
 Then the [first deploy](#first-deploy).
 
-**Running the script again** converges the host and changes nothing that
-already matches; every step prints `unchanged`, `updated` or `created`. Once the
+**Running the script again** converges the host: files that already match are
+not rewritten, every setting is applied again, and each step prints
+`unchanged`, `updated` or `created`. That also finishes a run that died halfway. Once the
 admin account has a password, sudo needs a terminal:
 
 ```bash

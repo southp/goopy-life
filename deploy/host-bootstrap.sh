@@ -15,9 +15,11 @@
 #        scp deploy/host-bootstrap.sh <admin>@<host>:/tmp/
 #        ssh -t <admin>@<host> sudo bash /tmp/host-bootstrap.sh
 #
-# Every step checks before it changes anything, so a second run on a host that
-# is up to date changes nothing. Each step prints `unchanged`, `updated` or
-# `created`; both runs append to /var/log/goopy-bootstrap.log.
+# Files that already match are not rewritten, and every setting is applied
+# again (grub, sysctl, sshd, firewall, nginx...), so a re-run also finishes a
+# run that died between writing a file and applying it. Each step prints
+# `unchanged`, `updated` or `created`; every run appends to
+# /var/log/goopy-bootstrap.log.
 #
 # NO SECRETS IN HERE. User data is served by the provider's metadata endpoint
 # (169.254.169.254) to any process on the host, for its whole life, and cannot
@@ -278,6 +280,20 @@ GRUB_CMDLINE_LINUX_DEFAULT="\$GRUB_CMDLINE_LINUX_DEFAULT zswap.enabled=1 zswap.c
 EOF
 }
 
+# zswap_wants <compressor> <zpool> <max_pool_percent> <enabled>: given the live
+# values, prints "<parameter> <value>" for each one that differs from what #113
+# measured, `enabled` last, so it is switched on with the rest already right.
+zswap_wants() {
+    local have=("$@") i
+    local names=(compressor zpool max_pool_percent enabled)
+    local want=("$ZSWAP_COMPRESSOR" "$ZSWAP_ZPOOL" "$ZSWAP_MAX_POOL_PERCENT" Y)
+    for i in 0 1 2 3; do
+        if [[ ${have[$i]:-} != "${want[$i]}" ]]; then
+            printf '%s %s\n' "${names[$i]}" "${want[$i]}"
+        fi
+    done
+}
+
 # First, so that everything after it, the ZFS module build and Ghost's install
 # among them, already has the swap.
 setup_swap() {
@@ -306,20 +322,25 @@ setup_swap() {
     done
 
     put_file /etc/default/grub.d/90-goopy-zswap.cfg 0644 < <(render_zswap_grub)
-    if [[ $CHANGED == 1 ]]; then
-        update-grub
-    fi
-    # The command line holds from the next boot; this makes it true now.
-    if [[ $(cat "$params/enabled" 2>/dev/null) != Y ]]; then
-        if { echo "$ZSWAP_COMPRESSOR" >"$params/compressor" \
-            && echo "$ZSWAP_ZPOOL" >"$params/zpool" \
-            && echo "$ZSWAP_MAX_POOL_PERCENT" >"$params/max_pool_percent" \
-            && echo Y >"$params/enabled"; } 2>/dev/null; then
-            say updated "zswap enabled"
+    # Every run, not only when the snippet changed: a run that died here after
+    # writing it would otherwise leave a boot without zswap, unreported.
+    update-grub
+
+    # The command line holds from the next boot; this makes it true now, and
+    # corrects a zswap that is on with other settings than the ones measured.
+    local name value touched=0
+    while read -r name value; do
+        touched=1
+        if echo "$value" >"$params/$name" 2>/dev/null; then
+            say updated "zswap $name = $value"
         else
-            warn "zswap could not be enabled before a reboot"
+            warn "zswap $name could not be set to $value before a reboot"
             NEEDS_REBOOT=1
         fi
+    done < <(zswap_wants "$(cat "$params/compressor" 2>/dev/null)" "$(cat "$params/zpool" 2>/dev/null)" \
+        "$(cat "$params/max_pool_percent" 2>/dev/null)" "$(cat "$params/enabled" 2>/dev/null)")
+    if [[ $touched == 0 ]]; then
+        say unchanged "zswap ($ZSWAP_COMPRESSOR, $ZSWAP_ZPOOL, $ZSWAP_MAX_POOL_PERCENT%, on)"
     fi
 }
 
@@ -398,13 +419,16 @@ setup_ssh() {
     [[ -s $home/.ssh/authorized_keys ]] || die "$ADMIN_USER has no ssh key; leaving root login on"
 
     put_file "$file" 0644 < <(render_sshd)
-    if [[ $CHANGED == 1 ]]; then
-        if ! sshd -t; then
+    # Checked and reloaded on every run, like every apply step here: a run that
+    # died between writing a file and applying it is finished by the next one.
+    if ! sshd -t; then
+        if [[ $CHANGED == 1 ]]; then
             rm -f "$file"
             die "sshd rejected $file; removed it"
         fi
-        systemctl reload ssh
+        die "sshd rejects its configuration; see sshd -t"
     fi
+    systemctl reload ssh
 }
 
 setup_auto_updates() {
@@ -452,9 +476,7 @@ harden_host() {
     step "kernel, resolver, journal, mail"
     local file=/etc/sysctl.d/90-goopy.conf
     put_file "$file" 0644 < <(render_sysctl)
-    if [[ $CHANGED == 1 ]]; then
-        sysctl -q -p "$file"
-    fi
+    sysctl -q -p "$file"
 
     # systemd-resolved answers LLMNR on 0.0.0.0:5355 by default, to the internet.
     put_file /etc/systemd/resolved.conf.d/90-goopy.conf 0644 <<EOF
@@ -462,18 +484,14 @@ harden_host() {
 LLMNR=no
 MulticastDNS=no
 EOF
-    if [[ $CHANGED == 1 ]]; then
-        systemctl restart systemd-resolved
-    fi
+    systemctl reload-or-restart systemd-resolved
 
     put_file /etc/systemd/journald.conf.d/90-goopy.conf 0644 <<EOF
 [Journal]
 Storage=persistent
 SystemMaxUse=500M
 EOF
-    if [[ $CHANGED == 1 ]]; then
-        systemctl restart systemd-journald
-    fi
+    systemctl reload-or-restart systemd-journald
 
     # Some cloud images ship exim listening on :25, and nothing here sends mail. Masked rather than removed, so nothing that depends on a mail
     # transport goes with it.
@@ -538,10 +556,10 @@ setup_firewall() {
     systemctl enable nftables
     # Never `restart`: Debian's unit stops with `nft flush ruleset`, which would
     # take fail2ban's table with it.
-    if ! systemctl is-active -q nftables; then
-        systemctl start nftables
-    elif [[ $CHANGED == 1 ]]; then
+    if systemctl is-active -q nftables; then
         systemctl reload nftables
+    else
+        systemctl start nftables
     fi
 }
 
@@ -549,7 +567,6 @@ setup_firewall() {
 
 setup_nginx() {
     step "nginx"
-    local changed
     # A request for a name no site claims, a scan of the bare IP for one, gets
     # no answer at all: no Debian welcome page, no site picked as the default.
     put_file /etc/nginx/sites-available/00-default-deny 0644 <<'EOF'
@@ -568,20 +585,17 @@ server {
     ssl_reject_handshake on;
 }
 EOF
-    changed=$CHANGED
     if [[ ! -L /etc/nginx/sites-enabled/00-default-deny ]]; then
         ln -s /etc/nginx/sites-available/00-default-deny /etc/nginx/sites-enabled/00-default-deny
-        changed=1
     fi
     if [[ -e /etc/nginx/sites-enabled/default || -L /etc/nginx/sites-enabled/default ]]; then
         rm -f /etc/nginx/sites-enabled/default
         say removed /etc/nginx/sites-enabled/default
-        changed=1
     fi
-    if [[ $changed == 1 ]]; then
-        nginx -t || die "nginx rejected 00-default-deny"
-        systemctl reload nginx
+    if ! nginx -t; then
+        die "nginx rejects its configuration; see nginx -t"
     fi
+    systemctl reload nginx
 }
 
 # --- 8. ZFS pool and the service directory ------------------------------------

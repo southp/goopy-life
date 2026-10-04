@@ -221,6 +221,20 @@ else
     fail zswap_is_appended_to_the_images_command_line "got: $got"
 fi
 
+# --- zswap_wants --------------------------------------------------------------
+
+# A zswap that is on is not enough: it must be on with what #113 measured, and
+# switched on only after the rest is right.
+right=$(zswap_wants lzo zsmalloc 25 Y)
+wrong=$(zswap_wants zstd zsmalloc 25 Y)
+off=$(zswap_wants "" "" "" "")
+if [[ -z $right && $wrong == "compressor lzo" \
+    && $off == $'compressor lzo\nzpool zsmalloc\nmax_pool_percent 25\nenabled Y' ]]; then
+    pass zswap_corrects_each_setting_and_enables_last
+else
+    fail zswap_corrects_each_setting_and_enables_last "right: '$right'" "wrong: '$wrong'" "off: '$off'"
+fi
+
 # --- The pool against prod.toml -----------------------------------------------
 
 # The worst case, every provisioned instance at its quota, must leave the pool
