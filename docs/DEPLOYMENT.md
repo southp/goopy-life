@@ -420,7 +420,7 @@ are `deploy/config/prod.*`.
 | A firewall in front: inbound 22, 80, 443 only | the second layer; the host's own nftables says the same | a cloud firewall |
 | DNS: `api.goopy.life` and **`*.goopy.life`** → that IP, and a CAA record allowing only `letsencrypt.org` | every instance is served under the wildcard | Networking → Domains |
 | A DNS API token, as narrow as the DNS host allows | the wildcard certificate's DNS-01 challenge (below). Never in the user data | a custom-scoped token, domain read/write only |
-| Alerts: swap above 50%, memory above 90%, disk above 80% | swap is the early warning for #113's cliff, where the host spawns but no longer serves | Monitoring, enabled at creation, plus alert policies |
+| Alerts: 5-minute load above 3 for 10 min; disk above 80% for 30 min | load is the early warning for #113's cliff, where the host spawns but no longer serves: a thrashing host's processes stall on swap I/O, which load counts. Not memory: at capacity RAM is full by design, with zswap and swap absorbing the rest. Starting points; tune on real traffic | Monitoring, enabled at creation, then **Create Resource Alert** (it offers no swap metric) |
 
 **2. First boot.** cloud-init runs the script as root. It takes about 30 minutes
 on 1 vCPU, nearly all of it building the ZFS module twice: once for the running
