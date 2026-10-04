@@ -414,7 +414,7 @@ are `deploy/config/prod.*`.
 | What the host needs | Why | On DigitalOcean today |
 |---|---|---|
 | Debian 13, x86_64, 1 vCPU / 2 GB / 50 GB | what #113 measured the caps on | a droplet, named `goopy-prod` |
-| [`deploy/host-bootstrap.sh`](../deploy/host-bootstrap.sh) as cloud-init user data, whole and unedited | it sets up everything else | **Startup scripts**, under Additional Options |
+| [`deploy/host-bootstrap.sh`](../deploy/host-bootstrap.sh) as cloud-init user data, exactly as committed (its settings are changed in git) | it sets up everything else | **Startup scripts**, under Additional Options |
 | Your ssh key, given at creation | the script copies root's keys to both accounts; it is the only way in | **Authentication → SSH Key** |
 | A public IP that outlives the machine | DNS points at it, so a rebuilt host takes over without a DNS change | a reserved IP |
 | A firewall in front: inbound 22, 80, 443 only | the second layer; the host's own nftables says the same | a cloud firewall |
@@ -451,7 +451,8 @@ free -m; cat /proc/swaps; cat /sys/module/zswap/parameters/enabled; zpool list
 
 # c. The wildcard certificate, at the path every nginx site names. goopy.life's
 #    DNS is at DigitalOcean today, hence its plugin; another DNS host means its
-#    own plugin (DNS_PLUGIN in the script) and credentials.
+#    own plugin (DNS_PLUGIN in the script's settings, changed in git) and
+#    credentials.
 sudo install -m 600 /dev/null /etc/letsencrypt/digitalocean.ini
 sudoedit /etc/letsencrypt/digitalocean.ini   # dns_digitalocean_token = <token>
 sudo certbot certonly --dns-digitalocean \

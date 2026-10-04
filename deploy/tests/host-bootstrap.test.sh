@@ -41,6 +41,16 @@ else
     fail bootstrap_does_nothing_when_sourced "$out"
 fi
 
+# The settings come from the committed file only. Taken from the environment, a
+# re-run under sudo would fall back to the defaults and lock out an admin
+# account the first boot was given another name for.
+got=$(ADMIN_USER=alice DNS_PLUGIN=dns-other GOOPY_BOOTSTRAP_SOURCED=1 bash -c "source '$SCRIPT'; echo \$ADMIN_USER \$DNS_PLUGIN")
+if [[ $got == "southp dns-digitalocean" ]]; then
+    pass settings_ignore_the_environment
+else
+    fail settings_ignore_the_environment "got: $got"
+fi
+
 ROOT=$(mktemp -d)
 export ROOT
 export GOOPY_BOOTSTRAP_SOURCED=1

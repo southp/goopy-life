@@ -36,21 +36,26 @@
 set -euo pipefail
 
 # --- Settings -----------------------------------------------------------------
+#
+# Changed here, in git, and never by hand in the user-data box or through the
+# environment: every re-run is the committed file, and has to agree with the
+# first boot. A re-run with another ADMIN_USER would create that account and
+# rewrite sshd's AllowUsers, locking the first one out.
 
 # The admin account: password sudo, once a password is set (see bootstrap_sudo).
-ADMIN_USER=${ADMIN_USER:-southp}
+ADMIN_USER=southp
 # The service and deploy account; deploy/sudoers.goopy names it.
-DEPLOY_USER=${DEPLOY_USER:-goopy}
+DEPLOY_USER=goopy
 # The account Ghost instances run as once #187 lands: no shell, no home, no sudo.
-GHOST_USER=${GHOST_USER:-goopy-ghost}
+GHOST_USER=goopy-ghost
 # Shown in every shell prompt, so the two hosts cannot be mistaken for each other.
-ENV_LABEL=${ENV_LABEL:-prod}
+ENV_LABEL=prod
 # Only for the certificate check and the instructions printed at the end.
-DOMAIN=${DOMAIN:-goopy.life}
+DOMAIN=goopy.life
 # The certbot plugin for wherever DOMAIN's DNS is hosted: a wildcard certificate
 # needs the DNS-01 challenge, which writes a record through the DNS host's API.
 # goopy.life's DNS is at DigitalOcean today.
-DNS_PLUGIN=${DNS_PLUGIN:-dns-digitalocean}
+DNS_PLUGIN=dns-digitalocean
 
 # Ghost 6.63.0 requires Node ^22.23.1 || ^24.20.0, and nothing checks it before
 # an instance boots (docs/GHOST_PROVISIONER.md). Pinned to what dev runs.
