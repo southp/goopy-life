@@ -8,16 +8,18 @@
 #      droplet. cloud-init runs it once, on first boot; the output lands in
 #      /var/log/cloud-init-output.log and `cloud-init status --long` says
 #      whether it finished.
-#   2. Again at any time, to converge a host or finish a first run:
+#   2. Again at any time, to converge a host or finish a first run. Copied
+#      over rather than piped in, so that sudo has a terminal to ask on:
 #
-#        ssh <admin>@<host> sudo bash -s < deploy/host-bootstrap.sh
+#        scp deploy/host-bootstrap.sh <admin>@<host>:/tmp/
+#        ssh -t <admin>@<host> sudo bash /tmp/host-bootstrap.sh
 #
 # Every step checks before it changes anything, so a second run on a host that
 # is up to date changes nothing. Each step prints `unchanged`, `updated` or
 # `created`; both runs append to /var/log/goopy-bootstrap.log.
 #
 # NO SECRETS IN HERE. Whatever is pasted into the Startup scripts box is served
-# by the metadata endpoint (169.254.169.254) to any process on the droplet, for
+# by the metadata endpoint (169.254.169.254) to any process on the host, for
 # its whole life, and cannot be edited afterwards. Passwords and API tokens are
 # set by hand after the first boot; the summary at the end lists what is left.
 #
@@ -40,6 +42,8 @@ DEPLOY_USER=${DEPLOY_USER:-goopy}
 GHOST_USER=${GHOST_USER:-goopy-ghost}
 # Shown in every shell prompt, so the two hosts cannot be mistaken for each other.
 ENV_LABEL=${ENV_LABEL:-prod}
+# Only for the certificate check and the instructions printed at the end.
+DOMAIN=${DOMAIN:-goopy.life}
 
 # Ghost 6.63.0 requires Node ^22.23.1 || ^24.20.0, and nothing checks it before
 # an instance boots (docs/GHOST_PROVISIONER.md). Pinned to what dev runs.
@@ -49,6 +53,8 @@ NODESOURCE_KEY_URL=https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
 NODESOURCE_KEY_FPR=6F71F525282841EEDAF851B42F59B5F99B1BE0B4
 
 APP_DIR=/opt/goopy-life
+# prod.toml's [provisioner] version and source_dir name the same release.
+GHOST_VERSION=6.63.0
 
 # 4 GB of swap with zswap is what the capacity caps of 20 were measured on
 # (#113); a stock 2 GB droplet serves about 10, and nothing errors at 11. Two
@@ -75,6 +81,7 @@ BASE_PACKAGES=(
     nginx
     nodejs
     zfs-dkms zfsutils-linux linux-headers-amd64
+    snapd
 )
 
 ROOT=${ROOT:-}
@@ -588,6 +595,76 @@ setup_zfs() {
     fi
 }
 
+# --- 9. certbot ---------------------------------------------------------------
+
+# Debian 13 packages certbot but not its DigitalOcean DNS plugin, so both come
+# from snap, as on dev. The certificate itself needs a DigitalOcean API token,
+# which cannot pass through here; requesting it is a manual step (see summary).
+setup_certbot() {
+    step "certbot"
+    snap wait system seed.loaded
+    if snap list certbot >/dev/null 2>&1; then
+        say unchanged "snap certbot"
+    else
+        snap install --classic certbot
+        say created "snap certbot"
+    fi
+    snap set certbot trust-plugin-with-root=ok
+    if snap list certbot-dns-digitalocean >/dev/null 2>&1; then
+        say unchanged "snap certbot-dns-digitalocean"
+    else
+        snap install certbot-dns-digitalocean
+        say created "snap certbot-dns-digitalocean"
+    fi
+    if ! snap connections certbot | grep -qF certbot-dns-digitalocean; then
+        snap connect certbot:plugin certbot-dns-digitalocean
+    fi
+    ln -sfn /snap/bin/certbot /usr/bin/certbot
+
+    put_file /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh 0755 <<'EOF'
+#!/bin/sh
+# Written by deploy/host-bootstrap.sh: a renewed certificate reaches nginx.
+systemctl reload nginx
+EOF
+}
+
+# --- 10. Ghost base install ---------------------------------------------------
+
+# The shared install every instance links against (docs/GHOST_PROVISIONER.md).
+# Built under a .partial name and renamed when complete, so the directory the
+# config names exists only once it is whole, and a failed run starts over.
+install_ghost() {
+    step "Ghost $GHOST_VERSION"
+    local dir=$APP_DIR/ghost-$GHOST_VERSION partial home tgz=ghost-$GHOST_VERSION.tgz
+    if [[ -f $dir/index.js ]]; then
+        say unchanged "$dir"
+        return
+    fi
+    partial=$dir.partial
+    rm -rf "$partial"
+    install -d -o "$GHOST_USER" -g "$GHOST_USER" "$partial"
+    home=$(mktemp -d)
+    chown "$GHOST_USER:$GHOST_USER" "$home"
+    # As the unprivileged account: the install runs the dependencies' own build
+    # scripts, third-party code with no business running as root. corepack
+    # fetches the pnpm the release names; nothing is installed globally.
+    local as_ghost=(runuser -u "$GHOST_USER" -- env HOME="$home" COREPACK_ENABLE_DOWNLOAD_PROMPT=0)
+    (
+        cd "$partial"
+        "${as_ghost[@]}" npm pack --silent "ghost@$GHOST_VERSION" >/dev/null
+        "${as_ghost[@]}" tar xzf "$tgz" --strip-components=1
+        rm "$tgz"
+        "${as_ghost[@]}" corepack pnpm install --prod
+    )
+    rm -rf "$home"
+    # Read-only to every instance: one that could write here would change the
+    # code every other instance runs.
+    chown -R root:root "$partial"
+    chmod -R a+rX "$partial"
+    mv "$partial" "$dir"
+    say created "$dir"
+}
+
 # --- Finish -------------------------------------------------------------------
 
 summary() {
@@ -597,6 +674,8 @@ summary() {
     say zswap "$(cat /sys/module/zswap/parameters/enabled 2>/dev/null || echo unknown) (expect Y)"
     say pool "$(zpool list -H -o name,size,health "$POOL" 2>/dev/null || echo missing)"
     say node "$(node --version 2>/dev/null || echo missing)"
+    say ghost "$(node -p "require('$APP_DIR/ghost-$GHOST_VERSION/package.json').engines.node" 2>/dev/null \
+        | sed 's/^/requires node /' || echo missing)"
     if nft list table inet goopy >/dev/null 2>&1; then
         say firewall "inet goopy loaded"
     else
@@ -617,8 +696,18 @@ summary() {
     if [[ $NEEDS_REBOOT == 1 ]]; then
         printf '  - sudo reboot, then run this script again\n'
     fi
+    if [[ ! -e /etc/letsencrypt/live/$DOMAIN/fullchain.pem ]]; then
+        printf '  - the *.%s certificate: a DigitalOcean token in /etc/letsencrypt/digitalocean.ini, then certbot\n' "$DOMAIN"
+    fi
     printf '  - ./deploy/admin-apply.sh %s@<host> %s, then ./deploy/deploy.sh %s@<host> %s\n' \
         "$ADMIN_USER" "$ENV_LABEL" "$DEPLOY_USER" "$ENV_LABEL"
+
+    if [[ $NEEDS_REBOOT == 0 && ${#WARNINGS[@]} == 0 ]]; then
+        date -u +%FT%TZ >/etc/goopy-bootstrap
+        printf '\nComplete; recorded in /etc/goopy-bootstrap.\n'
+    else
+        printf '\nINCOMPLETE: see the warnings above.\n'
+    fi
 }
 
 main() {
@@ -632,6 +721,8 @@ main() {
     setup_firewall
     setup_nginx
     setup_zfs
+    setup_certbot
+    install_ghost
     summary
 }
 

@@ -5,7 +5,7 @@
 #
 # The script is sourced with GOOPY_BOOTSTRAP_SOURCED=1, so nothing it would do
 # to a host runs, and its helpers and renderers are exercised against a scratch
-# ROOT. The parts that only a real droplet can answer (apt, ZFS, sshd, nft)
+# ROOT. The parts that only a real host can answer (apt, ZFS, sshd, nft)
 # are not covered here; the first boot of a throwaway droplet is their test.
 set -uo pipefail
 
@@ -209,6 +209,21 @@ if [[ -n $max_provisioned && -n $quota_mb && $worst -le $ceiling ]]; then
 else
     fail pool_holds_every_instance_at_its_quota_under_80_percent \
         "max_provisioned=$max_provisioned quota_mb=$quota_mb: worst case $worst MiB, ceiling $ceiling MiB of $POOL_SIZE_MIB"
+fi
+
+# --- Ghost against prod.toml --------------------------------------------------
+
+# The provisioner links every instance against source_dir; a bootstrap that
+# installs a different release leaves it pointing at nothing.
+source_dir=$(sed -nE 's/^source_dir[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' "$toml")
+version=$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' "$toml")
+node_bin=$(sed -nE 's/^node_bin[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' "$toml")
+if [[ $source_dir == "$APP_DIR/ghost-$GHOST_VERSION" && $version == "$GHOST_VERSION" && $node_bin == /usr/bin/node ]]; then
+    pass ghost_install_is_the_one_prod_toml_names
+else
+    fail ghost_install_is_the_one_prod_toml_names \
+        "prod.toml: source_dir=$source_dir version=$version node_bin=$node_bin" \
+        "bootstrap: $APP_DIR/ghost-$GHOST_VERSION, node from apt at /usr/bin/node"
 fi
 
 rm -rf "$ROOT"
