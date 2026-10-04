@@ -139,6 +139,44 @@ else
     fail sshd_keeps_root_and_passwords_out_and_names_both_accounts "missing:$missing"
 fi
 
+# --- render_nftables ----------------------------------------------------------
+
+# A `flush ruleset` would take fail2ban's table, and its bans, on every reload.
+rules=$(render_nftables 995 994 33)
+if grep -qE '^[[:space:]]*flush[[:space:]]+ruleset' <<<"$rules"; then
+    fail nftables_leaves_other_tables_alone "the ruleset flushes everything"
+else
+    pass nftables_leaves_other_tables_alone
+fi
+
+problems=""
+if ! grep -qF 'policy drop;' <<<"$(grep -A1 'chain input' <<<"$rules")"; then
+    problems+=" input-not-drop"
+fi
+if ! grep -qF 'tcp dport { 22, 80, 443 } accept' <<<"$rules"; then
+    problems+=" ports"
+fi
+if grep -qE 'dport[^;]*3000' <<<"$rules"; then
+    problems+=" 3000-open"
+fi
+if ! grep -qF 'ip daddr 169.254.169.254 meta skuid { 995, 994, 33 } reject' <<<"$rules"; then
+    problems+=" metadata"
+fi
+if [[ -z $problems ]]; then
+    pass nftables_opens_only_ssh_and_web_and_keeps_services_off_the_metadata_endpoint
+else
+    fail nftables_opens_only_ssh_and_web_and_keeps_services_off_the_metadata_endpoint "problems:$problems"
+fi
+
+# --- render_sysctl ------------------------------------------------------------
+
+sysctl=$(render_sysctl)
+if grep -qxF 'kernel.yama.ptrace_scope = 1' <<<"$sysctl" && ! grep -qE '^vm\.' <<<"$sysctl"; then
+    pass sysctl_restricts_ptrace_and_leaves_memory_tuning_alone
+else
+    fail sysctl_restricts_ptrace_and_leaves_memory_tuning_alone "$sysctl"
+fi
+
 rm -rf "$ROOT"
 
 echo

@@ -36,6 +36,8 @@ set -euo pipefail
 ADMIN_USER=${ADMIN_USER:-southp}
 # The service and deploy account; deploy/sudoers.goopy names it.
 DEPLOY_USER=${DEPLOY_USER:-goopy}
+# The account Ghost instances run as once #187 lands: no shell, no home, no sudo.
+GHOST_USER=${GHOST_USER:-goopy-ghost}
 # Shown in every shell prompt, so the two hosts cannot be mistaken for each other.
 ENV_LABEL=${ENV_LABEL:-prod}
 
@@ -46,10 +48,9 @@ NODESOURCE_KEY_URL=https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
 # Compared after download: a key served by anyone else is refused.
 NODESOURCE_KEY_FPR=6F71F525282841EEDAF851B42F59B5F99B1BE0B4
 
-
 BASE_PACKAGES=(
     ca-certificates curl gnupg git sqlite3
-    fail2ban unattended-upgrades
+    fail2ban unattended-upgrades nftables
     nginx
     nodejs
 )
@@ -166,6 +167,15 @@ setup_accounts() {
         say created "user $DEPLOY_USER"
     fi
     usermod -aG adm,systemd-journal "$DEPLOY_USER"
+
+    # Created ahead of #187 so that the firewall can name it.
+    if getent passwd "$GHOST_USER" >/dev/null; then
+        say unchanged "user $GHOST_USER"
+    else
+        useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin \
+            --comment "goopy Ghost instances" "$GHOST_USER"
+        say created "user $GHOST_USER"
+    fi
 
     install_keys "$ADMIN_USER"
     install_keys "$DEPLOY_USER"
@@ -310,12 +320,181 @@ EOF
     systemctl enable --now unattended-upgrades
 }
 
+# --- 4. Kernel, resolver, journal, mail ---------------------------------------
+
+render_sysctl() {
+    cat <<EOF
+# Written by deploy/host-bootstrap.sh.
+#
+# Every Ghost instance runs as one account, until #187 the same one as gl-serv:
+# without this, any of them can attach a debugger to any other, or to gl-serv.
+kernel.yama.ptrace_scope = 1
+kernel.kptr_restrict = 2
+kernel.dmesg_restrict = 1
+# Loose, not strict: strict drops replies that arrive on a different interface
+# than the route back, which a reserved IP or the VPC interface can cause.
+net.ipv4.conf.all.rp_filter = 2
+net.ipv4.conf.default.rp_filter = 2
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv6.conf.all.accept_source_route = 0
+# Nothing under vm.*: the capacity caps (#113) were measured on its defaults.
+EOF
+}
+
+harden_host() {
+    step "kernel, resolver, journal, mail"
+    local file=/etc/sysctl.d/90-goopy.conf
+    put_file "$file" 0644 < <(render_sysctl)
+    if [[ $CHANGED == 1 ]]; then
+        sysctl -q -p "$file"
+    fi
+
+    # systemd-resolved answers LLMNR on 0.0.0.0:5355 by default, to the internet.
+    put_file /etc/systemd/resolved.conf.d/90-goopy.conf 0644 <<EOF
+[Resolve]
+LLMNR=no
+MulticastDNS=no
+EOF
+    if [[ $CHANGED == 1 ]]; then
+        systemctl restart systemd-resolved
+    fi
+
+    put_file /etc/systemd/journald.conf.d/90-goopy.conf 0644 <<EOF
+[Journal]
+Storage=persistent
+SystemMaxUse=500M
+EOF
+    if [[ $CHANGED == 1 ]]; then
+        systemctl restart systemd-journald
+    fi
+
+    # DigitalOcean's image ships exim listening on :25, and nothing here sends
+    # mail. Masked rather than removed, so nothing that depends on a mail
+    # transport goes with it.
+    if systemctl cat exim4.service >/dev/null 2>&1 && [[ $(systemctl is-enabled exim4 2>/dev/null) != masked ]]; then
+        systemctl mask --now exim4
+        say updated "exim4 masked"
+    else
+        say unchanged "exim4 (masked or absent)"
+    fi
+}
+
+# --- 5. Firewall --------------------------------------------------------------
+
+# render_nftables <deploy uid> <ghost uid> <www-data uid>
+render_nftables() {
+    cat <<EOF
+#!/usr/sbin/nft -f
+# Written by deploy/host-bootstrap.sh. The DigitalOcean cloud firewall in front
+# of the droplet says the same; this copy is the one in git.
+#
+# Not \`flush ruleset\`: fail2ban keeps its bans in a table of its own, and a
+# reload must not wipe them. Declaring the table first makes the delete safe on
+# a host where it does not exist yet.
+table inet goopy
+delete table inet goopy
+
+table inet goopy {
+    chain input {
+        type filter hook input priority filter; policy drop;
+        ct state established,related accept
+        ct state invalid drop
+        iif lo accept
+        meta l4proto { icmp, ipv6-icmp } accept
+        # ssh, and nginx for the api and every instance. gl-serv's :3000 binds
+        # loopback only, and stays unreachable from outside even if that changes.
+        tcp dport { 22, 80, 443 } accept
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+    }
+
+    chain output {
+        type filter hook output priority filter; policy accept;
+        # The metadata endpoint serves this droplet's user data, so this script,
+        # to whoever asks. gl-serv, Ghost and nginx never need it.
+        # uids: $DEPLOY_USER, $GHOST_USER, www-data
+        ip daddr 169.254.169.254 meta skuid { $1, $2, $3 } reject
+    }
+}
+EOF
+}
+
+setup_firewall() {
+    step "firewall"
+    local file=/etc/nftables.conf tmp
+    tmp=$(mktemp)
+    render_nftables "$(id -u "$DEPLOY_USER")" "$(id -u "$GHOST_USER")" "$(id -u www-data)" >"$tmp"
+    nft -c -f "$tmp" || die "nft rejected the rendered ruleset; $file left as it was"
+    put_file "$file" 0755 <"$tmp"
+    rm -f "$tmp"
+    systemctl enable nftables
+    # Never `restart`: Debian's unit stops with `nft flush ruleset`, which would
+    # take fail2ban's table with it.
+    if ! systemctl is-active -q nftables; then
+        systemctl start nftables
+    elif [[ $CHANGED == 1 ]]; then
+        systemctl reload nftables
+    fi
+}
+
+# --- 6. nginx -----------------------------------------------------------------
+
+setup_nginx() {
+    step "nginx"
+    local changed
+    # A request for a name no site claims, a scan of the bare IP for one, gets
+    # no answer at all: no Debian welcome page, no site picked as the default.
+    put_file /etc/nginx/sites-available/00-default-deny 0644 <<'EOF'
+# Written by deploy/host-bootstrap.sh.
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    return 444;
+}
+
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    server_name _;
+    ssl_reject_handshake on;
+}
+EOF
+    changed=$CHANGED
+    if [[ ! -L /etc/nginx/sites-enabled/00-default-deny ]]; then
+        ln -s /etc/nginx/sites-available/00-default-deny /etc/nginx/sites-enabled/00-default-deny
+        changed=1
+    fi
+    if [[ -e /etc/nginx/sites-enabled/default || -L /etc/nginx/sites-enabled/default ]]; then
+        rm -f /etc/nginx/sites-enabled/default
+        say removed /etc/nginx/sites-enabled/default
+        changed=1
+    fi
+    if [[ $changed == 1 ]]; then
+        nginx -t || die "nginx rejected 00-default-deny"
+        systemctl reload nginx
+    fi
+}
+
 # --- Finish -------------------------------------------------------------------
 
 summary() {
     step "summary"
     local pw
     say node "$(node --version 2>/dev/null || echo missing)"
+    if nft list table inet goopy >/dev/null 2>&1; then
+        say firewall "inet goopy loaded"
+    else
+        warn "firewall table inet goopy is not loaded"
+    fi
     sshd -T 2>/dev/null | grep -E '^(permitrootlogin|passwordauthentication|allowusers) ' | sed 's/^/sshd       /' || true
 
     if [[ ${#WARNINGS[@]} -gt 0 ]]; then
@@ -341,6 +520,9 @@ main() {
     setup_packages
     setup_ssh
     setup_auto_updates
+    harden_host
+    setup_firewall
+    setup_nginx
     summary
 }
 
