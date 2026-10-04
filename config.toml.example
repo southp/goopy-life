@@ -30,7 +30,7 @@ bind_address = "127.0.0.1:3000"
 sweep_interval_secs = 86400
 
 # Maximum resident (running) instances — RAM-bound cap (default 10).
-# Each Ghost process is ~150–250 MB; a 2 GB droplet minus OS/nginx/gl-serv
+# Each Ghost process is ~150–250 MB; a 2 GB host minus OS/nginx/gl-serv
 # overhead fits ~10 (2 GB ÷ ~200 MB). Raise after a machine upgrade.
 # Must be > 0 and <= max_provisioned; gl-serv refuses to start otherwise.
 max_active = 10
@@ -99,7 +99,7 @@ service_user = "goopy"
 # nginx liveness subrequest, which runs far hotter than either.
 #
 # The whole section is optional — omit it to use the defaults shown below,
-# which are sized for the 1 vCPU / 2 GB droplet. The burst and period values
+# which are sized for the 1 vCPU / 2 GB host. The burst and period values
 # must all be > 0; alive_cache_secs may be 0 and is capped at 60.
 #
 # Provisioning limit — applies to POST /goopies only.

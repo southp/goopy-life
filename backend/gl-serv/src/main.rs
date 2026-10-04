@@ -132,7 +132,7 @@ fn check_config(path: &std::path::Path) -> Result<(gl_core::Config, String), gl_
 /// host.
 ///
 /// Split from [`check_config`] because these are *host* facts: they exist on
-/// the droplet and nowhere else, so neither CI nor gl-core's committed-config
+/// the host and nowhere else, so neither CI nor gl-core's committed-config
 /// test can assert them. `--check-config` is the only step of a deploy that
 /// runs on the target host, which makes it the one place the check is possible
 /// at all.
@@ -2895,10 +2895,10 @@ kind = "Hello"
     /// exists for the single leg it cannot reach — `cors_origin`, which is
     /// checked against `HeaderValue` and so lives on this side of the
     /// dependency boundary. Without it, a committed config with an unusable
-    /// origin would still reach a droplet before anything objected.
+    /// origin would still reach a deployed host before anything objected.
     ///
     /// `check_host_paths` is deliberately *not* called here: its paths exist
-    /// only on a droplet, so asserting them in CI would fail every build.
+    /// only on a deployed host, so asserting them in CI would fail every build.
     #[test]
     fn every_committed_config_passes_the_gate() {
         let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

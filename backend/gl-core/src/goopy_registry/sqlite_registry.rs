@@ -2113,7 +2113,7 @@ mod tests {
         );
     }
 
-    /// Droplets are at `user_version = 3`; the tables and the seeded totals
+    /// Deployed hosts are at `user_version = 3`; the tables and the seeded totals
     /// row have to arrive by migration.
     #[test]
     fn migration_adds_usage_tables_to_a_version_3_database() {
@@ -2206,7 +2206,7 @@ mod tests {
         );
     }
 
-    /// Existing droplets are at `user_version = 1`, so the table has to arrive
+    /// Existing deployed hosts are at `user_version = 1`, so the table has to arrive
     /// by migration rather than only on a fresh database.
     #[test]
     fn migration_adds_instance_events_to_a_version_1_database() {

@@ -15,7 +15,7 @@
 #
 # It is deliberately NOT in `deploy/config/`: that directory is the set of
 # configurations `deploy.sh` can ship to a host, and `dev_mode = true` on a real
-# droplet would skip systemd, nginx and ZFS.
+# host would skip systemd, nginx and ZFS.
 
 # Working directories for instances.
 base_dir = "./.local/data"

@@ -83,7 +83,7 @@ pub struct HttpProbe<'a> {
     /// configured canonical `url`: told the wrong scheme it answers `301` to
     /// every request, including a fully booted one, so a readiness caller
     /// allowlisting `200` would wait out its whole budget against a healthy
-    /// instance. Measured on the dev droplet against Ghost 6.63.0 — see the
+    /// instance. Measured on the dev host against Ghost 6.63.0 — see the
     /// module docs on `goopy_provisioner::nginx`, which hit the same wall.
     ///
     /// It must be the scheme of the instance's *own* canonical URL, not a
@@ -662,7 +662,7 @@ mod tests {
         assert_eq!(RealSysRunner.http_probe(probe_of(&addr, "/")).unwrap(), 503);
     }
 
-    /// The regression test for the bug the dev droplet caught: probed without
+    /// The regression test for the bug the dev host caught: probed without
     /// the headers nginx sets, a fully booted Ghost answers `301` forever, so
     /// the readiness wait could only ever time out. The probe has to present
     /// the origin the instance is configured for.

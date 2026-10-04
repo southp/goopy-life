@@ -1,4 +1,4 @@
-# nginx site for gl-serv's public API — dev droplet.
+# nginx site for gl-serv's public API — dev host.
 #
 # This file IS what the host runs: deploy/push-binary.sh installs it at
 # /etc/nginx/sites-available/gl-serv-api, links it into sites-enabled, and

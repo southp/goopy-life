@@ -19,7 +19,7 @@ hand all happen here. The deploy installs it at /opt/goopy-life/bin/gl-cli \
 from the same build as gl-serv, so the two always share a gl-core -- and \
 therefore a registry schema and a provisioner.
 
-On a droplet, run it as the service account and name the config:
+On a deployed host, run it as the service account and name the config:
 
     sudo -u goopy /opt/goopy-life/bin/gl-cli \\
         --config /opt/goopy-life/config.toml --prod list
@@ -38,7 +38,7 @@ sweeper already claimed fails as Invalid. `alloc` and `dealloc` are the \
 exception: they take a raw path and consult no registry, so never aim them at \
 a live instance's working directory.")]
 struct Cli {
-    /// Path to the config file (on a droplet: /opt/goopy-life/config.toml)
+    /// Path to the config file (on a deployed host: /opt/goopy-life/config.toml)
     #[arg(long, default_value = "./config.toml")]
     config: std::path::PathBuf,
 
@@ -158,7 +158,7 @@ fn main() {
             path = %cli.config.display(),
             "config file not found; try --config config.local.toml from backend/ \
              (the committed local default), or --config /opt/goopy-life/config.toml \
-             on a droplet"
+             on a deployed host"
         );
         std::process::exit(1);
     }
@@ -364,7 +364,7 @@ mod tests {
 
     /// clap can only report a malformed command definition (a duplicate long,
     /// a default that does not parse) at runtime, which for a binary means on
-    /// the droplet. `debug_assert` surfaces it here instead.
+    /// the host. `debug_assert` surfaces it here instead.
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
@@ -376,7 +376,7 @@ mod tests {
     /// only in the help text, so pin them, and pin that the help no longer
     /// calls a forgotten flag dangerous.
     #[test]
-    fn long_help_warns_about_running_on_a_droplet() {
+    fn long_help_warns_about_running_on_a_deployed_host() {
         let help = Cli::command().render_long_help().to_string();
 
         assert!(

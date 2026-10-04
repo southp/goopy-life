@@ -7,7 +7,7 @@
 # The comparison is a remote shell command, so the cases here run it locally
 # against a scratch directory standing in for the host's filesystem: every
 # /etc, /tmp and /opt path is rewritten under it, and `sudo` is a stub. No
-# droplet, no network, no ssh key required.
+# host, no network, no ssh key required.
 set -uo pipefail
 
 DEPLOY_DIR="$(cd "$(dirname "$0")/.." && pwd)"

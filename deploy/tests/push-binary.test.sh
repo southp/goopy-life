@@ -4,7 +4,7 @@
 # Run: ./deploy/tests/push-binary.test.sh
 #
 # Every case drives the script with DRY_RUN=1 and asserts on the scp/ssh command
-# lines it would have run. No droplet, no network, no ssh key required.
+# lines it would have run. No host, no network, no ssh key required.
 set -uo pipefail
 
 DEPLOY_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -112,7 +112,7 @@ STUB
 # Asserts every command the script would run under sudo is pinned verbatim in
 # deploy/sudoers.goopy. That drop-in whitelists exact command lines, so a mode,
 # path or argument-order change on one side alone is a bare sudo denial on the
-# droplet rather than anything self-explanatory. The commands are read out of
+# host rather than anything self-explanatory. The commands are read out of
 # the script's own dry run instead of being restated here, so an artifact added
 # to the deploy later is covered without editing this test.
 assert_sudoers_pins_every_sudo_command() {
@@ -417,7 +417,7 @@ assert_emits push_binary_honours_custom_ssh_port_for_ssh \
     "ssh -p 2222 goopy@dev.example.com sudo systemctl restart gl-serv" \
     goopy@dev.example.com "$SERV" "$CLI" "$CFG" 2222
 
-# gl-cli is the droplet's maintenance CLI — despawning one instance by hand,
+# gl-cli is the host's maintenance CLI — despawning one instance by hand,
 # listing what exists and alloc/dealloc have no route on gl-serv. It ships from
 # this deploy so it can never be older than the gl-serv it shares a database
 # with.
@@ -426,7 +426,7 @@ assert_emits push_binary_uploads_the_cli_binary \
     goopy@dev.example.com "$SERV" "$CLI" "$CFG"
 
 # The config travels with the binaries rather than being hand-maintained on the
-# droplet, which is what stopped it drifting out of sync with the schema.
+# host, which is what stopped it drifting out of sync with the schema.
 assert_emits push_binary_ships_the_config_alongside_the_binary \
     "scp -P 22 $CFG goopy@dev.example.com:$REMOTE_CFG.new" \
     goopy@dev.example.com "$SERV" "$CLI" "$CFG"
@@ -586,7 +586,7 @@ assert_steps_in_order push_binary_verifies_identity_after_the_restart "$SERV" "$
     'systemctl restart gl-serv' 'is-active' '/version'
 
 # The commit is compared against the full sha in the /version body, so the check
-# needs no JSON parser on the droplet.
+# needs no JSON parser on the host.
 assert_emits push_binary_asks_the_host_which_commit_is_serving \
     "ssh -p 22 goopy@dev.example.com api=\$($SERV_DEST --check-config --config $REMOTE_CFG | awk '\$1 == \"api_address\" { print \$2 }'); [ -n \"\$api\" ] || { echo 'push-binary.sh: could not read api_address from the installed config' >&2; exit 1; }; serving=\$(curl -fsS --max-time 10 \"http://\$api/version\") || { echo \"push-binary.sh: GET /version failed on \$api\" >&2; exit 1; }; case \"\$serving\" in *'\"sha_full\":\"$BUILT_SHA\"'*) echo \"push-binary.sh: verified $BUILT_SHA is serving\" ;; *) echo \"push-binary.sh: deployed the wrong commit -- built $BUILT_SHA, /version says: \$serving\" >&2; exit 1 ;; esac" \
     goopy@dev.example.com "$SERV" "$CLI" "$CFG"
@@ -660,7 +660,7 @@ assert_fails push_binary_requires_a_cli_binary_path goopy@dev.example.com "$SERV
 assert_fails push_binary_requires_a_config_path goopy@dev.example.com "$SERV" "$CLI"
 
 # Outside dry-run all three files must exist, so a failed build cannot ship the
-# previous artifact (or nothing at all) to the droplet, and a mistyped
+# previous artifact (or nothing at all) to the host, and a mistyped
 # environment cannot overwrite a working config with an empty file.
 assert_missing_file_rejected push_binary_rejects_a_missing_serv_binary \
     /nonexistent/gl-serv "$SCRIPT_UNDER_TEST" "$SCRIPT_UNDER_TEST"

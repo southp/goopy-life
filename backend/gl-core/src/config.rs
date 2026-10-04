@@ -209,7 +209,7 @@ pub struct Config {
     pub sweep_interval_secs: u64,
     /// Maximum number of **resident** (running) instances allowed simultaneously.
     ///
-    /// RAM-bound. Each Ghost process is roughly 150–250 MB. On a 2 GB droplet
+    /// RAM-bound. Each Ghost process is roughly 150–250 MB. On a 2 GB host
     /// minus OS/nginx/gl-serv overhead that leaves capacity for ~10 concurrent
     /// instances (2 GB ÷ ~200 MB ≈ 10). Conservative default.
     ///
@@ -223,7 +223,7 @@ pub struct Config {
     pub max_active: u32,
     /// Maximum number of instances that may **exist on disk** at any time.
     ///
-    /// Disk-bound. On a 50 GB droplet with a 512 MB per-instance quota the
+    /// Disk-bound. On a 50 GB host with a 512 MB per-instance quota the
     /// theoretical ceiling is ~90 instances (50 GB ÷ 512 MB). The beta default
     /// is kept equal to `max_active` because scale-to-zero (#96) has not landed
     /// yet; once idle instances can suspend to ~0 RAM, raise this toward the
@@ -304,7 +304,7 @@ fn default_max_active() -> u32 {
 
 /// Default instance-event retention: 30 days.
 ///
-/// Sized against the incident this exists for. The dev droplet's ten failures
+/// Sized against the incident this exists for. The dev host's ten failures
 /// happened on 2026-06-25 and were first looked at on 2026-09-04 — ten weeks
 /// later, which no sane retention window would have covered. What 30 days does
 /// cover is the realistic case: a failure rate worth noticing shows up in the

@@ -11,7 +11,7 @@
 //! `if cli.check_config` condition, leaves every unit test and every
 //! `push-binary.test.sh` case green while turning the gate into a no-op that
 //! reports success unconditionally — a regression invisible until the next bad
-//! config reaches a droplet, which is the one occasion the gate exists for.
+//! config reaches a deployed host, which is the one occasion the gate exists for.
 //!
 //! `push-binary.test.sh` cannot close this either: it stubs `ssh` to fail on
 //! `--check-config`, so it asserts what the script does with a failure rather
@@ -117,7 +117,7 @@ fn check_config_exits_non_zero_for_a_config_the_binary_cannot_start_on() {
 
 #[test]
 fn check_config_exits_non_zero_for_a_config_still_in_days() {
-    // #110 renamed the lifetime field. A droplet config not yet converted must
+    // #110 renamed the lifetime field. A host config not yet converted must
     // stop the deploy here, and say which field it is missing.
     let f = write_config(&VALID_CONFIG.replace("life_in_hours = 168", "life_in_days = 7"));
     let out = run_check(f.path());
