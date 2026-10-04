@@ -33,6 +33,15 @@ else
     fail bootstrap_parses "bash -n rejected it"
 fi
 
+# Control flow takes explicit blocks: `if ...; then die ...; fi`, never a
+# `[[ ... ]] || die` shorthand that a second statement could later slip out of.
+shorthand=$(grep -nE '(\|\||&&)[[:space:]]*(die|warn)\b' "$SCRIPT")
+if [[ -z $shorthand ]]; then
+    pass bootstrap_uses_explicit_blocks
+else
+    fail bootstrap_uses_explicit_blocks "$shorthand"
+fi
+
 # Sourcing must define the functions and run nothing: no preflight, no output.
 out=$(GOOPY_BOOTSTRAP_SOURCED=1 bash -c "source '$SCRIPT'" 2>&1)
 if [[ -z $out ]]; then

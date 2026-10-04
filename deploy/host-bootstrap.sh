@@ -178,10 +178,14 @@ no_password_set() {
 # --- 0. Preflight -------------------------------------------------------------
 
 preflight() {
-    [[ $(id -u) == 0 ]] || die "run as root"
+    if [[ $(id -u) != 0 ]]; then
+        die "run as root"
+    fi
     # shellcheck source=/dev/null
     . /etc/os-release
-    [[ ${VERSION_CODENAME:-} == trixie ]] || die "written for Debian 13 (trixie), found ${PRETTY_NAME:-unknown}"
+    if [[ ${VERSION_CODENAME:-} != trixie ]]; then
+        die "written for Debian 13 (trixie), found ${PRETTY_NAME:-unknown}"
+    fi
     # cloud-init does not promise one; gpg and snap look for it.
     export HOME=${HOME:-/root}
     exec > >(tee -a /var/log/goopy-bootstrap.log) 2>&1
@@ -238,7 +242,9 @@ install_keys() {
         return
     fi
     keys=$(extract_keys /root/.ssh/authorized_keys)
-    [[ -n $keys ]] || die "no ssh key in /root/.ssh/authorized_keys to give $user; create the host with one. Root login is still enabled."
+    if [[ -z $keys ]]; then
+        die "no ssh key in /root/.ssh/authorized_keys to give $user; create the host with one. Root login is still enabled."
+    fi
     install -d -m 700 -o "$user" -g "$user" "$home/.ssh"
     printf '%s\n' "$keys" >"$dest"
     chown "$user:$user" "$dest"
@@ -361,7 +367,9 @@ render_with_contrib() {
 setup_packages() {
     step "packages"
     local sources=/etc/apt/sources.list.d/debian.sources
-    [[ -f $ROOT$sources ]] || die "$sources not found; expected Debian 13's deb822 sources"
+    if [[ ! -f $ROOT$sources ]]; then
+        die "$sources not found; expected Debian 13's deb822 sources"
+    fi
     put_file "$sources" 0644 < <(render_with_contrib "$ROOT$sources")
     "${APT[@]}" update
     "${APT[@]}" install ca-certificates curl gnupg
@@ -375,7 +383,9 @@ setup_packages() {
         tmp=$(mktemp)
         curl -fsSL "$NODESOURCE_KEY_URL" | gpg --dearmor >"$tmp"
         fpr=$(gpg --show-keys --with-colons "$tmp" 2>/dev/null | awk -F: '$1 == "fpr" { print $10; exit }')
-        [[ $fpr == "$NODESOURCE_KEY_FPR" ]] || die "NodeSource key fingerprint is $fpr, expected $NODESOURCE_KEY_FPR"
+        if [[ $fpr != "$NODESOURCE_KEY_FPR" ]]; then
+            die "NodeSource key fingerprint is $fpr, expected $NODESOURCE_KEY_FPR"
+        fi
         install -D -m 644 "$tmp" "$keyring"
         rm -f "$tmp"
         say created "$keyring"
@@ -421,7 +431,9 @@ setup_ssh() {
     local file=/etc/ssh/sshd_config.d/10-goopy.conf home
     # Root login goes off here, so the admin account must be able to get in first.
     home=$(getent passwd "$ADMIN_USER" | cut -d: -f6)
-    [[ -s $home/.ssh/authorized_keys ]] || die "$ADMIN_USER has no ssh key; leaving root login on"
+    if [[ ! -s $home/.ssh/authorized_keys ]]; then
+        die "$ADMIN_USER has no ssh key; leaving root login on"
+    fi
 
     put_file "$file" 0644 < <(render_sshd)
     # Checked and reloaded on every run, like every apply step here: a run that
@@ -555,7 +567,9 @@ setup_firewall() {
     local file=/etc/nftables.conf tmp
     tmp=$(mktemp)
     render_nftables "$(id -u "$DEPLOY_USER")" "$(id -u "$GHOST_USER")" "$(id -u www-data)" >"$tmp"
-    nft -c -f "$tmp" || die "nft rejected the rendered ruleset; $file left as it was"
+    if ! nft -c -f "$tmp"; then
+        die "nft rejected the rendered ruleset; $file left as it was"
+    fi
     put_file "$file" 0755 <"$tmp"
     rm -f "$tmp"
     systemctl enable nftables
