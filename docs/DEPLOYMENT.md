@@ -36,8 +36,7 @@ brew install zig@0.16
 ### Host setup (one-time)
 
 A new host is set up by [`deploy/host-bootstrap.sh`](../deploy/host-bootstrap.sh),
-pasted into DigitalOcean's **Startup scripts** box when the droplet is created:
-accounts, ssh, firewall, swap and zswap, the ZFS pool, Node, Ghost's base install
+given to the machine as its cloud-init user data when it is created: accounts, ssh, firewall, swap and zswap, the ZFS pool, Node, Ghost's base install
 and certbot. [Standing up the host](#standing-up-the-host) walks through it and
 the few steps it leaves to you. The dev host predates the script and was built
 by hand.
@@ -410,32 +409,32 @@ are `deploy/config/prod.*`.
 
 ### Standing up the host
 
-**1. Outside the host**, in the DigitalOcean control panel. No script on the
-host can do these:
+**1. Outside the host**, with the provider. No script on the host can do these:
 
-| What | Setting |
-|---|---|
-| Droplet | Debian 13, 1 vCPU / 2 GB / 50 GB (as dev, which #113 measured), named `goopy-prod`, your ssh key, **Monitoring** on |
-| Startup scripts | the whole of [`deploy/host-bootstrap.sh`](../deploy/host-bootstrap.sh), pasted as is |
-| Reserved IP | assigned to the droplet; DNS points at it, so a rebuilt droplet takes over without a DNS change |
-| Cloud firewall | inbound 22, 80, 443 only. The host's own nftables says the same; this is the second layer |
-| DNS | `api.goopy.life` and **`*.goopy.life`** → the reserved IP; a CAA record allowing only `letsencrypt.org` |
-| API token | **custom scopes, domain read/write only**, for the certificate below. It never goes in the startup script |
-| Alerts | Monitoring: swap above 50%, memory above 90%, disk above 80%. Swap is the early warning for #113's cliff, where the box spawns but no longer serves |
+| What the host needs | Why | On DigitalOcean today |
+|---|---|---|
+| Debian 13, x86_64, 1 vCPU / 2 GB / 50 GB | what #113 measured the caps on | a droplet, named `goopy-prod` |
+| [`deploy/host-bootstrap.sh`](../deploy/host-bootstrap.sh) as cloud-init user data, whole and unedited | it sets up everything else | **Startup scripts**, under Additional Options |
+| Your ssh key, given at creation | the script copies root's keys to both accounts; it is the only way in | **Authentication → SSH Key** |
+| A public IP that outlives the machine | DNS points at it, so a rebuilt host takes over without a DNS change | a reserved IP |
+| A firewall in front: inbound 22, 80, 443 only | the second layer; the host's own nftables says the same | a cloud firewall |
+| DNS: `api.goopy.life` and **`*.goopy.life`** → that IP, and a CAA record allowing only `letsencrypt.org` | every instance is served under the wildcard | Networking → Domains |
+| A DNS API token, as narrow as the DNS host allows | the wildcard certificate's DNS-01 challenge (below). Never in the user data | a custom-scoped token, domain read/write only |
+| Alerts: swap above 50%, memory above 90%, disk above 80% | swap is the early warning for #113's cliff, where the host spawns but no longer serves | Monitoring, enabled at creation, plus alert policies |
 
 **2. First boot.** cloud-init runs the script as root. It takes about 30 minutes
 on 1 vCPU, nearly all of it building the ZFS module twice: once for the running
 kernel and once for the newer one the upgrade brings. Before the first ssh,
-compare the host key with the fingerprints cloud-init prints to the droplet's
-console. Then:
+compare the host key with the fingerprints cloud-init prints to the host's
+console (the provider's web console shows it). Then:
 
 ```bash
 ssh southp@<host> 'cloud-init status --long; tail -25 /var/log/cloud-init-output.log'
 ```
 
 The tail is the script's summary: what it found, and what is left. **No password
-or token goes through the startup script**: anything in it is served to every
-process on the host by the metadata endpoint, for the droplet's whole life.
+or token goes through the user data**: the provider's metadata endpoint serves
+it to every process on the host, for the host's whole life.
 So the admin account starts with passwordless sudo, and these are by hand:
 
 ```bash
@@ -450,7 +449,9 @@ sudo reboot
 free -m; cat /proc/swaps; cat /sys/module/zswap/parameters/enabled; zpool list
 #    expect ~4095 MB of swap, zswap Y, zpool_ghost ONLINE at ~7.5G
 
-# c. The wildcard certificate, at the path every nginx site names
+# c. The wildcard certificate, at the path every nginx site names. goopy.life's
+#    DNS is at DigitalOcean today, hence its plugin; another DNS host means its
+#    own plugin (DNS_PLUGIN in the script) and credentials.
 sudo install -m 600 /dev/null /etc/letsencrypt/digitalocean.ini
 sudoedit /etc/letsencrypt/digitalocean.ini   # dns_digitalocean_token = <token>
 sudo certbot certonly --dns-digitalocean \
@@ -469,7 +470,7 @@ admin account has a password, sudo needs a terminal:
 scp deploy/host-bootstrap.sh southp@<host>:/tmp/ && ssh -t southp@<host> sudo bash /tmp/host-bootstrap.sh
 ```
 
-**Rehearse first.** A throwaway droplet created the same way costs cents and
+**Rehearse first.** A throwaway host created the same way costs cents and
 shows the first boot end to end, before production depends on it.
 
 `goopy-ghost`, the account the script creates with no shell and no sudo, is for
@@ -550,8 +551,8 @@ tell if any of this is missing:
 | `goopy` account, `/opt/goopy-life/` | bootstrap | the deploy and the provisioner write into these |
 | nftables (22/80/443 in), sshd, fail2ban, sysctl, unattended upgrades | bootstrap | the host's own hardening |
 | Wildcard cert at `/etc/letsencrypt/live/goopy.life/` | by hand (token) | the api site and every instance site hardcode that path |
-| DNS for `api.` and `*.goopy.life`, reserved IP | control panel | instances are served under the wildcard |
-| Cloud firewall: 22/80/443 open, 3000 closed | control panel | the second layer in front of nftables |
+| DNS for `api.` and `*.goopy.life`, a public IP that outlives the machine | provider | instances are served under the wildcard |
+| Provider firewall: 22/80/443 open, 3000 closed | provider | the second layer in front of nftables |
 | Vercel production env: `NEXT_PUBLIC_GL_API_URL`, `GL_CONFIG_API_URL` = `https://api.goopy.life` | Vercel | the frontend; see [Frontend](#frontend--vercel-git-integration) |
 
 ## Configuration
@@ -735,7 +736,7 @@ host, network or key needed:
 `host-bootstrap.test.sh` sources the script without running it and checks its
 helpers and the files it renders, plus that the ZFS pool and the Ghost install
 agree with `prod.toml`. What only a real host can answer (apt, the ZFS module,
-sshd, nftables) is tested by a first boot; rehearse one on a throwaway droplet.
+sshd, nftables) is tested by a first boot; rehearse one on a throwaway host.
 
 `check-host.test.sh` also covers the drift comparison both scripts share
 (`deploy/host-artifacts.sh`), by running it against a scratch directory that

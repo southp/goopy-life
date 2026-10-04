@@ -6,7 +6,7 @@
 # The script is sourced with GOOPY_BOOTSTRAP_SOURCED=1, so nothing it would do
 # to a host runs, and its helpers and renderers are exercised against a scratch
 # ROOT. The parts that only a real host can answer (apt, ZFS, sshd, nft)
-# are not covered here; the first boot of a throwaway droplet is their test.
+# are not covered here; the first boot of a throwaway host is their test.
 set -uo pipefail
 
 DEPLOY_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -207,7 +207,7 @@ fi
 # --- render_zswap_grub --------------------------------------------------------
 
 # GRUB sources the snippet after the image's own settings; it has to add to the
-# command line, not replace it (DigitalOcean's carries its console settings).
+# command line, not replace it (a cloud image's carries its console settings).
 got=$(
     GRUB_CMDLINE_LINUX_DEFAULT="net.ifnames=0 biosdevname=0"
     # As GRUB reads it; eval, because bash 3.2 cannot source a process substitution.

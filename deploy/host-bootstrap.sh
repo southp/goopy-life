@@ -1,11 +1,12 @@
 #!/bin/bash
-# Turns a fresh Debian 13 droplet into a goopy-life host: everything the
+# Turns a fresh Debian 13 machine into a goopy-life host: everything the
 # deploy, admin-apply.sh and the provisioner expect to find already there.
 #
 # Two ways to run it, both as root:
 #
-#   1. Pasted into DigitalOcean's "Startup scripts" box when creating the
-#      droplet. cloud-init runs it once, on first boot; the output lands in
+#   1. As the machine's cloud-init user data, given when it is created (see
+#      docs/DEPLOYMENT.md for where today's provider takes it). cloud-init
+#      runs it once, on first boot; the output lands in
 #      /var/log/cloud-init-output.log and `cloud-init status --long` says
 #      whether it finished.
 #   2. Again at any time, to converge a host or finish a first run. Copied
@@ -18,14 +19,14 @@
 # is up to date changes nothing. Each step prints `unchanged`, `updated` or
 # `created`; both runs append to /var/log/goopy-bootstrap.log.
 #
-# NO SECRETS IN HERE. Whatever is pasted into the Startup scripts box is served
-# by the metadata endpoint (169.254.169.254) to any process on the host, for
-# its whole life, and cannot be edited afterwards. Passwords and API tokens are
+# NO SECRETS IN HERE. User data is served by the provider's metadata endpoint
+# (169.254.169.254) to any process on the host, for its whole life, and cannot
+# be edited afterwards. Passwords and API tokens are
 # set by hand after the first boot; the summary at the end lists what is left.
 #
-# Not in here, because no script on the host can do it: the droplet itself, the
-# DigitalOcean cloud firewall and DNS (#167), and what admin-apply.sh and the
-# deploy install. See docs/DEPLOYMENT.md, "Production".
+# Not in here, because no script on the host can do it: the machine itself, the
+# provider's firewall and DNS (#167), and what admin-apply.sh and the deploy
+# install. See docs/DEPLOYMENT.md, "Production".
 #
 # ROOT prefixes the paths of the files this writes. It is empty on a host; the
 # tests set it to a scratch directory, and source the script with
@@ -44,6 +45,10 @@ GHOST_USER=${GHOST_USER:-goopy-ghost}
 ENV_LABEL=${ENV_LABEL:-prod}
 # Only for the certificate check and the instructions printed at the end.
 DOMAIN=${DOMAIN:-goopy.life}
+# The certbot plugin for wherever DOMAIN's DNS is hosted: a wildcard certificate
+# needs the DNS-01 challenge, which writes a record through the DNS host's API.
+# goopy.life's DNS is at DigitalOcean today.
+DNS_PLUGIN=${DNS_PLUGIN:-dns-digitalocean}
 
 # Ghost 6.63.0 requires Node ^22.23.1 || ^24.20.0, and nothing checks it before
 # an instance boots (docs/GHOST_PROVISIONER.md). Pinned to what dev runs.
@@ -57,7 +62,7 @@ APP_DIR=/opt/goopy-life
 GHOST_VERSION=6.63.0
 
 # 4 GB of swap with zswap is what the capacity caps of 20 were measured on
-# (#113); a stock 2 GB droplet serves about 10, and nothing errors at 11. Two
+# (#113); a 2 GB host without it serves about 10, and nothing errors at 11. Two
 # files because that is exactly what was measured, not because two matter.
 SWAPFILES=(/swapfile:1G /swapfile2:3G)
 # lzo, not zstd: zstd spawned 7% more and answered 2-3x slower from swap (#113).
@@ -90,8 +95,8 @@ NEEDS_REBOOT=0
 WARNINGS=()
 
 export DEBIAN_FRONTEND=noninteractive
-# The lock timeout: on first boot, cloud-init's own apt runs (DigitalOcean's
-# droplet-agent) and apt-daily can hold the dpkg lock while this starts.
+# The lock timeout: on first boot, apt runs of cloud-init's own (a provider's
+# agent being installed) and apt-daily can hold the dpkg lock while this starts.
 APT=(apt-get -q -y -o DPkg::Lock::Timeout=600
     -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
 
@@ -150,8 +155,8 @@ ensure_line() {
 }
 
 # Prints the keys in an authorized_keys file, without any options in front.
-# DigitalOcean puts the droplet's keys in root's file, and cloud-init may prefix
-# them with a `command="echo Please login as ..."` that refuses the login; a
+# The provider puts the keys chosen at creation in root's file, and cloud-init
+# may prefix them with a `command="echo Please login as ..."` that refuses the login; a
 # key copied with that prefix would lock the account out the same way.
 extract_keys() {
     grep -oE '(ssh-(ed25519|rsa|dss)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com) [A-Za-z0-9+/=]+( .*)?$' "$1" || true
@@ -215,7 +220,7 @@ setup_accounts() {
     shell_prompt "$DEPLOY_USER"
 }
 
-# Gives <user> the droplet's ssh keys, the ones DigitalOcean put in root's file.
+# Gives <user> the ssh keys the host was created with, the ones in root's file.
 # A file that is already there is left alone: keys added or removed later stand.
 install_keys() {
     local user=$1 home dest keys
@@ -226,7 +231,7 @@ install_keys() {
         return
     fi
     keys=$(extract_keys /root/.ssh/authorized_keys)
-    [[ -n $keys ]] || die "no ssh key in /root/.ssh/authorized_keys to give $user; add one to the droplet. Root login is still enabled."
+    [[ -n $keys ]] || die "no ssh key in /root/.ssh/authorized_keys to give $user; create the host with one. Root login is still enabled."
     install -d -m 700 -o "$user" -g "$user" "$home/.ssh"
     printf '%s\n' "$keys" >"$dest"
     chown "$user:$user" "$dest"
@@ -465,8 +470,7 @@ EOF
         systemctl restart systemd-journald
     fi
 
-    # DigitalOcean's image ships exim listening on :25, and nothing here sends
-    # mail. Masked rather than removed, so nothing that depends on a mail
+    # Some cloud images ship exim listening on :25, and nothing here sends mail. Masked rather than removed, so nothing that depends on a mail
     # transport goes with it.
     if systemctl cat exim4.service >/dev/null 2>&1 && [[ $(systemctl is-enabled exim4 2>/dev/null) != masked ]]; then
         systemctl mask --now exim4
@@ -482,8 +486,8 @@ EOF
 render_nftables() {
     cat <<EOF
 #!/usr/sbin/nft -f
-# Written by deploy/host-bootstrap.sh. The DigitalOcean cloud firewall in front
-# of the droplet says the same; this copy is the one in git.
+# Written by deploy/host-bootstrap.sh. The provider's firewall in front of the
+# host should say the same; this copy is the one in git.
 #
 # Not \`flush ruleset\`: fail2ban keeps its bans in a table of its own, and a
 # reload must not wipe them. Declaring the table first makes the delete safe on
@@ -509,7 +513,7 @@ table inet goopy {
 
     chain output {
         type filter hook output priority filter; policy accept;
-        # The metadata endpoint serves this droplet's user data, so this script,
+        # The metadata endpoint serves this host's user data, so this script,
         # to whoever asks. gl-serv, Ghost and nginx never need it.
         # uids: $DEPLOY_USER, $GHOST_USER, www-data
         ip daddr 169.254.169.254 meta skuid { $1, $2, $3 } reject
@@ -609,9 +613,10 @@ setup_zfs() {
 
 # --- 9. certbot ---------------------------------------------------------------
 
-# Debian 13 packages certbot but not its DigitalOcean DNS plugin, so both come
-# from snap, as on dev. The certificate itself needs a DigitalOcean API token,
-# which cannot pass through here; requesting it is a manual step (see summary).
+# Snap carries every certbot DNS plugin, where Debian 13 packages only a few
+# (DigitalOcean's not among them), so both come from snap, as on dev. The
+# certificate itself needs the DNS host's API token, which cannot pass through
+# here; requesting it is a manual step (see summary).
 setup_certbot() {
     step "certbot"
     snap wait system seed.loaded
@@ -622,14 +627,14 @@ setup_certbot() {
         say created "snap certbot"
     fi
     snap set certbot trust-plugin-with-root=ok
-    if snap list certbot-dns-digitalocean >/dev/null 2>&1; then
-        say unchanged "snap certbot-dns-digitalocean"
+    if snap list "certbot-$DNS_PLUGIN" >/dev/null 2>&1; then
+        say unchanged "snap certbot-$DNS_PLUGIN"
     else
-        snap install certbot-dns-digitalocean
-        say created "snap certbot-dns-digitalocean"
+        snap install "certbot-$DNS_PLUGIN"
+        say created "snap certbot-$DNS_PLUGIN"
     fi
-    if ! snap connections certbot | grep -qF certbot-dns-digitalocean; then
-        snap connect certbot:plugin certbot-dns-digitalocean
+    if ! snap connections certbot | grep -qF "certbot-$DNS_PLUGIN"; then
+        snap connect certbot:plugin "certbot-$DNS_PLUGIN"
     fi
     ln -sfn /snap/bin/certbot /usr/bin/certbot
 
@@ -709,7 +714,7 @@ summary() {
         printf '  - sudo reboot, then run this script again\n'
     fi
     if [[ ! -e /etc/letsencrypt/live/$DOMAIN/fullchain.pem ]]; then
-        printf '  - the *.%s certificate: a DigitalOcean token in /etc/letsencrypt/digitalocean.ini, then certbot\n' "$DOMAIN"
+        printf '  - the *.%s certificate: certbot --%s, with an API token for the DNS host\n' "$DOMAIN" "$DNS_PLUGIN"
     fi
     printf '  - ./deploy/admin-apply.sh %s@<host> %s, then ./deploy/deploy.sh %s@<host> %s\n' \
         "$ADMIN_USER" "$ENV_LABEL" "$DEPLOY_USER" "$ENV_LABEL"
