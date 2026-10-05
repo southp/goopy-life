@@ -9,6 +9,7 @@ Users can create an ephemeral Ghost instance on Goopy.Life by just one click. Th
 ## We are currently in the testing phase 🚧
 
 Soooooo play at your own risk 💩
+The production version can be found at https://goopy.life, and the dev version currently lives at https://southp.dev.
 
 ## Quick start
 
