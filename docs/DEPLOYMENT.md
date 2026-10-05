@@ -35,28 +35,19 @@ brew install zig@0.16
 
 ### Host setup (one-time)
 
-The service runs as a dedicated `goopy` account, which is also the account you deploy as — the sudoers drop-in below names it explicitly, so deploying as any other user fails with a password prompt.
+A new host is set up by [`deploy/host-bootstrap.sh`](../deploy/host-bootstrap.sh),
+given to the machine as its cloud-init user data when it is created: accounts, ssh, firewall, swap and zswap, the ZFS pool, Node, Ghost's base install
+and certbot. [Standing up the host](#standing-up-the-host) walks through it and
+the few steps it leaves to you. The dev host predates the script and was built
+by hand.
+
+The service runs as a dedicated `goopy` account, which is also the account you deploy as — the sudoers drop-in names it explicitly, so deploying as any other user fails with a password prompt. That drop-in and the nginx cache zone come from your machine, as the admin account with password sudo; no deploy installs them, because the drop-in grants the deploy its rights, and every deploy checks it:
 
 ```bash
-# 0. Create the service account and authorise your deploy key for it
-sudo useradd --system --create-home --shell /bin/bash goopy
-ssh-copy-id goopy@<host>
-
-# 1. From your machine, as an admin with password sudo: install the sudoers
-#    drop-in and the nginx cache zone. No deploy installs these — the drop-in
-#    grants the deploy its rights — and every deploy checks the drop-in.
 ./deploy/admin-apply.sh <admin>@<host> <env>
-
-# 2. Set the ZFS pool mountpoint to match base_dir in config.toml (default: /opt/goopy-life/data).
-#    gl-serv creates/destroys child datasets via sudo (sudoers rules restrict to zpool_ghost/*).
-#    NoNewPrivileges is intentionally omitted from the unit to allow this; see issue #90 for
-#    the long-term fix (privilege-separated ZFS helper).
-sudo zfs set mountpoint=/opt/goopy-life/data zpool_ghost
-
-# 3. Give the deploy account ownership of the service directory. The deploy
-#    writes /opt/goopy-life/config.toml directly, so this must not be root-owned.
-sudo install -d -o goopy -g goopy /opt/goopy-life /opt/goopy-life/bin
 ```
+
+gl-serv creates and destroys each instance's dataset in `zpool_ghost` via sudo (the sudoers rules restrict it to `zpool_ghost/*`). `NoNewPrivileges` is intentionally omitted from the unit to allow this; see issue #90 for the long-term fix (privilege-separated ZFS helper).
 
 There is no step for `config.toml`, the systemd unit or the api nginx site: they are version-controlled — the unit at [`deploy/gl-serv.service`](../deploy/gl-serv.service), the rest per environment under [`deploy/config/`](../deploy/config/) — and installed by the deploy itself. After the first deploy, `./deploy/check-host.sh goopy@<host> <env>` confirms the host matches the repo. See [Host artifacts](#host-artifacts).
 
@@ -416,13 +407,84 @@ Production is one host serving `goopy.life`: the api at `api.goopy.life`,
 instances at `{slug}.goopy.life`. Nothing deploys it automatically. Its files
 are `deploy/config/prod.*`.
 
+### Standing up the host
+
+**1. Outside the host**, with the provider. No script on the host can do these:
+
+| What the host needs | Why | On DigitalOcean today |
+|---|---|---|
+| Debian 13, x86_64, 1 vCPU / 2 GB / 50 GB | what #113 measured the caps on | a droplet, named `goopy-prod` |
+| [`deploy/host-bootstrap.sh`](../deploy/host-bootstrap.sh) as cloud-init user data, exactly as committed (its settings are changed in git) | it sets up everything else | **Startup scripts**, under Additional Options |
+| Your ssh key, given at creation | the script copies root's keys to both accounts; it is the only way in | **Authentication → SSH Key** |
+| A public IP that outlives the machine | DNS points at it, so a rebuilt host takes over without a DNS change | a reserved IP |
+| A firewall in front: inbound 22, 80, 443 only | the second layer; the host's own nftables says the same | a cloud firewall |
+| DNS: `api.goopy.life` and **`*.goopy.life`** → that IP, and a CAA record allowing only `letsencrypt.org` | every instance is served under the wildcard | Networking → Domains |
+| A DNS API token, as narrow as the DNS host allows | the wildcard certificate's DNS-01 challenge (below). Never in the user data | a custom-scoped token, domain read/write only |
+| Alerts: 5-minute load above 3 for 10 min; disk above 80% for 30 min | load is the early warning for #113's cliff, where the host spawns but no longer serves: a thrashing host's processes stall on swap I/O, which load counts. Not memory: at capacity RAM is full by design, with zswap and swap absorbing the rest. Starting points; tune on real traffic | Monitoring, enabled at creation, then **Create Resource Alert** (it offers no swap metric) |
+
+**2. First boot.** cloud-init runs the script as root. It takes about 30 minutes
+on 1 vCPU, nearly all of it building the ZFS module twice: once for the running
+kernel and once for the newer one the upgrade brings. Before the first ssh,
+compare the host key with the fingerprints cloud-init prints to the host's
+console (the provider's web console shows it). Then:
+
+```bash
+ssh southp@<host> 'cloud-init status --long; tail -25 /var/log/cloud-init-output.log'
+```
+
+The tail is the script's summary: what it found, and what is left. **No password
+or token goes through the user data**: the provider's metadata endpoint serves
+it to every process on the host, for the host's whole life.
+So the admin account starts with passwordless sudo, and these are by hand:
+
+```bash
+ssh southp@<host>
+
+# a. A password for the admin account, then drop the bootstrap's sudo rule
+sudo passwd southp && sudo rm /etc/sudoers.d/90-bootstrap-southp
+
+# b. Reboot: zswap's kernel setting and a new kernel's ZFS module take effect.
+#    If the summary said INCOMPLETE, run the script again afterwards (below).
+sudo reboot
+free -m; cat /proc/swaps; cat /sys/module/zswap/parameters/enabled; zpool list
+#    expect ~4095 MB of swap, zswap Y, zpool_ghost ONLINE at ~7.5G
+
+# c. The wildcard certificate, at the path every nginx site names. goopy.life's
+#    DNS is at DigitalOcean today, hence its plugin; another DNS host means its
+#    own plugin (DNS_PLUGIN in the script's settings, changed in git) and
+#    credentials.
+sudo install -m 600 /dev/null /etc/letsencrypt/digitalocean.ini
+sudoedit /etc/letsencrypt/digitalocean.ini   # dns_digitalocean_token = <token>
+sudo certbot certonly --dns-digitalocean \
+    --dns-digitalocean-credentials /etc/letsencrypt/digitalocean.ini \
+    -d '*.goopy.life' --cert-name goopy.life
+sudo certbot renew --dry-run                 # renewal works, and reloads nginx
+```
+
+Then the [first deploy](#first-deploy).
+
+**Running the script again** converges the host: files that already match are
+not rewritten, every setting is applied again, and each step prints
+`unchanged`, `updated` or `created`. That also finishes a run that died halfway. Once the
+admin account has a password, sudo needs a terminal:
+
+```bash
+scp deploy/host-bootstrap.sh southp@<host>:/tmp/ && ssh -t southp@<host> sudo bash /tmp/host-bootstrap.sh
+```
+
+**Rehearse first.** A throwaway host created the same way costs cents and
+shows the first boot end to end, before production depends on it.
+
+`goopy-ghost`, the account the script creates with no shell and no sudo, is for
+#187: until it lands, instances still run as `goopy`.
+
 ### First deploy
 
 Run in this order. Steps 1–3 run from your machine, at the repo root.
 
 | # | Command | Run as | What it does |
 |---|---|---|---|
-| 0 | the [#147 host checklist](https://github.com/southp/goopy-life/issues/147#issuecomment-5885857718) | admin | host state nothing below creates (see [What lives on the host](#what-lives-on-the-host)) |
+| 0 | [Standing up the host](#standing-up-the-host) | admin | host state nothing below creates (see [What lives on the host](#what-lives-on-the-host)) |
 | 1 | `./deploy/admin-apply.sh <admin@host> prod` | admin, password sudo | installs `/etc/sudoers.d/goopy` and `goopy-cache.conf` |
 | 2 | `./deploy/deploy.sh goopy@<host> prod` | `goopy` | builds, ships, restarts, checks `/version` |
 | 3 | `./deploy/check-host.sh goopy@<host> prod` | either | read-only; expect `matches prod` |
@@ -478,19 +540,22 @@ curl -sS https://api.goopy.life/version   # sha_full = <previous-commit>
 ### What lives on the host
 
 The deploy ships binaries, config and the [host artifacts](#host-artifacts).
-`admin-apply.sh` ships the root-owned pair. **Everything else is set up once by
-hand**, following the
-[#147 host checklist](https://github.com/southp/goopy-life/issues/147#issuecomment-5885857718).
-`check-host.sh` compares files only, so it cannot tell if any of this is missing:
+`admin-apply.sh` ships the root-owned pair. Everything else comes from
+[`deploy/host-bootstrap.sh`](../deploy/host-bootstrap.sh), or by hand where no
+script on the host can do it. `check-host.sh` compares files only, so it cannot
+tell if any of this is missing:
 
-| Host state | Why it matters |
-|---|---|
-| Swap (4 GB) + zswap | the caps of 20 assume it. Without it the box serves ~10, and nothing errors |
-| DNS for `api.` and `*.goopy.life`, wildcard cert at `/etc/letsencrypt/live/goopy.life/` | the api site and every instance site hardcode that path |
-| Cloud firewall: 80/443 open, 3000 closed | defence in depth for the loopback bind |
-| `goopy` account, ZFS pool, `/var/cache/nginx`, `/opt/goopy-life/` | the deploy and the provisioner write into these |
-| Node 22.23.2 + Ghost 6.63.0 at `/opt/goopy-life/ghost-6.63.0` | `prod.toml`'s `source_dir` and `node_bin` |
-| Vercel production env: `NEXT_PUBLIC_GL_API_URL`, `GL_CONFIG_API_URL` = `https://api.goopy.life` | the frontend; see [Frontend](#frontend--vercel-git-integration) |
+| Host state | From | Why it matters |
+|---|---|---|
+| Swap (4 GB) + zswap | bootstrap | the caps of 20 assume it. Without it the box serves ~10, and nothing errors |
+| `zpool_ghost`, 8 GB, at `/opt/goopy-life/data` | bootstrap | every instance's dataset; `prod.toml`'s caps × quota must fit (the bootstrap's tests check) |
+| Node 22.23.2 + Ghost 6.63.0 at `/opt/goopy-life/ghost-6.63.0` | bootstrap | `prod.toml`'s `source_dir` and `node_bin` (also tested) |
+| `goopy` account, `/opt/goopy-life/` | bootstrap | the deploy and the provisioner write into these |
+| nftables (22/80/443 in), sshd, fail2ban, sysctl, unattended upgrades | bootstrap | the host's own hardening |
+| Wildcard cert at `/etc/letsencrypt/live/goopy.life/` | by hand (token) | the api site and every instance site hardcode that path |
+| DNS for `api.` and `*.goopy.life`, a public IP that outlives the machine | provider | instances are served under the wildcard |
+| Provider firewall: 22/80/443 open, 3000 closed | provider | the second layer in front of nftables |
+| Vercel production env: `NEXT_PUBLIC_GL_API_URL`, `GL_CONFIG_API_URL` = `https://api.goopy.life` | Vercel | the frontend; see [Frontend](#frontend--vercel-git-integration) |
 
 ## Configuration
 
@@ -667,7 +732,13 @@ host, network or key needed:
 ./deploy/tests/push-binary.test.sh
 ./deploy/tests/check-host.test.sh
 ./deploy/tests/admin-apply.test.sh
+./deploy/tests/host-bootstrap.test.sh
 ```
+
+`host-bootstrap.test.sh` sources the script without running it and checks its
+helpers and the files it renders, plus that the ZFS pool and the Ghost install
+agree with `prod.toml`. What only a real host can answer (apt, the ZFS module,
+sshd, nftables) is tested by a first boot; rehearse one on a throwaway host.
 
 `check-host.test.sh` also covers the drift comparison both scripts share
 (`deploy/host-artifacts.sh`), by running it against a scratch directory that
