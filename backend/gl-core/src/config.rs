@@ -100,9 +100,10 @@ const MAX_ALIVE_CACHE_SECS: u64 = 60;
 ///   burst of 600 — roughly a dozen such page loads back-to-back — with one
 ///   token replenished every second.
 ///
-/// Both limits are per **real client IP**, resolved from the `X-Real-IP`
-/// header that nginx sets (falling back to `X-Forwarded-For` and then the
-/// TCP peer address).
+/// All three limits are per **real client IP**, taken from the `X-Real-IP`
+/// header that nginx overwrites (falling back to the TCP peer address).
+/// `X-Forwarded-For` is never trusted: nginx appends to whatever the client
+/// sent, so its leftmost entry is the client's to forge (#190).
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct RateLimitConfig {
     /// Burst size for `POST /goopies`.

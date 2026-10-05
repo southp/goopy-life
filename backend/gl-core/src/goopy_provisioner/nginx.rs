@@ -341,10 +341,9 @@ mod tests {
     /// The `auth_request` subrequest must carry the client's IP.
     ///
     /// `proxy_set_header` does not inherit across locations, so the headers set
-    /// in `location /` do not reach this one. Without them the rate limiter's
-    /// `SmartIpKeyExtractor` falls back to the peer address — nginx itself on
-    /// localhost — and every visitor of every instance on the host shares a
-    /// single bucket.
+    /// in `location /` do not reach this one. Without them the rate limiter
+    /// falls back to the peer address — nginx itself on localhost — and every
+    /// visitor of every instance on the host shares a single bucket.
     #[test]
     fn alive_check_subrequest_forwards_the_client_ip() {
         let cfg = render_site("tasty-lucky-clover", "goopy.life", 40123, "127.0.0.1:3000");

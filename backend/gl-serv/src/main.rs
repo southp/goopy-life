@@ -1,10 +1,10 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 use axum::body::Body;
-use axum::extract::{Path, State};
-use axum::http::{HeaderValue, Method, StatusCode};
+use axum::extract::{ConnectInfo, Path, State};
+use axum::http::{HeaderValue, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -13,9 +13,9 @@ use clap::{CommandFactory, FromArgMatches, Parser};
 use gl_core::config::ProvisionerConfig;
 use gl_core::goopy_registry::sqlite_registry::SqliteRegistry;
 use gl_core::{AllocatorKind, CapacityKind, GoopyManager, RealSysRunner};
-use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
-use tower_governor::key_extractor::SmartIpKeyExtractor;
+use tower_governor::key_extractor::KeyExtractor;
+use tower_governor::{GovernorError, GovernorLayer};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
@@ -764,19 +764,54 @@ impl IntoResponse for RateLimitedResponse {
 /// rather than client abuse, so it maps to `500` via [`AppError::Internal`]. In
 /// production nginx always sets `X-Real-IP`, so `UnableToExtractKey` should
 /// never occur.
-fn rate_limit_error_handler(err: tower_governor::GovernorError) -> Response<Body> {
+fn rate_limit_error_handler(err: GovernorError) -> Response<Body> {
     match err {
-        tower_governor::GovernorError::TooManyRequests { wait_time, headers } => {
-            RateLimitedResponse {
-                wait_time,
-                extra_headers: headers,
-            }
-            .into_response()
+        GovernorError::TooManyRequests { wait_time, headers } => RateLimitedResponse {
+            wait_time,
+            extra_headers: headers,
         }
+        .into_response(),
         other => {
             tracing::error!(error = ?other, "rate-limit middleware failed");
             AppError::Internal("internal rate-limit error".into()).into_response()
         }
+    }
+}
+
+/// Keys every rate limit on the client IP that nginx put in `X-Real-IP`,
+/// falling back to the TCP peer address.
+///
+/// Nothing else is trusted. `tower_governor`'s `SmartIpKeyExtractor` checks
+/// `X-Forwarded-For` *first* and takes its leftmost entry, but nginx's
+/// `$proxy_add_x_forwarded_for` appends to whatever the client sent, so that
+/// entry is the client's to choose: a fresh forged IP per request escapes
+/// every bucket, and a victim's IP empties theirs (#190). `X-Real-IP` is safe
+/// only because nginx overwrites it on every request and is the sole path to
+/// gl-serv (#149). `Forwarded` is ignored for the same reason as
+/// `X-Forwarded-For`.
+///
+/// The peer fallback serves anything talking to gl-serv directly, such as a
+/// local run; it needs the connect info that [`serve`] attaches.
+#[derive(Debug, Clone, Copy)]
+struct RealIpKeyExtractor;
+
+impl KeyExtractor for RealIpKeyExtractor {
+    type Key = IpAddr;
+
+    fn extract<T>(&self, req: &Request<T>) -> Result<IpAddr, GovernorError> {
+        let real_ip = req
+            .headers()
+            .get("x-real-ip")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<IpAddr>().ok());
+        let peer = || {
+            req.extensions()
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|ConnectInfo(addr)| addr.ip())
+        };
+        real_ip
+            .or_else(peer)
+            .ok_or(GovernorError::UnableToExtractKey)
     }
 }
 
@@ -822,9 +857,8 @@ where
 /// - A **loose** limit (`read_burst` / `read_period_secs`) covers all read
 ///   endpoints.
 ///
-/// Both use `SmartIpKeyExtractor`, which resolves the client IP from
-/// `X-Real-IP` (set by nginx), falling back to `X-Forwarded-For` and then the
-/// TCP peer address.
+/// All of them key on [`RealIpKeyExtractor`]: the client IP from `X-Real-IP`
+/// (set by nginx), falling back to the TCP peer address.
 ///
 /// Each governor keeps one in-memory entry per distinct client IP, which is
 /// never reclaimed on its own — on a public, unauthenticated API that grows
@@ -846,7 +880,7 @@ fn build_router(
 ) -> Router {
     // Tight limit for the provisioning endpoint.
     let provision_governor = GovernorConfigBuilder::default()
-        .key_extractor(SmartIpKeyExtractor)
+        .key_extractor(RealIpKeyExtractor)
         .burst_size(rl.provision_burst)
         .period(StdDuration::from_secs(rl.provision_period_secs))
         .finish()
@@ -862,7 +896,7 @@ fn build_router(
 
     // Loose limit for read endpoints.
     let read_governor = GovernorConfigBuilder::default()
-        .key_extractor(SmartIpKeyExtractor)
+        .key_extractor(RealIpKeyExtractor)
         .burst_size(rl.read_burst)
         .period(StdDuration::from_secs(rl.read_period_secs))
         .finish()
@@ -883,7 +917,7 @@ fn build_router(
     // gracefully either — auth_request renders a 429 as a 500 — so the page
     // simply does not load.
     let alive_governor = GovernorConfigBuilder::default()
-        .key_extractor(SmartIpKeyExtractor)
+        .key_extractor(RealIpKeyExtractor)
         .burst_size(rl.alive_burst)
         .period(StdDuration::from_secs(rl.alive_period_secs))
         .finish()
@@ -926,10 +960,10 @@ fn build_router(
 /// Serve `app` on `listener`.
 ///
 /// The router is wrapped in `into_make_service_with_connect_info` so every
-/// request carries its TCP peer address. `SmartIpKeyExtractor` needs that as
-/// its last-resort fallback: without it, a request that carries neither
-/// `X-Real-IP` nor `X-Forwarded-For` has no key at all, and the rate-limit
-/// layer fails the request with a 500 instead of limiting it. nginx always sets
+/// request carries its TCP peer address. [`RealIpKeyExtractor`] needs that as
+/// its fallback: without it, a request that carries no `X-Real-IP` has no key
+/// at all, and the rate-limit layer fails the request with a 500 instead of
+/// limiting it. nginx always sets
 /// `X-Real-IP` in production, but anything talking to gl-serv directly — a
 /// local frontend during development, a health check — would otherwise get a
 /// 500 from every read endpoint.
@@ -2618,6 +2652,124 @@ mod tests {
             StatusCode::OK,
             "one visitor exhausting the liveness budget must not blank the \
              instance for everyone else on the host",
+        );
+    }
+
+    /// A client cannot escape its own bucket by forging a forwarding header.
+    ///
+    /// nginx appends to a client-sent `X-Forwarded-For` rather than replacing
+    /// it, so the leftmost entry is whatever the client wrote. Keying on it
+    /// let a fresh forged IP per request spawn without limit (#190). Only the
+    /// `X-Real-IP` that nginx overwrites may decide the bucket.
+    #[tokio::test]
+    async fn provision_rate_limit_ignores_forged_forwarding_headers() {
+        let rl = gl_core::config::RateLimitConfig {
+            provision_burst: 1,
+            provision_period_secs: 60,
+            read_burst: 100,
+            read_period_secs: 1,
+            alive_burst: 600,
+            alive_period_secs: 1,
+            alive_cache_secs: 5,
+        };
+        let app = make_router_with_rl(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+            rl,
+        );
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/goopies")
+                    .header("x-real-ip", "203.0.113.7")
+                    .header("x-forwarded-for", "198.51.100.1, 203.0.113.7")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+
+        for (header, forged) in [
+            ("x-forwarded-for", "198.51.100.2, 203.0.113.7"),
+            ("forwarded", "for=198.51.100.3"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/goopies")
+                        .header("x-real-ip", "203.0.113.7")
+                        .header(header, forged)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::TOO_MANY_REQUESTS,
+                "a forged `{header}: {forged}` must not buy a fresh bucket",
+            );
+        }
+    }
+
+    /// A client cannot spend someone else's bucket by forging their IP.
+    #[tokio::test]
+    async fn provision_rate_limit_cannot_be_spent_by_forging_another_ip() {
+        let rl = gl_core::config::RateLimitConfig {
+            provision_burst: 1,
+            provision_period_secs: 60,
+            read_burst: 100,
+            read_period_secs: 1,
+            alive_burst: 600,
+            alive_period_secs: 1,
+            alive_cache_secs: 5,
+        };
+        let app = make_router_with_rl(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+            rl,
+        );
+        let victim = "198.51.100.9";
+
+        // The attacker claims to be the victim, twice; nginx's X-Real-IP
+        // still says who they are, so only their own bucket empties.
+        for _ in 0..2 {
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/goopies")
+                        .header("x-real-ip", "203.0.113.66")
+                        .header("x-forwarded-for", format!("{victim}, 203.0.113.66"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/goopies")
+                    .header("x-real-ip", victim)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "another client forging the victim's IP must not spend the victim's budget",
         );
     }
 
