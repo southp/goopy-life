@@ -103,7 +103,7 @@ kind = "Ghost"
 source_dir = "/opt/goopy-life/ghost-6.63.0"
 version = "6.63.0"
 node_bin = "/usr/bin/node"
-service_user = "goopy"
+service_user = "goopy-ghost"
 ```
 
 ```bash
@@ -132,9 +132,20 @@ The config is version-controlled and installed by the deploy, so editing
   later moves. The provisioner stores the path as given, so a moving symlink
   would silently pull running instances onto a different Ghost — see
   [Upgrading Ghost](#upgrading-ghost).
-- **`service_user`** (`goopy` by default) must be able to read `source_dir`
-  and write the instance working directories under `base_dir`. Instances run as
-  this user, never as root.
+- **`service_user`** must exist, and must not be the account gl-serv runs as
+  (see [The sandbox](#the-sandbox-what-an-instance-can-reach)). The deployed
+  configs name `goopy-ghost`, which `deploy/host-bootstrap.sh` creates; a host
+  built by hand needs it added the same way:
+  ```bash
+  sudo useradd --system --no-create-home --home-dir /nonexistent \
+      --shell /usr/sbin/nologin --comment "goopy Ghost instances" goopy-ghost
+  ```
+  It must be able to read `source_dir`. It needs no write access anywhere: the
+  provisioner hands each instance's `content/` to it. Omitted, the key
+  defaults to `goopy`, so that a config written before #187 still parses.
+- **systemd 257 or newer** for `PrivatePIDs=`, which keeps instances of that one
+  account apart (Debian 13 ships 257). An older systemd ignores the line with a
+  warning, and the instances still boot, with that isolation gone.
 - **A wildcard TLS certificate** for the domain at
   `/etc/letsencrypt/live/<domain>/` — the same prerequisite the Hello
   provisioner has.
@@ -219,13 +230,65 @@ Handy commands:
 ```bash
 sudo systemctl status goopy-{slug}      # is the instance running?
 sudo journalctl -u goopy-{slug} -f      # follow its output
-tail -f {base_dir}/{slug}/content/logs/*.log
+sudo tail -f {base_dir}/{slug}/content/logs/*.log   # Ghost writes them as goopy-ghost, mode 640
 ```
 
 `deprovision` reverses all of it: stop and disable the unit, remove the unit
 file, remove the nginx site and reload nginx, then release the working
 directory. Releasing removes the instance's symlinks — never the base install
 they point at.
+
+---
+
+## The sandbox: what an instance can reach
+
+Visitors are anonymous Ghost Owners: theme zip upload, content import,
+`routes.yaml`, image processing. The design assumes Ghost will one day have a
+bug in that surface, and decides what the bug reaches: **that instance, and
+nothing else** (#187). Not root, not gl-serv, not the registry, not other
+visitors.
+
+**Ownership.** gl-serv writes the instance tree as itself, then hands over
+`content/` alone (`sudo chown -R -h`, through the existing `chown` rule in
+`deploy/sudoers.goopy`):
+
+| Path | Owner | The instance can |
+|---|---|---|
+| `{base_dir}/{slug}/` (the dataset root) | `goopy` | read |
+| `config.production.json`, the symlinks into `source_dir` | `goopy` | read |
+| `content/` and everything under it | `service_user` | read and write |
+| `source_dir` | `root` | read |
+
+**The unit.** `render_service_file` in
+`backend/gl-core/src/goopy_provisioner/ghost_provisioner.rs` documents each
+line; in short:
+
+- `/opt/goopy-life` is replaced by an empty read-only tmpfs. Bound back:
+  `source_dir` read-only, the instance directory read-only, and its `content/`
+  writable on top. The registry, gl-serv's config and binaries, and every other
+  instance are not there at all.
+- `NoNewPrivileges`, `RestrictSUIDSGID` and an empty capability set: sudo
+  refuses to run, whatever the sudoers say.
+- `PrivatePIDs`: every instance runs as the same account, and without a PID
+  namespace one instance could read another's files through
+  `/proc/<pid>/root` and signal its processes.
+- `ProtectSystem=strict`, `PrivateTmp`, `PrivateDevices`, the kernel
+  `Protect*` lines and `IPAddressDeny=169.254.169.254`.
+- **Not** `MemoryDenyWriteExecute` (breaks V8's JIT) and **not** `MemoryMax`
+  (the #113 caps were measured without one).
+
+Two consequences an operator meets:
+
+- **Ghost is PID 1 in its namespace.** PID 1 ignores a signal it has no handler
+  for, and Ghost installs its `SIGTERM` handler only once its HTTP server is
+  listening. A `systemctl stop` in the first moments of a boot therefore waits
+  out `TimeoutStopSec` (30 s) and ends in `SIGKILL`; after that, a stop is
+  graceful as before.
+- **Ghost's files are not `goopy`'s to read.** `UMask=0027` makes what Ghost
+  writes readable by `goopy-ghost` alone, so reading an instance's logs needs
+  `sudo`. `zfs destroy` removes the dataset whatever owns the files.
+
+Dev mode has none of this: Ghost runs as your own user, with no unit.
 
 ---
 

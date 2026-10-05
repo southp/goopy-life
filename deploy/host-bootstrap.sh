@@ -46,7 +46,7 @@ set -euo pipefail
 ADMIN_USER=southp
 # The service and deploy account; deploy/sudoers.goopy names it.
 DEPLOY_USER=goopy
-# The account Ghost instances run as once #187 lands: no shell, no home, no sudo.
+# The account every Ghost instance runs as (#187): no shell, no home, no sudo.
 GHOST_USER=goopy-ghost
 # Shown in every shell prompt, so the two hosts cannot be mistaken for each other.
 ENV_LABEL=prod
@@ -215,7 +215,7 @@ setup_accounts() {
     fi
     usermod -aG adm,systemd-journal "$DEPLOY_USER"
 
-    # Created ahead of #187 so that the firewall can name it.
+    # Every instance runs as it (prod.toml service_user), and the firewall names it.
     if getent passwd "$GHOST_USER" >/dev/null; then
         say unchanged "user $GHOST_USER"
     else
@@ -725,9 +725,11 @@ install_ghost() {
     )
     rm -rf "$home"
     # Root-owned so no instance can write here and change the code every other
-    # instance runs. That holds once instances run as GHOST_USER (#187): the
-    # parent, APP_DIR, is DEPLOY_USER's, so DEPLOY_USER could still swap this
-    # directory for a copy, and DEPLOY_USER is root-equivalent until #90.
+    # instance runs; instances run as GHOST_USER, which owns nothing here
+    # (#187). The parent, APP_DIR, is DEPLOY_USER's, so DEPLOY_USER could still
+    # swap this directory for a copy, and DEPLOY_USER is root-equivalent until
+    # #90. Moving the install out from under APP_DIR is a follow-up, recorded on
+    # #187.
     chown -R root:root "$partial"
     chmod -R a+rX "$partial"
     mv "$partial" "$dir"

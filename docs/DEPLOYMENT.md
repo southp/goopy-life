@@ -39,7 +39,8 @@ A new host is set up by [`deploy/host-bootstrap.sh`](../deploy/host-bootstrap.sh
 given to the machine as its cloud-init user data when it is created: accounts, ssh, firewall, swap and zswap, the ZFS pool, Node, Ghost's base install
 and certbot. [Standing up the host](#standing-up-the-host) walks through it and
 the few steps it leaves to you. The dev host predates the script and was built
-by hand.
+by hand; its `goopy-ghost` account too (the `useradd` line is in
+[GHOST_PROVISIONER.md](GHOST_PROVISIONER.md#requirements)).
 
 The service runs as a dedicated `goopy` account, which is also the account you deploy as — the sudoers drop-in names it explicitly, so deploying as any other user fails with a password prompt. That drop-in and the nginx cache zone come from your machine, as the admin account with password sudo; no deploy installs them, because the drop-in grants the deploy its rights, and every deploy checks it:
 
@@ -475,8 +476,9 @@ scp deploy/host-bootstrap.sh southp@<host>:/tmp/ && ssh -t southp@<host> sudo ba
 **Rehearse first.** A throwaway host created the same way costs cents and
 shows the first boot end to end, before production depends on it.
 
-`goopy-ghost`, the account the script creates with no shell and no sudo, is for
-#187: until it lands, instances still run as `goopy`.
+`goopy-ghost`, the account the script creates with no shell and no sudo, is the
+one every instance runs as (#187, `service_user` in `prod.toml`). See
+[The sandbox](GHOST_PROVISIONER.md#the-sandbox-what-an-instance-can-reach).
 
 ### First deploy
 
@@ -551,6 +553,7 @@ tell if any of this is missing:
 | `zpool_ghost`, 8 GB, at `/opt/goopy-life/data` | bootstrap | every instance's dataset; `prod.toml`'s caps × quota must fit (the bootstrap's tests check) |
 | Node 22.23.2 + Ghost 6.63.0 at `/opt/goopy-life/ghost-6.63.0` | bootstrap | `prod.toml`'s `source_dir` and `node_bin` (also tested) |
 | `goopy` account, `/opt/goopy-life/` | bootstrap | the deploy and the provisioner write into these |
+| `goopy-ghost` account | bootstrap | every instance runs as it (#187). Missing, every spawn fails when `content/` is handed over |
 | nftables (22/80/443 in), sshd, fail2ban, sysctl, unattended upgrades | bootstrap | the host's own hardening |
 | Wildcard cert at `/etc/letsencrypt/live/goopy.life/` | by hand (token) | the api site and every instance site hardcode that path |
 | DNS for `api.` and `*.goopy.life`, a public IP that outlives the machine | provider | instances are served under the wildcard |
