@@ -152,8 +152,12 @@ version = "6.63.0"
 # requires Node ^22.23.1 || ^24.20.0, which the host's nodesource node_22.x
 # repo supplies.
 node_bin = "/usr/bin/node"
-# Unprivileged user each instance's systemd unit runs as.
-service_user = "goopy"
+# The account each instance's systemd unit runs as (#187): no shell, no sudo,
+# owning nothing but each instance's content/. Never `goopy`, which holds the
+# deploy's sudo rules, so code execution inside Ghost would be root. The
+# account must exist on the host before this config is deployed, or every
+# spawn fails at handing content/ over (deploy/host-bootstrap.sh creates it).
+service_user = "goopy-ghost"
 
 # Readiness wait (#151). A spawn stays Spawning until the instance answers
 # `GET /` with a 200, because Ghost binds its port immediately and then serves
