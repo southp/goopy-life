@@ -129,6 +129,16 @@ fn default_ready_poll_ms() -> u64 {
 /// install; tying the check to this list keeps it honest as the list changes.
 pub const SHARED_ENTRIES: &[&str] = &["index.js", "core", "node_modules", "package.json"];
 
+/// The service's directory on a host: the registry, gl-serv's config and
+/// binaries, and every instance's working directory under `data/`.
+///
+/// Each instance's unit hides it behind an empty, read-only tmpfs and binds
+/// back only what that instance needs (see `render_service_file`). The same
+/// path as `APP_DIR` in deploy/host-bootstrap.sh and the paths in
+/// deploy/sudoers.goopy; a host laid out differently still gets the rest of
+/// the sandbox, but not the hiding.
+const SERVICE_DIR: &str = "/opt/goopy-life";
+
 /// Per-instance writable directories under `content/`. Ghost creates files in
 /// all of these, so each instance needs its own.
 const CONTENT_DIRS: &[&str] = &[
@@ -411,11 +421,55 @@ impl GhostProvisioner {
             .sudo_run(&["chown", "-R", "-h", &owner, &content.to_string_lossy()])
     }
 
+    /// Renders the instance's systemd unit, sandbox included (#187).
+    ///
+    /// Visitors are anonymous Ghost Owners: theme zips, content imports,
+    /// `routes.yaml`, image processing. The sandbox assumes Ghost will one day
+    /// have a bug in that surface, and decides what the bug can reach: this
+    /// instance, and nothing else. Not root, not gl-serv, not the registry,
+    /// not other visitors.
+    ///
+    /// * **Who.** `User=` is `service_user`, an account with no sudo that owns
+    ///   nothing but this instance's `content/`. `NoNewPrivileges`,
+    ///   `RestrictSUIDSGID` and an empty `CapabilityBoundingSet` make sudo and
+    ///   every setuid binary dead from in here, whatever the sudoers say.
+    /// * **What it sees.** [`SERVICE_DIR`] is replaced by an empty read-only
+    ///   tmpfs, which hides the registry, gl-serv's config and binaries, and
+    ///   every other instance. Two paths are bound back: the base install,
+    ///   read-only, and this instance's directory, read-only too, with only its
+    ///   `content/` writable on top. So even a wrong owner on
+    ///   `config.production.json` would not let the instance rewrite it.
+    ///   `ProtectSystem=strict` makes the rest of the filesystem read-only.
+    /// * **Other instances.** They all run as the same account, so file
+    ///   permissions cannot keep them apart; the mount namespace above does.
+    ///   `PrivatePIDs` closes the way around it: without it, a process could
+    ///   reach another instance's files through `/proc/<pid>/root`, which the
+    ///   kernel allows between processes of one uid, and could signal them.
+    ///   `ProtectProc=invisible` stays as well, for hosts whose systemd
+    ///   predates `PrivatePIDs` (v257) and ignores it: there it still hides
+    ///   every process of another account.
+    /// * **The kernel.** The `Protect*`, `Restrict*`, `LockPersonality` and
+    ///   `SystemCallArchitectures` lines take away interfaces a web app never
+    ///   uses. `IPAddressDeny` blocks the provider's metadata endpoint, which
+    ///   the host firewall blocks as well.
+    ///
+    /// Deliberately absent:
+    ///
+    /// * `MemoryDenyWriteExecute`: V8's JIT needs writable, executable memory.
+    /// * `MemoryMax`: #113 sized the instance caps without per-unit limits;
+    ///   adding one needs a measurement first.
+    /// * `SystemCallFilter`: worth adding, once `systemd-analyze security` on a
+    ///   host shows what Node needs; a wrong filter kills Ghost at boot.
+    ///
+    /// The sandbox gives the unit its own mount namespace. That broke gl-serv
+    /// (#136), which *creates* ZFS mounts; an instance only uses a dataset that
+    /// is already mounted, and `After=zfs-mount.service` keeps that true after
+    /// a reboot.
     fn render_service_file(&self, slug: &str, working_dir: &Path) -> String {
         format!(
             r#"[Unit]
 Description=Goopy Ghost - {slug}
-After=network.target
+After=network.target zfs-mount.service
 
 [Service]
 Type=simple
@@ -429,12 +483,43 @@ RestartSec=5
 KillMode=mixed
 TimeoutStopSec=30
 
+# Sandbox (#187): what a compromised instance can reach is this instance.
+# Rendered by gl-core's ghost_provisioner.rs, which says why each line is here.
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
+UMask=0027
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+TemporaryFileSystem={service_dir}:ro
+BindReadOnlyPaths={source_dir}
+BindReadOnlyPaths={working_dir}
+BindPaths={working_dir}/content
+PrivatePIDs=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+TasksMax=256
+IPAddressDeny=169.254.169.254
+
 [Install]
 WantedBy=multi-user.target
 "#,
             user = self.ghost.service_user,
             node_bin = self.ghost.node_bin,
             working_dir = working_dir.display(),
+            source_dir = self.ghost.source_dir.display(),
+            service_dir = SERVICE_DIR,
         )
     }
 
@@ -1271,6 +1356,153 @@ mod tests {
         assert!(
             !working_dir.exists(),
             "a failed provision releases its working directory"
+        );
+    }
+
+    /// The unit a production provisioner renders for `working_dir`, as its
+    /// non-comment lines.
+    fn prod_unit_lines(source: &TempDir, working_dir: &Path) -> Vec<String> {
+        let p = provisioner(false, source, Arc::new(MockSysRunner::new()));
+        p.render_service_file("tasty-lucky-clover", working_dir)
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Every hardening line #187 settled on. A line dropped here reopens a
+    /// path out of the instance, and nothing else would notice: the instance
+    /// still boots and serves.
+    #[test]
+    fn prod_unit_is_sandboxed() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let lines = prod_unit_lines(&source, &base.path().join("tasty-lucky-clover"));
+
+        for directive in [
+            "NoNewPrivileges=yes",
+            "RestrictSUIDSGID=yes",
+            "CapabilityBoundingSet=",
+            "UMask=0027",
+            "ProtectSystem=strict",
+            "ProtectHome=yes",
+            "PrivateTmp=yes",
+            "PrivateDevices=yes",
+            "ProtectKernelTunables=yes",
+            "ProtectKernelModules=yes",
+            "ProtectKernelLogs=yes",
+            "ProtectControlGroups=yes",
+            "ProtectClock=yes",
+            "ProtectHostname=yes",
+            "RestrictNamespaces=yes",
+            "RestrictRealtime=yes",
+            "LockPersonality=yes",
+            "SystemCallArchitectures=native",
+            "TasksMax=256",
+            "IPAddressDeny=169.254.169.254",
+        ] {
+            assert!(
+                lines.iter().any(|l| l == directive),
+                "the instance unit lost `{directive}`"
+            );
+        }
+    }
+
+    /// The service directory holds the registry, gl-serv's config and
+    /// binaries, and every other instance. The instance sees none of it: only
+    /// the base install and its own directory are bound back, read-only, with
+    /// `content/` the one writable path.
+    #[test]
+    fn prod_unit_hides_the_service_dir_and_binds_back_only_this_instance() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+        let lines = prod_unit_lines(&source, &working_dir);
+
+        assert!(
+            lines.contains(&"TemporaryFileSystem=/opt/goopy-life:ro".to_string()),
+            "the service directory must be replaced by an empty read-only tmpfs"
+        );
+
+        let read_only: Vec<&str> = lines
+            .iter()
+            .filter_map(|l| l.strip_prefix("BindReadOnlyPaths="))
+            .collect();
+        assert_eq!(
+            read_only,
+            [
+                source.path().display().to_string(),
+                working_dir.display().to_string()
+            ],
+            "the base install and the instance directory are bound back read-only"
+        );
+
+        let writable: Vec<&str> = lines
+            .iter()
+            .filter_map(|l| l.strip_prefix("BindPaths="))
+            .collect();
+        assert_eq!(
+            writable,
+            [working_dir.join("content").display().to_string()],
+            "content/ must be the only writable bind: config.production.json \
+             stays read-only to the instance"
+        );
+        assert!(
+            !lines.iter().any(|l| l.starts_with("ReadWritePaths=")),
+            "no other path may be made writable"
+        );
+    }
+
+    /// Every instance runs as the same account, so permissions cannot keep
+    /// them apart. Without a PID namespace one instance reaches another's
+    /// files through `/proc/<pid>/root`, which the kernel allows within one
+    /// uid, and can signal its processes.
+    #[test]
+    fn prod_unit_keeps_instances_of_one_account_apart() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let lines = prod_unit_lines(&source, &base.path().join("tasty-lucky-clover"));
+
+        assert!(lines.contains(&"PrivatePIDs=yes".to_string()));
+        assert!(
+            lines.contains(&"ProtectProc=invisible".to_string()),
+            "kept for a systemd older than PrivatePIDs, which ignores it"
+        );
+    }
+
+    /// Not there by omission: V8's JIT needs writable, executable memory, and
+    /// the #113 caps were measured without a per-unit memory limit.
+    #[test]
+    fn prod_unit_leaves_out_what_breaks_or_was_never_measured() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let lines = prod_unit_lines(&source, &base.path().join("tasty-lucky-clover"));
+
+        for absent in ["MemoryDenyWriteExecute=", "MemoryMax="] {
+            assert!(
+                !lines.iter().any(|l| l.starts_with(absent)),
+                "`{absent}` must stay out of the instance unit"
+            );
+        }
+    }
+
+    /// The sandbox binds the instance's dataset into the unit's own mount
+    /// namespace. Started before ZFS has mounted it, after a reboot, the unit
+    /// would bind the empty mount point and Ghost would start a blank site.
+    #[test]
+    fn prod_unit_starts_after_zfs_has_mounted_the_datasets() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let lines = prod_unit_lines(&source, &base.path().join("tasty-lucky-clover"));
+
+        let after = lines
+            .iter()
+            .find_map(|l| l.strip_prefix("After="))
+            .expect("the unit must have an After= line");
+        assert!(
+            after.split_whitespace().any(|u| u == "zfs-mount.service"),
+            "After={after} must include zfs-mount.service"
         );
     }
 
