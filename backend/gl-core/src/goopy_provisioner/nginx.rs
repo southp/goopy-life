@@ -65,6 +65,22 @@
 //! path (`/assets/foo.css`), so a key built from it would mint a separate entry
 //! per subresource and collapse nothing. Shortening the `proxy_pass` to a bare
 //! `http://{api_address}` would do precisely that.
+//!
+//! # The request body limit
+//!
+//! nginx refuses any request body over `client_max_body_size` with its own 413,
+//! before Ghost sees it, and the default is **1 MB** — under a phone photo, and
+//! under most custom theme zips (#189). The site sets it to 25 MB, on the TLS
+//! server so it covers every location. The number is a memory bound, not a disk
+//! one: `quota_mb` already caps what an instance can store, but Ghost buffers a
+//! multipart upload in `os.tmpdir()`, which on the dev host is a RAM-backed tmpfs
+//! that falls back to swap. 25 MB covers photos and themes without making many
+//! concurrent uploads a cheap way to push a full host into swap (#113); Ghost-CLI's
+//! own template allows 50 MB.
+//!
+//! Sites rendered before the limit was added keep nginx's default until the
+//! instance is provisioned again; instance lifetimes are short enough that
+//! this resolves itself.
 
 use crate::shared_types::Error;
 use crate::sys_utils::SysRunner;
@@ -91,6 +107,8 @@ server {{
 
     ssl_certificate     /etc/letsencrypt/live/{domain}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/{domain}/privkey.pem;
+
+    client_max_body_size 25m;
 
     location = /goopy-alive-check {{
         internal;
@@ -413,6 +431,32 @@ kind = "Hello"
             "no wildcard may reach a rendered site — it is a listen address, \
              and only Linux's habit of routing a connect to 0.0.0.0 at loopback \
              ever made it look like a destination"
+        );
+    }
+
+    /// Without an explicit limit nginx's 1 MB default refuses a phone photo or a
+    /// theme zip with its own 413 before Ghost sees the upload (#189). Pinned to
+    /// the TLS server, the one that proxies to Ghost: the port-80 server only
+    /// redirects, so a directive that landed there would change nothing.
+    #[test]
+    fn render_site_accepts_uploads_up_to_25_mb() {
+        let cfg = render_site("tasty-lucky-clover", "goopy.life", 9876, "127.0.0.1:3000");
+
+        let tls_server = cfg
+            .split("listen 443 ssl;")
+            .nth(1)
+            .expect("rendered config must contain the TLS server");
+
+        assert!(
+            tls_server.contains("client_max_body_size 25m;"),
+            "the TLS server must raise nginx's 1 MB body limit, or Ghost uploads over \
+             1 MB fail with nginx's 413, got:\n{cfg}"
+        );
+        assert_eq!(
+            cfg.matches("client_max_body_size").count(),
+            1,
+            "the limit must be set once, at the server level, so no location can \
+             quietly diverge from it, got:\n{cfg}"
         );
     }
 
