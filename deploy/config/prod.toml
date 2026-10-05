@@ -167,8 +167,8 @@ node_bin = "/usr/bin/node"
 # The account each instance's systemd unit runs as (#187): no shell, no sudo,
 # owning nothing but each instance's content/. Never `goopy`, which holds the
 # deploy's sudo rules, so code execution inside Ghost would be root. The
-# account must exist on the host before this config is deployed, or every
-# spawn fails at handing content/ over (deploy/host-bootstrap.sh creates it).
+# account must exist on the host before this config is deployed, or
+# `--check-config` refuses the deploy (deploy/host-bootstrap.sh creates it).
 service_user = "goopy-ghost"
 
 # Readiness wait (#151). A spawn stays Spawning until the instance answers
