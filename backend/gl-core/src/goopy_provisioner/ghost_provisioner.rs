@@ -81,7 +81,14 @@ pub struct GhostConfig {
     /// Node.js binary used to run Ghost. systemd requires an absolute path.
     #[serde(default = "default_node_bin")]
     pub node_bin: String,
-    /// Unprivileged OS user the per-instance systemd unit runs as.
+    /// OS account the per-instance systemd unit runs as. Production mode only:
+    /// dev mode runs Ghost as gl-serv's own user.
+    ///
+    /// Never gl-serv's own account on a host. That one holds the deploy's sudo
+    /// rules, so any code execution inside Ghost would be root (#187). The
+    /// deployed configs name `goopy-ghost`: no shell, no sudo, owning nothing
+    /// but each instance's `content/`. The default stays `goopy` only so that
+    /// a config written before #187 keeps parsing.
     #[serde(default = "default_service_user")]
     pub service_user: String,
     /// How long a freshly started instance may take to serve, in seconds,
@@ -373,6 +380,37 @@ impl GhostProvisioner {
         fs::write(&path, self.render_ghost_config(goopy)?).map_err(Error::Io)
     }
 
+    /// Gives `content/`, and nothing else, to the account the unit runs as.
+    ///
+    /// gl-serv writes the whole instance tree as itself, and the dataset root
+    /// stays its own (see `ZfsAllocator::allocate`). So once this has run,
+    /// `service_user` can write everything Ghost writes, and cannot write
+    /// `config.production.json` or the symlinks into the base install: those
+    /// sit in a directory it does not own. An instance able to edit its own
+    /// config could point its database, or its content path, anywhere the
+    /// account can reach (#187).
+    ///
+    /// `-h` and `-R` together never follow a symlink: the stock themes in
+    /// `content/themes` are links into the shared base install, and a `chown`
+    /// that followed them would hand every instance's account the code all the
+    /// other instances run. GNU `chown -R` already defaults to that; the flag
+    /// makes it impossible to lose by reordering arguments.
+    ///
+    /// Runs before the unit is started, so nothing running as `service_user`
+    /// can see the tree yet. Rides on the existing `chown * /opt/goopy-life/data/*`
+    /// rule in deploy/sudoers.goopy; it needs no new sudo rights.
+    fn hand_content_to_service_user(&self, working_dir: &Path) -> Result<(), Error> {
+        let content = working_dir.join("content");
+        let owner = format!("{0}:{0}", self.ghost.service_user);
+        info!(
+            path = %content.display(),
+            %owner,
+            "handing the instance's content directory to its service user"
+        );
+        self.sys
+            .sudo_run(&["chown", "-R", "-h", &owner, &content.to_string_lossy()])
+    }
+
     fn render_service_file(&self, slug: &str, working_dir: &Path) -> String {
         format!(
             r#"[Unit]
@@ -441,6 +479,9 @@ WantedBy=multi-user.target
                 self.readiness_budget(),
             )?;
         } else {
+            // Dev mode skips this: there, Ghost runs as gl-serv's own user, and
+            // a local machine has no sudo rule for it.
+            self.hand_content_to_service_user(&goopy.working_dir)?;
             systemd::install_and_start(
                 self.sys.as_ref(),
                 &Self::service_name(&goopy.slug),
@@ -584,7 +625,7 @@ mod tests {
                 source_dir: source.path().to_path_buf(),
                 version: "5.87.1".to_string(),
                 node_bin: "/usr/bin/node".to_string(),
-                service_user: "goopy".to_string(),
+                service_user: "goopy-ghost".to_string(),
                 ready_timeout_secs,
                 ready_poll_ms,
             },
@@ -1056,7 +1097,10 @@ mod tests {
             })
             .expect("should write a systemd unit");
         assert!(unit.contains("Environment=NODE_ENV=production"));
-        assert!(unit.contains("User=goopy"), "Ghost must not run as root");
+        assert!(
+            unit.contains("User=goopy-ghost\n"),
+            "Ghost must run as the configured service user, not root"
+        );
         assert!(unit.contains(&format!(
             "ExecStart=/usr/bin/node \"{}/index.js\"",
             working_dir.display()
@@ -1077,6 +1121,156 @@ mod tests {
         assert_eq!(
             verb_seq,
             ["daemon-reload", "enable", "start", "ln", "reload"]
+        );
+    }
+
+    /// The `chown` calls a provisioning run made, as argument lists.
+    fn chown_calls(mock: &MockSysRunner) -> Vec<Vec<String>> {
+        mock.recorded_calls()
+            .into_iter()
+            .filter_map(|c| match c {
+                MockCall::SudoRun { args } if args.first().map(String::as_str) == Some("chown") => {
+                    Some(args)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The instance account must be able to write what Ghost writes, and
+    /// nothing else (#187): `content/` is handed over, the instance directory
+    /// itself (and so `config.production.json`) is not.
+    #[test]
+    fn prod_provision_hands_only_content_to_the_service_user() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let mock = Arc::new(MockSysRunner::new());
+        let p = provisioner(false, &source, mock.clone());
+        p.provision(&test_goopy(&working_dir, 9876))
+            .expect("prod provision should succeed");
+
+        assert_eq!(
+            chown_calls(&mock),
+            [vec![
+                "chown".to_string(),
+                "-R".to_string(),
+                "-h".to_string(),
+                "goopy-ghost:goopy-ghost".to_string(),
+                working_dir.join("content").display().to_string(),
+            ]],
+            "exactly one chown, of content/ alone, never following symlinks"
+        );
+    }
+
+    /// The stock themes in `content/themes` are symlinks into the shared base
+    /// install. A recursive chown that followed them would give the instance
+    /// account write access to code every other instance runs.
+    #[test]
+    fn prod_content_chown_never_follows_symlinks() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let mock = Arc::new(MockSysRunner::new());
+        let p = provisioner(false, &source, mock.clone());
+        p.provision(&test_goopy(&working_dir, 9876))
+            .expect("prod provision should succeed");
+
+        for args in chown_calls(&mock) {
+            assert!(
+                args.contains(&"-h".to_string()),
+                "chown {args:?} would follow the stock-theme symlinks into the base install"
+            );
+            assert!(
+                !args
+                    .iter()
+                    .any(|a| a == "-L" || a == "-H" || a == "--dereference"),
+                "chown {args:?} must not dereference symlinks"
+            );
+        }
+    }
+
+    /// The hand-over belongs between writing the tree and starting the unit:
+    /// before it, gl-serv could not finish writing; after the start, Ghost
+    /// would already be failing to write its database.
+    #[test]
+    fn prod_provision_hands_content_over_before_starting_the_unit() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let mock = Arc::new(MockSysRunner::new());
+        let p = provisioner(false, &source, mock.clone());
+        p.provision(&test_goopy(&working_dir, 9876))
+            .expect("prod provision should succeed");
+
+        let calls = mock.recorded_calls();
+        let chown_at = calls
+            .iter()
+            .position(|c| matches!(c, MockCall::SudoRun { args } if args[0] == "chown"))
+            .expect("prod provisioning must hand content/ over");
+        let unit_at = calls
+            .iter()
+            .position(
+                |c| matches!(c, MockCall::SudoWrite { path, .. } if path.ends_with(".service")),
+            )
+            .expect("prod provisioning must write the unit");
+        assert!(
+            chown_at < unit_at,
+            "content/ must belong to the service user before its unit exists"
+        );
+        assert!(
+            working_dir.join("config.production.json").is_file(),
+            "the config is written by gl-serv, before the hand-over"
+        );
+    }
+
+    /// Dev mode runs Ghost as gl-serv's own user, on a machine with no sudo
+    /// rule for it, so there is nothing to hand over.
+    #[test]
+    fn dev_provision_does_not_chown() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let mock = Arc::new(MockSysRunner::new());
+        let p = provisioner(true, &source, mock.clone());
+        p.provision(&test_goopy(&working_dir, 9876))
+            .expect("dev provision should succeed");
+
+        assert!(
+            chown_calls(&mock).is_empty(),
+            "dev mode must not sudo chown"
+        );
+    }
+
+    /// A failed hand-over must not start an instance that cannot write its own
+    /// database, and must release the storage like any other failed step.
+    #[test]
+    fn prod_provision_fails_and_releases_storage_when_the_hand_over_fails() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let mock = Arc::new(MockSysRunner::failing_sudo_run(|args| {
+            args.first() == Some(&"chown")
+        }));
+        let p = provisioner(false, &source, mock.clone());
+        p.provision(&test_goopy(&working_dir, 9876))
+            .expect_err("an instance whose content/ was not handed over must not start");
+
+        assert!(
+            !mock
+                .sudo_write_paths()
+                .iter()
+                .any(|path| path.ends_with(".service")),
+            "no unit may be installed after a failed hand-over"
+        );
+        assert!(
+            !working_dir.exists(),
+            "a failed provision releases its working directory"
         );
     }
 

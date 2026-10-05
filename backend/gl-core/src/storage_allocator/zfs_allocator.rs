@@ -66,6 +66,11 @@ impl StorageAllocator for ZfsAllocator {
 
         // The dataset root is owned by root after sudo zfs create; hand it to
         // the current process owner so the provisioner can write into it.
+        //
+        // gl-serv's own account, not the instance's service user, on purpose
+        // (#187): the root holds config.production.json, which the instance
+        // must not be able to rewrite. The provisioner hands over content/
+        // alone, once the tree is written.
         let uid_gid = read_uid_gid()?;
         let chown_output = std::process::Command::new("sudo")
             .args(["-n", "chown", &uid_gid, &path.to_string_lossy()])
