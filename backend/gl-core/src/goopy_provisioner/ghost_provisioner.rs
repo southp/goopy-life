@@ -1277,19 +1277,28 @@ mod tests {
         }
     }
 
-    /// The hand-over belongs between writing the tree and starting the unit:
-    /// before it, gl-serv could not finish writing; after the start, Ghost
-    /// would already be failing to write its database.
+    /// The hand-over belongs between creating the tree and starting the unit.
+    /// Before it, `content/data` and the rest would be created as gl-serv's
+    /// account after the chown, and Ghost could not write its database. After
+    /// the start, Ghost would already be failing to.
     #[test]
     fn prod_provision_hands_content_over_before_starting_the_unit() {
         let source = fake_ghost_source();
         let base = tempdir().unwrap();
         let working_dir = base.path().join("tasty-lucky-clover");
 
-        let mock = Arc::new(MockSysRunner::new());
+        // The chown fails unless every content dir already exists, so a
+        // successful provision proves it ran after the tree was created.
+        let wd = working_dir.clone();
+        let mock = Arc::new(MockSysRunner::failing_sudo_run(move |args| {
+            args.first() == Some(&"chown")
+                && !CONTENT_DIRS
+                    .iter()
+                    .all(|dir| wd.join("content").join(dir).is_dir())
+        }));
         let p = provisioner(false, &source, mock.clone());
         p.provision(&test_goopy(&working_dir, 9876))
-            .expect("prod provision should succeed");
+            .expect("every content dir must exist when content/ is handed over");
 
         let calls = mock.recorded_calls();
         let chown_at = calls
@@ -1305,10 +1314,6 @@ mod tests {
         assert!(
             chown_at < unit_at,
             "content/ must belong to the service user before its unit exists"
-        );
-        assert!(
-            working_dir.join("config.production.json").is_file(),
-            "the config is written by gl-serv, before the hand-over"
         );
     }
 
