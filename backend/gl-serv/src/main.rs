@@ -145,7 +145,14 @@ fn check_config(path: &std::path::Path) -> Result<(gl_core::Config, String), gl_
 /// account was `goopy`, which exists wherever gl-serv runs. Since #187 it is
 /// `goopy-ghost`, an account an admin has to create, and a missing one is this
 /// exact failure: a green deploy, then every spawn failing at the chown.
-fn check_host_paths(cfg: &gl_core::Config) -> Result<(), gl_core::Error> {
+///
+/// `systemd` is the host's systemd version, also production mode only: the
+/// instance unit relies on `PrivatePIDs` (#187), which an older systemd skips
+/// with only a warning, so instances of the one account could read each other
+/// and nothing would go red. Passed in rather than read here because CI's
+/// runner has an older systemd and macOS has none; [`systemd_version`] reads
+/// it on the host.
+fn check_host_paths(cfg: &gl_core::Config, systemd: Option<u32>) -> Result<(), gl_core::Error> {
     let ProvisionerConfig::Ghost(ghost) = &cfg.provisioner else {
         return Ok(());
     };
@@ -189,6 +196,20 @@ fn check_host_paths(cfg: &gl_core::Config) -> Result<(), gl_core::Error> {
         ));
     }
 
+    if !cfg.dev_mode {
+        match systemd {
+            Some(version) if version >= PRIVATE_PIDS_MIN_SYSTEMD => {}
+            Some(version) => problems.push(format!(
+                "systemd {version} is too old: instance units need PrivatePIDs, \
+                 which needs systemd {PRIVATE_PIDS_MIN_SYSTEMD} or newer"
+            )),
+            None => problems.push(format!(
+                "could not read the systemd version: instance units need \
+                 PrivatePIDs, which needs systemd {PRIVATE_PIDS_MIN_SYSTEMD} or newer"
+            )),
+        }
+    }
+
     if problems.is_empty() {
         Ok(())
     } else {
@@ -222,6 +243,36 @@ fn account_exists(name: &str) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+/// The first systemd release with `PrivatePIDs=`, which every instance unit
+/// sets (#187).
+const PRIVATE_PIDS_MIN_SYSTEMD: u32 = 257;
+
+/// The major version of this host's systemd, from `systemctl --version`.
+///
+/// `None` when it cannot be read, which [`check_host_paths`] treats as a
+/// failure, like [`account_exists`].
+fn systemd_version() -> Option<u32> {
+    let output = std::process::Command::new("systemctl")
+        .arg("--version")
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_systemd_version(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The major version from `systemctl --version` output, whose first line reads
+/// `systemd 257 (257.13-1)`.
+fn parse_systemd_version(output: &str) -> Option<u32> {
+    let mut words = output.lines().next()?.split_whitespace();
+    if words.next()? != "systemd" {
+        return None;
+    }
+    words.next()?.parse().ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -1113,7 +1164,7 @@ async fn main() {
                 // Printed before the host checks run, so a failure arrives
                 // next to the values it was judged against.
                 println!("{summary}");
-                if let Err(e) = check_host_paths(&cfg) {
+                if let Err(e) = check_host_paths(&cfg, systemd_version()) {
                     eprintln!("{e}");
                     std::process::exit(1);
                 }
@@ -3014,7 +3065,7 @@ kind = "Hello"
         let (dir, source_dir) = prepared_ghost_install();
         let cfg = ghost_config(&source_dir, &dir.path().join("node"));
 
-        check_host_paths(&cfg).expect("a prepared install must pass");
+        check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD).expect("a prepared install must pass");
     }
 
     #[test]
@@ -3025,7 +3076,8 @@ kind = "Hello"
         let (dir, _) = prepared_ghost_install();
         let cfg = ghost_config(&dir.path().join("ghost-6.63.1"), &dir.path().join("node"));
 
-        let err = check_host_paths(&cfg).expect_err("a typo'd source_dir must fail");
+        let err =
+            check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD).expect_err("a typo'd source_dir must fail");
         assert!(err.to_string().contains("source_dir"), "was: {err}");
     }
 
@@ -3037,7 +3089,8 @@ kind = "Hello"
         std::fs::remove_file(source_dir.join("package.json")).expect("remove package.json");
 
         let cfg = ghost_config(&source_dir, &dir.path().join("node"));
-        let err = check_host_paths(&cfg).expect_err("an unprepared install must fail");
+        let err = check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD)
+            .expect_err("an unprepared install must fail");
         assert!(err.to_string().contains("package.json"), "was: {err}");
     }
 
@@ -3048,7 +3101,8 @@ kind = "Hello"
         std::fs::write(&not_node, b"").expect("create non-executable");
 
         let cfg = ghost_config(&source_dir, &not_node);
-        let err = check_host_paths(&cfg).expect_err("a non-executable node_bin must fail");
+        let err = check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD)
+            .expect_err("a non-executable node_bin must fail");
         assert!(err.to_string().contains("node_bin"), "was: {err}");
     }
 
@@ -3084,7 +3138,7 @@ kind = "Hello"
         let (dir, source_dir) = prepared_ghost_install();
         let cfg = ghost_config_running_as(&source_dir, &dir.path().join("node"), "root", false);
 
-        check_host_paths(&cfg).expect("an existing account must pass");
+        check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD).expect("an existing account must pass");
     }
 
     #[test]
@@ -3099,7 +3153,8 @@ kind = "Hello"
             false,
         );
 
-        let err = check_host_paths(&cfg).expect_err("a missing account must fail");
+        let err =
+            check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD).expect_err("a missing account must fail");
         assert!(
             err.to_string().contains("service_user") && err.to_string().contains(NO_SUCH_ACCOUNT),
             "the error must name the key and the account, was: {err}",
@@ -3114,7 +3169,71 @@ kind = "Hello"
         let cfg =
             ghost_config_running_as(&source_dir, &dir.path().join("node"), NO_SUCH_ACCOUNT, true);
 
-        check_host_paths(&cfg).expect("dev mode never reads service_user");
+        check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD).expect("dev mode never reads service_user");
+    }
+
+    /// A host whose systemd has `PrivatePIDs`, so tests about other checks
+    /// pass this one.
+    const NEW_ENOUGH_SYSTEMD: Option<u32> = Some(PRIVATE_PIDS_MIN_SYSTEMD);
+
+    #[test]
+    fn check_host_paths_rejects_a_systemd_without_private_pids() {
+        // An older systemd skips PrivatePIDs with only a warning: the unit
+        // boots, and instances of the one account can read each other.
+        let (dir, source_dir) = prepared_ghost_install();
+        let cfg = ghost_config_running_as(&source_dir, &dir.path().join("node"), "root", false);
+
+        let err = check_host_paths(&cfg, Some(PRIVATE_PIDS_MIN_SYSTEMD - 1))
+            .expect_err("a systemd without PrivatePIDs must fail");
+        assert!(
+            err.to_string().contains("PrivatePIDs") && err.to_string().contains("257"),
+            "the error must name the directive and the version it needs, was: {err}",
+        );
+    }
+
+    #[test]
+    fn check_host_paths_rejects_an_unreadable_systemd_version() {
+        let (dir, source_dir) = prepared_ghost_install();
+        let cfg = ghost_config_running_as(&source_dir, &dir.path().join("node"), "root", false);
+
+        let err = check_host_paths(&cfg, None).expect_err("a gate that cannot check must not pass");
+        assert!(err.to_string().contains("systemd"), "was: {err}");
+    }
+
+    #[test]
+    fn check_host_paths_ignores_systemd_in_dev_mode() {
+        // Dev mode spawns Ghost as a plain process, with no unit at all.
+        let (dir, source_dir) = prepared_ghost_install();
+        let cfg = ghost_config_running_as(&source_dir, &dir.path().join("node"), "root", true);
+
+        check_host_paths(&cfg, None).expect("dev mode writes no systemd unit");
+    }
+
+    #[test]
+    fn parse_systemd_version_reads_the_major_version() {
+        assert_eq!(
+            parse_systemd_version("systemd 257 (257.13-1)\n+PAM +AUDIT +SELINUX\n"),
+            Some(257),
+            "Debian 13",
+        );
+        assert_eq!(
+            parse_systemd_version("systemd 255 (255.4-1ubuntu8.6)\n+PAM\n"),
+            Some(255),
+            "Ubuntu 24.04",
+        );
+    }
+
+    #[test]
+    fn parse_systemd_version_rejects_anything_else() {
+        for output in [
+            "",
+            "\n",
+            "systemd\n",
+            "systemd abc (abc)\n",
+            "upstart 1.13\n",
+        ] {
+            assert_eq!(parse_systemd_version(output), None, "{output:?}");
+        }
     }
 
     #[test]
@@ -3124,7 +3243,7 @@ kind = "Hello"
         let f = write_config(VALID_CONFIG);
         let (cfg, _) = check_config(f.path()).expect("a valid config must check out");
 
-        check_host_paths(&cfg).expect("Hello configures no host paths");
+        check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD).expect("Hello configures no host paths");
     }
 
     // -----------------------------------------------------------------------
