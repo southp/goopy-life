@@ -140,9 +140,11 @@ fn check_config(path: &std::path::Path) -> Result<(gl_core::Config, String), gl_
 /// Left unchecked, a typo here parses, starts, and reports `systemctl
 /// is-active` green — and then fails every `POST /goopies` at provision time.
 ///
-/// `service_user` is deliberately not checked: verifying it needs an NSS
-/// lookup, and unlike these two it fails loudly at provision time rather than
-/// silently.
+/// `service_user` is checked too, in production mode only (dev mode runs Ghost
+/// as gl-serv's own account and never reads it). It used to be left out: the
+/// account was `goopy`, which exists wherever gl-serv runs. Since #187 it is
+/// `goopy-ghost`, an account an admin has to create, and a missing one is this
+/// exact failure: a green deploy, then every spawn failing at the chown.
 fn check_host_paths(cfg: &gl_core::Config) -> Result<(), gl_core::Error> {
     let ProvisionerConfig::Ghost(ghost) = &cfg.provisioner else {
         return Ok(());
@@ -180,6 +182,13 @@ fn check_host_paths(cfg: &gl_core::Config) -> Result<(), gl_core::Error> {
         ));
     }
 
+    if !cfg.dev_mode && !account_exists(&ghost.service_user) {
+        problems.push(format!(
+            "provisioner.service_user {} is not an account on this host",
+            ghost.service_user
+        ));
+    }
+
     if problems.is_empty() {
         Ok(())
     } else {
@@ -196,6 +205,22 @@ fn is_executable(path: &std::path::Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path)
         .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+/// Whether `name` is an account on this host.
+///
+/// Asked through `id`, which resolves the name through NSS the same way
+/// `chown` and systemd's `User=` will, and which exists on Linux and macOS
+/// alike. Failing to ask counts as "no": a gate that cannot check must not
+/// pass.
+fn account_exists(name: &str) -> bool {
+    std::process::Command::new("id")
+        .args(["-u", "--", name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
         .unwrap_or(false)
 }
 
@@ -3025,6 +3050,71 @@ kind = "Hello"
         let cfg = ghost_config(&source_dir, &not_node);
         let err = check_host_paths(&cfg).expect_err("a non-executable node_bin must fail");
         assert!(err.to_string().contains("node_bin"), "was: {err}");
+    }
+
+    /// A Ghost config as [`ghost_config`], whose instances run as
+    /// `service_user`, in production or dev mode.
+    fn ghost_config_running_as(
+        source_dir: &std::path::Path,
+        node_bin: &std::path::Path,
+        service_user: &str,
+        dev_mode: bool,
+    ) -> gl_core::Config {
+        let toml = VALID_CONFIG
+            .replace("dev_mode = true", &format!("dev_mode = {dev_mode}"))
+            .replace(
+                "[provisioner]\nkind = \"Hello\"",
+                &format!(
+                    "[provisioner]\nkind = \"Ghost\"\nversion = \"6.63.0\"\n\
+                     source_dir = {:?}\nnode_bin = {:?}\nservice_user = {:?}",
+                    source_dir, node_bin, service_user,
+                ),
+            );
+        let f = write_config(&toml);
+        let (cfg, _) = check_config(f.path()).expect("a Ghost config parses");
+        cfg
+    }
+
+    /// An account name no host has.
+    const NO_SUCH_ACCOUNT: &str = "gl-test-no-such-account";
+
+    #[test]
+    fn check_host_paths_accepts_a_service_user_that_exists() {
+        // `root` is the one account every Linux and macOS host has.
+        let (dir, source_dir) = prepared_ghost_install();
+        let cfg = ghost_config_running_as(&source_dir, &dir.path().join("node"), "root", false);
+
+        check_host_paths(&cfg).expect("an existing account must pass");
+    }
+
+    #[test]
+    fn check_host_paths_rejects_a_service_user_that_is_not_an_account() {
+        // The #187 failure: `goopy-ghost` never created on the host. The config
+        // parses and the service starts, then every spawn fails at the chown.
+        let (dir, source_dir) = prepared_ghost_install();
+        let cfg = ghost_config_running_as(
+            &source_dir,
+            &dir.path().join("node"),
+            NO_SUCH_ACCOUNT,
+            false,
+        );
+
+        let err = check_host_paths(&cfg).expect_err("a missing account must fail");
+        assert!(
+            err.to_string().contains("service_user") && err.to_string().contains(NO_SUCH_ACCOUNT),
+            "the error must name the key and the account, was: {err}",
+        );
+    }
+
+    #[test]
+    fn check_host_paths_ignores_service_user_in_dev_mode() {
+        // Dev mode runs Ghost as gl-serv's own account, so a missing
+        // `service_user` costs nothing there and must not fail a local check.
+        let (dir, source_dir) = prepared_ghost_install();
+        let cfg =
+            ghost_config_running_as(&source_dir, &dir.path().join("node"), NO_SUCH_ACCOUNT, true);
+
+        check_host_paths(&cfg).expect("dev mode never reads service_user");
     }
 
     #[test]

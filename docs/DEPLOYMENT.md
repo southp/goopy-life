@@ -553,7 +553,7 @@ tell if any of this is missing:
 | `zpool_ghost`, 8 GB, at `/opt/goopy-life/data` | bootstrap | every instance's dataset; `prod.toml`'s caps × quota must fit (the bootstrap's tests check) |
 | Node 22.23.2 + Ghost 6.63.0 at `/opt/goopy-life/ghost-6.63.0` | bootstrap | `prod.toml`'s `source_dir` and `node_bin` (also tested) |
 | `goopy` account, `/opt/goopy-life/` | bootstrap | the deploy and the provisioner write into these |
-| `goopy-ghost` account | bootstrap | every instance runs as it (#187). Missing, every spawn fails when `content/` is handed over |
+| `goopy-ghost` account | bootstrap | every instance runs as it (#187). Missing, `--check-config` refuses the deploy before the swap |
 | nftables (22/80/443 in), sshd, fail2ban, sysctl, unattended upgrades | bootstrap | the host's own hardening |
 | Wildcard cert at `/etc/letsencrypt/live/goopy.life/` | by hand (token) | the api site and every instance site hardcode that path |
 | DNS for `api.` and `*.goopy.life`, a public IP that outlives the machine | provider | instances are served under the wildcard |
