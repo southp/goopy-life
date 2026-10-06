@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
 	title: "Goopy.life",
-	description: "PoC the plumbing of Goopy.life with love.",
+	description: "Spin up a throwaway Ghost site in one click.",
 };
 
 export default function RootLayout({
