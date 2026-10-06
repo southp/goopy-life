@@ -10,8 +10,9 @@ export const size = { width: 1200, height: 630 };
 export const contentType = 'image/png';
 
 export default async function OpengraphImage() {
-	// A pre-tinted copy of the hero 💩: the card renderer has no CSS filters.
-	const emoji = await readFile(join(process.cwd(), 'assets/goop-emoji.svg'), 'base64');
+	// The hero 💩 as it looks on the site, cropped from a screenshot: the card
+	// renderer has no CSS filters to tint a glyph itself.
+	const emoji = await readFile(join(process.cwd(), 'assets/goop-emoji.png'), 'base64');
 
 	return new ImageResponse(
 		(
@@ -27,7 +28,7 @@ export default async function OpengraphImage() {
 					color: '#ededed',
 				}}
 			>
-				<img src={`data:image/svg+xml;base64,${emoji}`} width={330} height={330} alt="" />
+				<img src={`data:image/png;base64,${emoji}`} width={344} height={340} alt="" />
 				<div style={{ fontSize: 72, marginTop: 8 }}>Goopy.life</div>
 				<div style={{ fontSize: 36, marginTop: 12, color: '#999' }}>
 					Spin up a throwaway Ghost site in one click.
