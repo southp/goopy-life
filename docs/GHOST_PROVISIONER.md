@@ -24,6 +24,7 @@ The rule is **symlink what Ghost reads, materialise what Ghost writes**.
 | Path in the instance dir | How it is created | Why |
 | --- | --- | --- |
 | `index.js`, `core/`, `node_modules/`, `package.json` | symlink → `source_dir` | Application code. Identical for every instance and never written to. |
+| `loggingrc.js` | symlink → `source_dir` | Ghost's logging config, read from the process root (the instance dir). Without it Ghost silently logs to stdout only and `content/logs/` stays empty (#197). |
 | `content/themes/<each stock theme>` | symlink → `source_dir` | The themes that ship with Ghost are read-only. Every entry in the base install's `content/themes/` is linked, so the instance gets whichever theme a fresh site activates. |
 | `content/data/` | real directory | Holds `ghost.db`, this instance's SQLite database. |
 | `content/images/`, `content/media/`, `content/files/` | real directory | User uploads. |
@@ -71,7 +72,7 @@ cd "${INSTALL_DIR}"
 corepack pnpm install --prod --frozen-lockfile
 
 # 4. Confirm the layout the provisioner expects.
-ls index.js core node_modules package.json content/themes
+ls index.js core node_modules package.json loggingrc.js content/themes
 
 # 5. Make it read-only to the service account — instances only ever read it,
 #    and they run as that account, so anything it can write it can corrupt for
