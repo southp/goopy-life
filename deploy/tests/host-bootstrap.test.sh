@@ -286,6 +286,18 @@ else
         "bootstrap: $APP_DIR/ghost-$GHOST_VERSION, node from apt at /usr/bin/node"
 fi
 
+# Every instance runs as service_user (#187); the bootstrap creates GHOST_USER.
+# If the two drift apart, the first deploy is refused on the host, by
+# --check-config's account check, instead of here.
+service_user=$(sed -nE 's/^service_user[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' "$toml")
+if [[ -n $service_user && $service_user == "$GHOST_USER" ]]; then
+    pass ghost_user_is_the_one_prod_toml_names
+else
+    fail ghost_user_is_the_one_prod_toml_names \
+        "prod.toml: service_user=$service_user" \
+        "bootstrap: GHOST_USER=$GHOST_USER"
+fi
+
 rm -rf "$ROOT"
 
 echo
