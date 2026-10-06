@@ -269,13 +269,31 @@ line; in short:
   instance are not there at all.
 - `NoNewPrivileges`, `RestrictSUIDSGID` and an empty capability set: sudo
   refuses to run, whatever the sudoers say.
-- `PrivatePIDs`: every instance runs as the same account, and without a PID
-  namespace one instance could read another's files through
-  `/proc/<pid>/root` and signal its processes.
+- `PrivatePIDs` and `PrivateIPC`: every instance runs as the same account.
+  Without a PID namespace one instance could read another's files through
+  `/proc/<pid>/root` and signal its processes; without an IPC namespace it could
+  attach to another's shared memory. `RemoveIPC` comes only with `PrivateIPC`:
+  on its own, stopping one instance would remove every instance's IPC objects.
+- `SystemCallFilter=@system-service` minus `@privileged` and `@resources`, with
+  `EPERM` for anything else, and `RestrictAddressFamilies` to TCP, Unix and
+  netlink sockets (`os.networkInterfaces()` needs netlink). With sudo dead, the
+  kernel is what stands between `goopy-ghost` and root; these cut the
+  interfaces an exploit would go through.
 - `ProtectSystem=strict`, `PrivateTmp`, `PrivateDevices`, the kernel
   `Protect*` lines and `IPAddressDeny=169.254.169.254`.
-- **Not** `MemoryDenyWriteExecute` (breaks V8's JIT) and **not** `MemoryMax`
-  (the #113 caps were measured without one).
+- **Not** `MemoryDenyWriteExecute` (breaks V8's JIT), `MemoryMax` (the #113
+  caps were measured without one), `PrivateNetwork` (nginx reaches Ghost over
+  loopback, and Ghost fetches embed and bookmark cards), `PrivateUsers` (the
+  base install and the config would map to `nobody`) or `ProcSubset=pid`
+  (`os.cpus()` reads `/proc/stat`).
+
+Outside the unit, the host firewall (`deploy/host-bootstrap.sh`) refuses
+`goopy-ghost`'s connections to gl-serv's loopback port. From there an instance
+would skip nginx and set its own `X-Real-IP`, the header the rate limiter keys
+on. Instances still reach each other's loopback ports, which gives them nothing
+the public sites don't.
+
+`systemd-analyze security` on the unit: **1.3 OK**, from 9.2 UNSAFE before #187.
 
 Two consequences an operator meets:
 
