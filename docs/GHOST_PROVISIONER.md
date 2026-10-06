@@ -146,6 +146,8 @@ The config is version-controlled and installed by the deploy, so editing
 - **systemd 257 or newer** for `PrivatePIDs=`, which keeps instances of that one
   account apart (Debian 13 ships 257). An older systemd ignores the line with a
   warning, and the instances still boot, with that isolation gone.
+- **`tini` at `/usr/bin/tini`** (Debian's `tini` package), PID 1 of every
+  instance unit; see below. Without it no unit starts.
 - **A wildcard TLS certificate** for the domain at
   `/etc/letsencrypt/live/<domain>/` — the same prerequisite the Hello
   provisioner has.
@@ -297,11 +299,16 @@ the public sites don't.
 
 Two consequences an operator meets:
 
-- **Ghost is PID 1 in its namespace.** PID 1 ignores a signal it has no handler
-  for, and Ghost installs its `SIGTERM` handler only once its HTTP server is
-  listening. A `systemctl stop` in the first moments of a boot therefore waits
-  out `TimeoutStopSec` (30 s) and ends in `SIGKILL`; after that, a stop is
-  graceful as before.
+- **A stop is `tini` + `KillMode=control-group`** (#195). Under
+  `PrivatePIDs`, `KillMode=mixed` SIGKILLed the unit on about half of all
+  stops, with no wait after SIGTERM, so Ghost's shutdown never ran (6 of 12 on
+  the dev host, 0 of 12 without `PrivatePIDs`). Switching the kill mode alone
+  still lost 3 of 12, and Node as PID 1 ignored a SIGTERM that came before
+  Ghost had installed its handler. The unit runs `tini -e 143 -- node …` with
+  `KillMode=control-group`: systemd signals the whole cgroup and waits for it
+  to empty, tini is PID 1 and passes the signal on, and `-e 143` counts "ended
+  by SIGTERM" as a clean exit. Measured: 12 of 12 stops clean, each logging
+  "Ghost has shut down", and a stop during boot finishes in ~100 ms.
 - **Ghost's files are not `goopy`'s to read.** `UMask=0027` makes what Ghost
   writes readable by `goopy-ghost` alone, so reading an instance's logs needs
   `sudo`. `zfs destroy` removes the dataset whatever owns the files.
