@@ -65,6 +65,8 @@ NODESOURCE_KEY_URL=https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
 NODESOURCE_KEY_FPR=6F71F525282841EEDAF851B42F59B5F99B1BE0B4
 
 APP_DIR=/opt/goopy-life
+# The port of prod.toml's bind_address: gl-serv on loopback, for nginx alone.
+GL_SERV_PORT=3000
 # prod.toml's [provisioner] version and source_dir name the same release.
 GHOST_VERSION=6.63.0
 
@@ -557,6 +559,10 @@ table inet goopy {
         # to whoever asks. gl-serv, Ghost and nginx never need it.
         # uids: $DEPLOY_USER, $GHOST_USER, www-data
         ip daddr 169.254.169.254 meta skuid { $1, $2, $3 } reject
+        # gl-serv is for nginx. From loopback a Ghost instance would skip nginx
+        # and set its own X-Real-IP, the header the rate limiter keys on (#187).
+        # uid: $GHOST_USER
+        ip daddr 127.0.0.0/8 tcp dport $GL_SERV_PORT meta skuid $2 reject with tcp reset
     }
 }
 EOF

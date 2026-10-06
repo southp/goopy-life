@@ -554,7 +554,7 @@ tell if any of this is missing:
 | Node 22.23.2 + Ghost 6.63.0 at `/opt/goopy-life/ghost-6.63.0` | bootstrap | `prod.toml`'s `source_dir` and `node_bin` (also tested) |
 | `goopy` account, `/opt/goopy-life/` | bootstrap | the deploy and the provisioner write into these |
 | `goopy-ghost` account | bootstrap | every instance runs as it (#187). Missing, `--check-config` refuses the deploy before the swap |
-| nftables (22/80/443 in), sshd, fail2ban, sysctl, unattended upgrades | bootstrap | the host's own hardening |
+| nftables (22/80/443 in; `goopy-ghost` kept off gl-serv's loopback port), sshd, fail2ban, sysctl, unattended upgrades | bootstrap | the host's own hardening. A host bootstrapped before #187's firewall rule gets it from a re-run of the script |
 | Wildcard cert at `/etc/letsencrypt/live/goopy.life/` | by hand (token) | the api site and every instance site hardcode that path |
 | DNS for `api.` and `*.goopy.life`, a public IP that outlives the machine | provider | instances are served under the wildcard |
 | Provider firewall: 22/80/443 open, 3000 closed | provider | the second layer in front of nftables |
