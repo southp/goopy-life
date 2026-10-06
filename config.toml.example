@@ -85,8 +85,10 @@ version = "6.63.0"
 # satisfy the pinned Ghost's engines range — 6.63.0 wants ^22.23.1 || ^24.20.0,
 # and nothing checks it before an instance fails to boot.
 node_bin = "/usr/bin/node"
-# Unprivileged user each instance's systemd unit runs as.
-service_user = "goopy"
+# The account each instance's systemd unit runs as. Give instances their own
+# account with no sudo (the deployed configs use `goopy-ghost`, see #187), never
+# the one gl-serv runs as. Defaults to "goopy" when omitted.
+service_user = "goopy-ghost"
 
 [ratelimit]
 # Per-IP rate limiting for the API server (gl-serv only; ignored by the CLI).

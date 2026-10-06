@@ -81,7 +81,14 @@ pub struct GhostConfig {
     /// Node.js binary used to run Ghost. systemd requires an absolute path.
     #[serde(default = "default_node_bin")]
     pub node_bin: String,
-    /// Unprivileged OS user the per-instance systemd unit runs as.
+    /// OS account the per-instance systemd unit runs as. Production mode only:
+    /// dev mode runs Ghost as gl-serv's own user.
+    ///
+    /// Never gl-serv's own account on a host. That one holds the deploy's sudo
+    /// rules, so any code execution inside Ghost would be root (#187). The
+    /// deployed configs name `goopy-ghost`: no shell, no sudo, owning nothing
+    /// but each instance's `content/`. The default stays `goopy` only so that
+    /// a config written before #187 keeps parsing.
     #[serde(default = "default_service_user")]
     pub service_user: String,
     /// How long a freshly started instance may take to serve, in seconds,
@@ -121,6 +128,16 @@ fn default_ready_poll_ms() -> u64 {
 /// that is merely present satisfies `is_dir` but is not a prepared Ghost
 /// install; tying the check to this list keeps it honest as the list changes.
 pub const SHARED_ENTRIES: &[&str] = &["index.js", "core", "node_modules", "package.json"];
+
+/// The service's directory on a host: the registry, gl-serv's config and
+/// binaries, and every instance's working directory under `data/`.
+///
+/// Each instance's unit hides it behind an empty, read-only tmpfs and binds
+/// back only what that instance needs (see `render_service_file`). The same
+/// path as `APP_DIR` in deploy/host-bootstrap.sh and the paths in
+/// deploy/sudoers.goopy; a host laid out differently still gets the rest of
+/// the sandbox, but not the hiding.
+const SERVICE_DIR: &str = "/opt/goopy-life";
 
 /// Per-instance writable directories under `content/`. Ghost creates files in
 /// all of these, so each instance needs its own.
@@ -373,11 +390,101 @@ impl GhostProvisioner {
         fs::write(&path, self.render_ghost_config(goopy)?).map_err(Error::Io)
     }
 
+    /// Gives `content/`, and nothing else, to the account the unit runs as.
+    ///
+    /// gl-serv writes the whole instance tree as itself, and the dataset root
+    /// stays its own (see `ZfsAllocator::allocate`). So once this has run,
+    /// `service_user` can write everything Ghost writes, and cannot write
+    /// `config.production.json` or the symlinks into the base install: those
+    /// sit in a directory it does not own. An instance able to edit its own
+    /// config could point its database, or its content path, anywhere the
+    /// account can reach (#187).
+    ///
+    /// `-h` and `-R` together never follow a symlink: the stock themes in
+    /// `content/themes` are links into the shared base install, and a `chown`
+    /// that followed them would hand every instance's account the code all the
+    /// other instances run. GNU `chown -R` already defaults to that; the flag
+    /// makes it impossible to lose by reordering arguments.
+    ///
+    /// Runs before the unit is started, so nothing running as `service_user`
+    /// can see the tree yet. Rides on the existing `chown * /opt/goopy-life/data/*`
+    /// rule in deploy/sudoers.goopy; it needs no new sudo rights.
+    fn hand_content_to_service_user(&self, working_dir: &Path) -> Result<(), Error> {
+        let content = working_dir.join("content");
+        let owner = format!("{0}:{0}", self.ghost.service_user);
+        info!(
+            path = %content.display(),
+            %owner,
+            "handing the instance's content directory to its service user"
+        );
+        self.sys
+            .sudo_run(&["chown", "-R", "-h", &owner, &content.to_string_lossy()])
+    }
+
+    /// Renders the instance's systemd unit, sandbox included (#187).
+    ///
+    /// Visitors are anonymous Ghost Owners: theme zips, content imports,
+    /// `routes.yaml`, image processing. The sandbox assumes Ghost will one day
+    /// have a bug in that surface, and decides what the bug can reach: this
+    /// instance, and nothing else. Not root, not gl-serv, not the registry,
+    /// not other visitors.
+    ///
+    /// * **Who.** `User=` is `service_user`, an account with no sudo that owns
+    ///   nothing but this instance's `content/`. `NoNewPrivileges`,
+    ///   `RestrictSUIDSGID` and an empty `CapabilityBoundingSet` make sudo and
+    ///   every setuid binary dead from in here, whatever the sudoers say.
+    /// * **What it sees.** [`SERVICE_DIR`] is replaced by an empty read-only
+    ///   tmpfs, which hides the registry, gl-serv's config and binaries, and
+    ///   every other instance. Two paths are bound back: the base install,
+    ///   read-only, and this instance's directory, read-only too, with only its
+    ///   `content/` writable on top. So even a wrong owner on
+    ///   `config.production.json` would not let the instance rewrite it.
+    ///   `ProtectSystem=strict` makes the rest of the filesystem read-only.
+    /// * **Other instances.** They all run as the same account, so file
+    ///   permissions cannot keep them apart; the mount namespace above does.
+    ///   `PrivatePIDs` closes the way around it: without it, a process could
+    ///   reach another instance's files through `/proc/<pid>/root`, which the
+    ///   kernel allows between processes of one uid, and could signal them.
+    ///   `ProtectProc=invisible` stays as well, for hosts whose systemd
+    ///   predates `PrivatePIDs` (v257) and ignores it: there it still hides
+    ///   every process of another account. `PrivateIPC` does the same for
+    ///   SysV and POSIX IPC, which one uid could otherwise attach to across
+    ///   instances. It is also what makes `RemoveIPC` safe: on its own,
+    ///   stopping one instance would remove the IPC objects of every instance
+    ///   running as the same account.
+    /// * **The kernel.** The `Protect*`, `Restrict*`, `LockPersonality` and
+    ///   `SystemCallArchitectures` lines take away interfaces a web app never
+    ///   uses. `SystemCallFilter` keeps Node to systemd's `@system-service`
+    ///   set, minus `@privileged` and `@resources`, and answers anything else
+    ///   with `EPERM` rather than killing the process.
+    ///   `RestrictAddressFamilies` allows the sockets Ghost uses: TCP, Unix,
+    ///   and netlink, which Node's `os.networkInterfaces()` needs. With sudo
+    ///   dead, the kernel is what is left between this account and root, and
+    ///   these cut the interfaces an exploit would go through.
+    ///   `IPAddressDeny` blocks the provider's metadata endpoint, which the
+    ///   host firewall blocks as well.
+    ///
+    /// Deliberately absent:
+    ///
+    /// * `MemoryDenyWriteExecute`: V8's JIT needs writable, executable memory.
+    /// * `MemoryMax`: #113 sized the instance caps without per-unit limits;
+    ///   adding one needs a measurement first.
+    /// * `PrivateNetwork`: nginx reaches Ghost over loopback, and Ghost fetches
+    ///   embed and bookmark cards from the internet.
+    /// * `PrivateUsers`: the base install and the instance's config belong to
+    ///   other accounts, which would map to `nobody` inside.
+    /// * `ProcSubset=pid`: Node reads `/proc/stat` and `/proc/cpuinfo` for
+    ///   `os.cpus()`.
+    ///
+    /// The sandbox gives the unit its own mount namespace. That broke gl-serv
+    /// (#136), which *creates* ZFS mounts; an instance only uses a dataset that
+    /// is already mounted, and `After=zfs-mount.service` keeps that true after
+    /// a reboot.
     fn render_service_file(&self, slug: &str, working_dir: &Path) -> String {
         format!(
             r#"[Unit]
 Description=Goopy Ghost - {slug}
-After=network.target
+After=network.target zfs-mount.service
 
 [Service]
 Type=simple
@@ -391,12 +498,49 @@ RestartSec=5
 KillMode=mixed
 TimeoutStopSec=30
 
+# Sandbox (#187): what a compromised instance can reach is this instance.
+# Rendered by gl-core's ghost_provisioner.rs, which says why each line is here.
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
+UMask=0027
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+TemporaryFileSystem={service_dir}:ro
+BindReadOnlyPaths={source_dir}
+BindReadOnlyPaths={working_dir}
+BindPaths={working_dir}/content
+PrivatePIDs=yes
+PrivateIPC=yes
+RemoveIPC=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+TasksMax=256
+IPAddressDeny=169.254.169.254
+
 [Install]
 WantedBy=multi-user.target
 "#,
             user = self.ghost.service_user,
             node_bin = self.ghost.node_bin,
             working_dir = working_dir.display(),
+            source_dir = self.ghost.source_dir.display(),
+            service_dir = SERVICE_DIR,
         )
     }
 
@@ -441,6 +585,9 @@ WantedBy=multi-user.target
                 self.readiness_budget(),
             )?;
         } else {
+            // Dev mode skips this: there, Ghost runs as gl-serv's own user, and
+            // a local machine has no sudo rule for it.
+            self.hand_content_to_service_user(&goopy.working_dir)?;
             systemd::install_and_start(
                 self.sys.as_ref(),
                 &Self::service_name(&goopy.slug),
@@ -584,7 +731,7 @@ mod tests {
                 source_dir: source.path().to_path_buf(),
                 version: "5.87.1".to_string(),
                 node_bin: "/usr/bin/node".to_string(),
-                service_user: "goopy".to_string(),
+                service_user: "goopy-ghost".to_string(),
                 ready_timeout_secs,
                 ready_poll_ms,
             },
@@ -1056,7 +1203,10 @@ mod tests {
             })
             .expect("should write a systemd unit");
         assert!(unit.contains("Environment=NODE_ENV=production"));
-        assert!(unit.contains("User=goopy"), "Ghost must not run as root");
+        assert!(
+            unit.contains("User=goopy-ghost\n"),
+            "Ghost must run as the configured service user, not root"
+        );
         assert!(unit.contains(&format!(
             "ExecStart=/usr/bin/node \"{}/index.js\"",
             working_dir.display()
@@ -1077,6 +1227,331 @@ mod tests {
         assert_eq!(
             verb_seq,
             ["daemon-reload", "enable", "start", "ln", "reload"]
+        );
+    }
+
+    /// The `chown` calls a provisioning run made, as argument lists.
+    fn chown_calls(mock: &MockSysRunner) -> Vec<Vec<String>> {
+        mock.recorded_calls()
+            .into_iter()
+            .filter_map(|c| match c {
+                MockCall::SudoRun { args } if args.first().map(String::as_str) == Some("chown") => {
+                    Some(args)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The instance account must be able to write what Ghost writes, and
+    /// nothing else (#187): `content/` is handed over, the instance directory
+    /// itself (and so `config.production.json`) is not.
+    #[test]
+    fn prod_provision_hands_only_content_to_the_service_user() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let mock = Arc::new(MockSysRunner::new());
+        let p = provisioner(false, &source, mock.clone());
+        p.provision(&test_goopy(&working_dir, 9876))
+            .expect("prod provision should succeed");
+
+        assert_eq!(
+            chown_calls(&mock),
+            [vec![
+                "chown".to_string(),
+                "-R".to_string(),
+                "-h".to_string(),
+                "goopy-ghost:goopy-ghost".to_string(),
+                working_dir.join("content").display().to_string(),
+            ]],
+            "exactly one chown, of content/ alone, never following symlinks"
+        );
+    }
+
+    /// The stock themes in `content/themes` are symlinks into the shared base
+    /// install. A recursive chown that followed them would give the instance
+    /// account write access to code every other instance runs.
+    #[test]
+    fn prod_content_chown_never_follows_symlinks() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let mock = Arc::new(MockSysRunner::new());
+        let p = provisioner(false, &source, mock.clone());
+        p.provision(&test_goopy(&working_dir, 9876))
+            .expect("prod provision should succeed");
+
+        for args in chown_calls(&mock) {
+            assert!(
+                args.contains(&"-h".to_string()),
+                "chown {args:?} would follow the stock-theme symlinks into the base install"
+            );
+            assert!(
+                !args
+                    .iter()
+                    .any(|a| a == "-L" || a == "-H" || a == "--dereference"),
+                "chown {args:?} must not dereference symlinks"
+            );
+        }
+    }
+
+    /// The hand-over belongs between creating the tree and starting the unit.
+    /// Before it, `content/data` and the rest would be created as gl-serv's
+    /// account after the chown, and Ghost could not write its database. After
+    /// the start, Ghost would already be failing to.
+    #[test]
+    fn prod_provision_hands_content_over_before_starting_the_unit() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        // The chown fails unless every content dir already exists, so a
+        // successful provision proves it ran after the tree was created.
+        let wd = working_dir.clone();
+        let mock = Arc::new(MockSysRunner::failing_sudo_run(move |args| {
+            args.first() == Some(&"chown")
+                && !CONTENT_DIRS
+                    .iter()
+                    .all(|dir| wd.join("content").join(dir).is_dir())
+        }));
+        let p = provisioner(false, &source, mock.clone());
+        p.provision(&test_goopy(&working_dir, 9876))
+            .expect("every content dir must exist when content/ is handed over");
+
+        let calls = mock.recorded_calls();
+        let chown_at = calls
+            .iter()
+            .position(|c| matches!(c, MockCall::SudoRun { args } if args[0] == "chown"))
+            .expect("prod provisioning must hand content/ over");
+        let unit_at = calls
+            .iter()
+            .position(
+                |c| matches!(c, MockCall::SudoWrite { path, .. } if path.ends_with(".service")),
+            )
+            .expect("prod provisioning must write the unit");
+        assert!(
+            chown_at < unit_at,
+            "content/ must belong to the service user before its unit exists"
+        );
+    }
+
+    /// Dev mode runs Ghost as gl-serv's own user, on a machine with no sudo
+    /// rule for it, so there is nothing to hand over.
+    #[test]
+    fn dev_provision_does_not_chown() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let mock = Arc::new(MockSysRunner::new());
+        let p = provisioner(true, &source, mock.clone());
+        p.provision(&test_goopy(&working_dir, 9876))
+            .expect("dev provision should succeed");
+
+        assert!(
+            chown_calls(&mock).is_empty(),
+            "dev mode must not sudo chown"
+        );
+    }
+
+    /// A failed hand-over must not start an instance that cannot write its own
+    /// database, and must release the storage like any other failed step.
+    #[test]
+    fn prod_provision_fails_and_releases_storage_when_the_hand_over_fails() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let mock = Arc::new(MockSysRunner::failing_sudo_run(|args| {
+            args.first() == Some(&"chown")
+        }));
+        let p = provisioner(false, &source, mock.clone());
+        p.provision(&test_goopy(&working_dir, 9876))
+            .expect_err("an instance whose content/ was not handed over must not start");
+
+        assert!(
+            !mock
+                .sudo_write_paths()
+                .iter()
+                .any(|path| path.ends_with(".service")),
+            "no unit may be installed after a failed hand-over"
+        );
+        assert!(
+            !working_dir.exists(),
+            "a failed provision releases its working directory"
+        );
+    }
+
+    /// The unit a production provisioner renders for `working_dir`, as its
+    /// non-comment lines.
+    fn prod_unit_lines(source: &TempDir, working_dir: &Path) -> Vec<String> {
+        let p = provisioner(false, source, Arc::new(MockSysRunner::new()));
+        p.render_service_file("tasty-lucky-clover", working_dir)
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Every hardening line #187 settled on. A line dropped here reopens a
+    /// path out of the instance, and nothing else would notice: the instance
+    /// still boots and serves.
+    #[test]
+    fn prod_unit_is_sandboxed() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let lines = prod_unit_lines(&source, &base.path().join("tasty-lucky-clover"));
+
+        for directive in [
+            "NoNewPrivileges=yes",
+            "RestrictSUIDSGID=yes",
+            "CapabilityBoundingSet=",
+            "UMask=0027",
+            "ProtectSystem=strict",
+            "ProtectHome=yes",
+            "PrivateTmp=yes",
+            "PrivateDevices=yes",
+            "ProtectKernelTunables=yes",
+            "ProtectKernelModules=yes",
+            "ProtectKernelLogs=yes",
+            "ProtectControlGroups=yes",
+            "ProtectClock=yes",
+            "ProtectHostname=yes",
+            "RestrictNamespaces=yes",
+            "RestrictRealtime=yes",
+            "LockPersonality=yes",
+            "SystemCallArchitectures=native",
+            "SystemCallFilter=@system-service",
+            "SystemCallFilter=~@privileged @resources",
+            "SystemCallErrorNumber=EPERM",
+            "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
+            "TasksMax=256",
+            "IPAddressDeny=169.254.169.254",
+        ] {
+            assert!(
+                lines.iter().any(|l| l == directive),
+                "the instance unit lost `{directive}`"
+            );
+        }
+    }
+
+    /// The service directory holds the registry, gl-serv's config and
+    /// binaries, and every other instance. The instance sees none of it: only
+    /// the base install and its own directory are bound back, read-only, with
+    /// `content/` the one writable path.
+    #[test]
+    fn prod_unit_hides_the_service_dir_and_binds_back_only_this_instance() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+        let lines = prod_unit_lines(&source, &working_dir);
+
+        assert!(
+            lines.contains(&"TemporaryFileSystem=/opt/goopy-life:ro".to_string()),
+            "the service directory must be replaced by an empty read-only tmpfs"
+        );
+
+        let read_only: Vec<&str> = lines
+            .iter()
+            .filter_map(|l| l.strip_prefix("BindReadOnlyPaths="))
+            .collect();
+        assert_eq!(
+            read_only,
+            [
+                source.path().display().to_string(),
+                working_dir.display().to_string()
+            ],
+            "the base install and the instance directory are bound back read-only"
+        );
+
+        let writable: Vec<&str> = lines
+            .iter()
+            .filter_map(|l| l.strip_prefix("BindPaths="))
+            .collect();
+        assert_eq!(
+            writable,
+            [working_dir.join("content").display().to_string()],
+            "content/ must be the only writable bind: config.production.json \
+             stays read-only to the instance"
+        );
+        assert!(
+            !lines.iter().any(|l| l.starts_with("ReadWritePaths=")),
+            "no other path may be made writable"
+        );
+    }
+
+    /// Every instance runs as the same account, so permissions cannot keep
+    /// them apart. Without a PID namespace one instance reaches another's
+    /// files through `/proc/<pid>/root`, which the kernel allows within one
+    /// uid, and can signal its processes. Without an IPC namespace it can
+    /// attach to another's SysV shared memory.
+    #[test]
+    fn prod_unit_keeps_instances_of_one_account_apart() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let lines = prod_unit_lines(&source, &base.path().join("tasty-lucky-clover"));
+
+        assert!(lines.contains(&"PrivatePIDs=yes".to_string()));
+        assert!(
+            lines.contains(&"ProtectProc=invisible".to_string()),
+            "kept for a systemd older than PrivatePIDs, which ignores it"
+        );
+        assert!(lines.contains(&"PrivateIPC=yes".to_string()));
+    }
+
+    /// `RemoveIPC` removes every IPC object of the unit's uid when it stops.
+    /// Every instance shares that uid, so without `PrivateIPC` stopping one
+    /// instance would remove the others' objects.
+    #[test]
+    fn prod_unit_removes_ipc_only_inside_its_own_namespace() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let lines = prod_unit_lines(&source, &base.path().join("tasty-lucky-clover"));
+
+        if lines.contains(&"RemoveIPC=yes".to_string()) {
+            assert!(
+                lines.contains(&"PrivateIPC=yes".to_string()),
+                "RemoveIPC without PrivateIPC reaches every instance's IPC objects"
+            );
+        }
+    }
+
+    /// Not there by omission: V8's JIT needs writable, executable memory, and
+    /// the #113 caps were measured without a per-unit memory limit.
+    #[test]
+    fn prod_unit_leaves_out_what_breaks_or_was_never_measured() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let lines = prod_unit_lines(&source, &base.path().join("tasty-lucky-clover"));
+
+        for absent in ["MemoryDenyWriteExecute=", "MemoryMax="] {
+            assert!(
+                !lines.iter().any(|l| l.starts_with(absent)),
+                "`{absent}` must stay out of the instance unit"
+            );
+        }
+    }
+
+    /// The sandbox binds the instance's dataset into the unit's own mount
+    /// namespace. Started before ZFS has mounted it, after a reboot, the unit
+    /// would bind the empty mount point and Ghost would start a blank site.
+    #[test]
+    fn prod_unit_starts_after_zfs_has_mounted_the_datasets() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let lines = prod_unit_lines(&source, &base.path().join("tasty-lucky-clover"));
+
+        let after = lines
+            .iter()
+            .find_map(|l| l.strip_prefix("After="))
+            .expect("the unit must have an After= line");
+        assert!(
+            after.split_whitespace().any(|u| u == "zfs-mount.service"),
+            "After={after} must include zfs-mount.service"
         );
     }
 

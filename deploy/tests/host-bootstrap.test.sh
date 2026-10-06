@@ -202,11 +202,15 @@ fi
 if ! grep -qF 'tcp dport { 22, 80, 443 } accept' <<<"$rules"; then
     problems+=" ports"
 fi
-if grep -qE 'dport[^;]*3000' <<<"$rules"; then
+input_chain=$(sed -n '/chain input/,/^    }$/p' <<<"$rules")
+if grep -qE 'dport[^;]*3000' <<<"$input_chain"; then
     problems+=" 3000-open"
 fi
 if ! grep -qF 'ip daddr 169.254.169.254 meta skuid { 995, 994, 33 } reject' <<<"$rules"; then
     problems+=" metadata"
+fi
+if ! grep -qF 'ip daddr 127.0.0.0/8 tcp dport 3000 meta skuid 994 reject with tcp reset' <<<"$(sed -n '/chain output/,/^    }$/p' <<<"$rules")"; then
+    problems+=" ghost-reaches-gl-serv"
 fi
 if [[ -z $problems ]]; then
     pass nftables_opens_only_ssh_and_web_and_keeps_services_off_the_metadata_endpoint
@@ -284,6 +288,29 @@ else
     fail ghost_install_is_the_one_prod_toml_names \
         "prod.toml: source_dir=$source_dir version=$version node_bin=$node_bin" \
         "bootstrap: $APP_DIR/ghost-$GHOST_VERSION, node from apt at /usr/bin/node"
+fi
+
+# The firewall keeps Ghost off gl-serv's loopback port; a port moved in
+# prod.toml alone would leave the rule guarding nothing.
+bind_port=$(sed -nE 's/^bind_address[[:space:]]*=[[:space:]]*"[^"]*:([0-9]+)".*/\1/p' "$toml")
+if [[ -n $bind_port && $bind_port == "$GL_SERV_PORT" ]]; then
+    pass gl_serv_port_is_the_one_prod_toml_binds
+else
+    fail gl_serv_port_is_the_one_prod_toml_binds \
+        "prod.toml: bind_address port=$bind_port" \
+        "bootstrap: GL_SERV_PORT=$GL_SERV_PORT"
+fi
+
+# Every instance runs as service_user (#187); the bootstrap creates GHOST_USER.
+# If the two drift apart, the first deploy is refused on the host, by
+# --check-config's account check, instead of here.
+service_user=$(sed -nE 's/^service_user[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' "$toml")
+if [[ -n $service_user && $service_user == "$GHOST_USER" ]]; then
+    pass ghost_user_is_the_one_prod_toml_names
+else
+    fail ghost_user_is_the_one_prod_toml_names \
+        "prod.toml: service_user=$service_user" \
+        "bootstrap: GHOST_USER=$GHOST_USER"
 fi
 
 rm -rf "$ROOT"

@@ -109,6 +109,33 @@ fn no_deployed_config_binds_a_wildcard() {
     }
 }
 
+/// Ghost instances must never run as `goopy`, the account gl-serv and the
+/// deploy run as (#187). `goopy` holds the deploy's sudo rules, so code
+/// execution inside any instance would be root on the host.
+///
+/// Asserted here because nothing else would notice. `service_user` defaults to
+/// `goopy`, so deleting the line (or copying an older config to a new
+/// environment) still parses, and `--check-config` passes because the account
+/// exists. Ghost would quietly run as the deploy account again, with every
+/// spawn succeeding.
+#[test]
+fn no_deployed_config_runs_ghost_as_the_deploy_account() {
+    for path in deployed_configs() {
+        let cfg = Config::from_file(&path).expect("deployed configs parse");
+        let ProvisionerConfig::Ghost(ghost) = &cfg.provisioner else {
+            continue;
+        };
+        assert_ne!(
+            ghost.service_user,
+            "goopy",
+            "{} runs Ghost instances as `goopy`, the deploy account: code \
+             execution in any instance would be root. Set \
+             provisioner.service_user = \"goopy-ghost\"",
+            path.display(),
+        );
+    }
+}
+
 /// The frontend lives at `https://{domain}`, and gl-core already assumes so:
 /// every instance's expiry redirect is `https://{domain}/expired`
 /// (`goopy_provisioner/nginx.rs`). `cors_origin` has to name that same

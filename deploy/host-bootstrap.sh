@@ -46,7 +46,7 @@ set -euo pipefail
 ADMIN_USER=southp
 # The service and deploy account; deploy/sudoers.goopy names it.
 DEPLOY_USER=goopy
-# The account Ghost instances run as once #187 lands: no shell, no home, no sudo.
+# The account every Ghost instance runs as (#187): no shell, no home, no sudo.
 GHOST_USER=goopy-ghost
 # Shown in every shell prompt, so the two hosts cannot be mistaken for each other.
 ENV_LABEL=prod
@@ -65,6 +65,8 @@ NODESOURCE_KEY_URL=https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
 NODESOURCE_KEY_FPR=6F71F525282841EEDAF851B42F59B5F99B1BE0B4
 
 APP_DIR=/opt/goopy-life
+# The port of prod.toml's bind_address: gl-serv on loopback, for nginx alone.
+GL_SERV_PORT=3000
 # prod.toml's [provisioner] version and source_dir name the same release.
 GHOST_VERSION=6.63.0
 
@@ -215,7 +217,7 @@ setup_accounts() {
     fi
     usermod -aG adm,systemd-journal "$DEPLOY_USER"
 
-    # Created ahead of #187 so that the firewall can name it.
+    # Every instance runs as it (prod.toml service_user), and the firewall names it.
     if getent passwd "$GHOST_USER" >/dev/null; then
         say unchanged "user $GHOST_USER"
     else
@@ -557,6 +559,10 @@ table inet goopy {
         # to whoever asks. gl-serv, Ghost and nginx never need it.
         # uids: $DEPLOY_USER, $GHOST_USER, www-data
         ip daddr 169.254.169.254 meta skuid { $1, $2, $3 } reject
+        # gl-serv is for nginx. From loopback a Ghost instance would skip nginx
+        # and set its own X-Real-IP, the header the rate limiter keys on (#187).
+        # uid: $GHOST_USER
+        ip daddr 127.0.0.0/8 tcp dport $GL_SERV_PORT meta skuid $2 reject with tcp reset
     }
 }
 EOF
@@ -725,9 +731,11 @@ install_ghost() {
     )
     rm -rf "$home"
     # Root-owned so no instance can write here and change the code every other
-    # instance runs. That holds once instances run as GHOST_USER (#187): the
-    # parent, APP_DIR, is DEPLOY_USER's, so DEPLOY_USER could still swap this
-    # directory for a copy, and DEPLOY_USER is root-equivalent until #90.
+    # instance runs; instances run as GHOST_USER, which owns nothing here
+    # (#187). The parent, APP_DIR, is DEPLOY_USER's, so DEPLOY_USER could still
+    # swap this directory for a copy, and DEPLOY_USER is root-equivalent until
+    # #90. Moving the install out from under APP_DIR is a follow-up, recorded on
+    # #187.
     chown -R root:root "$partial"
     chmod -R a+rX "$partial"
     mv "$partial" "$dir"
