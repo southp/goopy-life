@@ -447,19 +447,34 @@ impl GhostProvisioner {
     ///   kernel allows between processes of one uid, and could signal them.
     ///   `ProtectProc=invisible` stays as well, for hosts whose systemd
     ///   predates `PrivatePIDs` (v257) and ignores it: there it still hides
-    ///   every process of another account.
+    ///   every process of another account. `PrivateIPC` does the same for
+    ///   SysV and POSIX IPC, which one uid could otherwise attach to across
+    ///   instances. It is also what makes `RemoveIPC` safe: on its own,
+    ///   stopping one instance would remove the IPC objects of every instance
+    ///   running as the same account.
     /// * **The kernel.** The `Protect*`, `Restrict*`, `LockPersonality` and
     ///   `SystemCallArchitectures` lines take away interfaces a web app never
-    ///   uses. `IPAddressDeny` blocks the provider's metadata endpoint, which
-    ///   the host firewall blocks as well.
+    ///   uses. `SystemCallFilter` keeps Node to systemd's `@system-service`
+    ///   set, minus `@privileged` and `@resources`, and answers anything else
+    ///   with `EPERM` rather than killing the process.
+    ///   `RestrictAddressFamilies` allows the sockets Ghost uses: TCP, Unix,
+    ///   and netlink, which Node's `os.networkInterfaces()` needs. With sudo
+    ///   dead, the kernel is what is left between this account and root, and
+    ///   these cut the interfaces an exploit would go through.
+    ///   `IPAddressDeny` blocks the provider's metadata endpoint, which the
+    ///   host firewall blocks as well.
     ///
     /// Deliberately absent:
     ///
     /// * `MemoryDenyWriteExecute`: V8's JIT needs writable, executable memory.
     /// * `MemoryMax`: #113 sized the instance caps without per-unit limits;
     ///   adding one needs a measurement first.
-    /// * `SystemCallFilter`: worth adding, once `systemd-analyze security` on a
-    ///   host shows what Node needs; a wrong filter kills Ghost at boot.
+    /// * `PrivateNetwork`: nginx reaches Ghost over loopback, and Ghost fetches
+    ///   embed and bookmark cards from the internet.
+    /// * `PrivateUsers`: the base install and the instance's config belong to
+    ///   other accounts, which would map to `nobody` inside.
+    /// * `ProcSubset=pid`: Node reads `/proc/stat` and `/proc/cpuinfo` for
+    ///   `os.cpus()`.
     ///
     /// The sandbox gives the unit its own mount namespace. That broke gl-serv
     /// (#136), which *creates* ZFS mounts; an instance only uses a dataset that
@@ -498,6 +513,8 @@ BindReadOnlyPaths={source_dir}
 BindReadOnlyPaths={working_dir}
 BindPaths={working_dir}/content
 PrivatePIDs=yes
+PrivateIPC=yes
+RemoveIPC=yes
 ProtectProc=invisible
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
@@ -509,6 +526,10 @@ RestrictNamespaces=yes
 RestrictRealtime=yes
 LockPersonality=yes
 SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 TasksMax=256
 IPAddressDeny=169.254.169.254
 
@@ -1404,6 +1425,10 @@ mod tests {
             "RestrictRealtime=yes",
             "LockPersonality=yes",
             "SystemCallArchitectures=native",
+            "SystemCallFilter=@system-service",
+            "SystemCallFilter=~@privileged @resources",
+            "SystemCallErrorNumber=EPERM",
+            "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
             "TasksMax=256",
             "IPAddressDeny=169.254.169.254",
         ] {
@@ -1462,7 +1487,8 @@ mod tests {
     /// Every instance runs as the same account, so permissions cannot keep
     /// them apart. Without a PID namespace one instance reaches another's
     /// files through `/proc/<pid>/root`, which the kernel allows within one
-    /// uid, and can signal its processes.
+    /// uid, and can signal its processes. Without an IPC namespace it can
+    /// attach to another's SysV shared memory.
     #[test]
     fn prod_unit_keeps_instances_of_one_account_apart() {
         let source = fake_ghost_source();
@@ -1474,6 +1500,24 @@ mod tests {
             lines.contains(&"ProtectProc=invisible".to_string()),
             "kept for a systemd older than PrivatePIDs, which ignores it"
         );
+        assert!(lines.contains(&"PrivateIPC=yes".to_string()));
+    }
+
+    /// `RemoveIPC` removes every IPC object of the unit's uid when it stops.
+    /// Every instance shares that uid, so without `PrivateIPC` stopping one
+    /// instance would remove the others' objects.
+    #[test]
+    fn prod_unit_removes_ipc_only_inside_its_own_namespace() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let lines = prod_unit_lines(&source, &base.path().join("tasty-lucky-clover"));
+
+        if lines.contains(&"RemoveIPC=yes".to_string()) {
+            assert!(
+                lines.contains(&"PrivateIPC=yes".to_string()),
+                "RemoveIPC without PrivateIPC reaches every instance's IPC objects"
+            );
+        }
     }
 
     /// Not there by omission: V8's JIT needs writable, executable memory, and
