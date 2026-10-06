@@ -552,6 +552,7 @@ tell if any of this is missing:
 | Swap (4 GB) + zswap | bootstrap | the caps of 20 assume it. Without it the box serves ~10, and nothing errors |
 | `zpool_ghost`, 8 GB, at `/opt/goopy-life/data` | bootstrap | every instance's dataset; `prod.toml`'s caps × quota must fit (the bootstrap's tests check) |
 | Node 22.23.2 + Ghost 6.63.0 at `/opt/goopy-life/ghost-6.63.0` | bootstrap | `prod.toml`'s `source_dir` and `node_bin` (also tested) |
+| `tini` at `/usr/bin/tini` | bootstrap | PID 1 of every instance unit (#195). Missing, `--check-config` refuses the deploy before the swap |
 | `goopy` account, `/opt/goopy-life/` | bootstrap | the deploy and the provisioner write into these |
 | `goopy-ghost` account | bootstrap | every instance runs as it (#187). Missing, `--check-config` refuses the deploy before the swap |
 | nftables (22/80/443 in; `goopy-ghost` kept off gl-serv's loopback port), sshd, fail2ban, sysctl, unattended upgrades | bootstrap | the host's own hardening. A host bootstrapped before #187's firewall rule gets it from a re-run of the script |
