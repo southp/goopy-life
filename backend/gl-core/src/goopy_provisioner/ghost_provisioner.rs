@@ -24,8 +24,8 @@ use crate::sys_utils::SysRunner;
 /// is assembled from it in two parts:
 ///
 /// * **Symlinked — everything Ghost only ever reads.** The application code
-///   ([`SHARED_ENTRIES`]: `index.js`, `core/`, `node_modules/`, `package.json`)
-///   and the stock theme. These are identical for every instance, so sharing
+///   ([`SHARED_ENTRIES`]: `index.js`, `core/`, `node_modules/`, `package.json`,
+///   `loggingrc.js`) and the stock theme. These are identical for every instance, so sharing
 ///   them costs nothing and pins the instance to the base install's version.
 /// * **Materialised — everything Ghost writes.** The `content/` subdirectories
 ///   ([`CONTENT_DIRS`]) are created as real, empty, per-instance directories:
@@ -123,11 +123,26 @@ fn default_ready_poll_ms() -> u64 {
 /// Entries symlinked from the base install: Ghost's own code, which it reads
 /// but never writes.
 ///
+/// `loggingrc.js` is easy to mistake for an optional extra, and it is not.
+/// `@tryghost/logging` builds its logger from
+/// `require(path.join(getProcessRoot(), 'loggingrc'))`, where the process root
+/// is the instance directory (the nearest `package.json` above the working
+/// directory), and falls back to `{}` — stdout only — when the require fails.
+/// Without this link the `logging` block in `config.production.json` is never
+/// read, `content/logs` stays empty, and an instance's errors reach only the
+/// journal (#197).
+///
 /// Public because `gl-serv --check-config` reads it to verify a configured
 /// `source_dir` on the host before a deploy swaps the config in. A directory
 /// that is merely present satisfies `is_dir` but is not a prepared Ghost
 /// install; tying the check to this list keeps it honest as the list changes.
-pub const SHARED_ENTRIES: &[&str] = &["index.js", "core", "node_modules", "package.json"];
+pub const SHARED_ENTRIES: &[&str] = &[
+    "index.js",
+    "core",
+    "node_modules",
+    "package.json",
+    "loggingrc.js",
+];
 
 /// The service's directory on a host: the registry, gl-serv's config and
 /// binaries, and every instance's working directory under `data/`.
@@ -708,6 +723,7 @@ mod tests {
         .unwrap();
         fs::create_dir_all(source.path().join("core")).unwrap();
         fs::create_dir_all(source.path().join("node_modules")).unwrap();
+        fs::write(source.path().join("loggingrc.js"), "// logging config").unwrap();
         for theme in FAKE_STOCK_THEMES {
             fs::create_dir_all(source.path().join("content").join("themes").join(theme)).unwrap();
         }
@@ -820,6 +836,28 @@ mod tests {
                 "stock theme {theme} should point at the base install"
             );
         }
+    }
+
+    /// Named rather than covered by the loop over `SHARED_ENTRIES` above: that
+    /// loop passes just as well with the entry gone. Ghost finds its logging
+    /// config only through this file in the instance directory, so losing the
+    /// link turns the file logs off without a single error (#197).
+    #[test]
+    fn provision_links_logging_config_where_ghost_looks_for_it() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let p = provisioner(true, &source, Arc::new(MockSysRunner::new()));
+        p.provision(&test_goopy(&working_dir, 9876))
+            .expect("dev provision should succeed");
+
+        assert_eq!(
+            fs::read_link(working_dir.join("loggingrc.js")).unwrap(),
+            source.path().join("loggingrc.js"),
+            "without loggingrc.js in the instance dir, Ghost logs to stdout only \
+             and content/logs stays empty"
+        );
     }
 
     #[test]
