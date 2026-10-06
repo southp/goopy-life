@@ -139,6 +139,11 @@ pub const SHARED_ENTRIES: &[&str] = &["index.js", "core", "node_modules", "packa
 /// the sandbox, but not the hiding.
 const SERVICE_DIR: &str = "/opt/goopy-life";
 
+/// The init every instance unit runs Ghost under (#195), as PID 1 of the
+/// unit's PID namespace. Installed by `deploy/host-bootstrap.sh`; gl-serv's
+/// `--check-config` refuses a production host without it.
+pub const INIT_BIN: &str = "/usr/bin/tini";
+
 /// Per-instance writable directories under `content/`. Ghost creates files in
 /// all of these, so each instance needs its own.
 const CONTENT_DIRS: &[&str] = &[
@@ -463,6 +468,18 @@ impl GhostProvisioner {
     ///   these cut the interfaces an exploit would go through.
     ///   `IPAddressDeny` blocks the provider's metadata endpoint, which the
     ///   host firewall blocks as well.
+    /// * **Stopping.** With `PrivatePIDs`, `KillMode=mixed` SIGKILLed the unit
+    ///   on about half of all stops, with no wait after SIGTERM, so Ghost's
+    ///   shutdown never ran (#195). `KillMode=control-group` signals every
+    ///   process and waits for the cgroup to empty instead. It also needs an
+    ///   init: as PID 1 of its namespace, Node ignored a SIGTERM that came
+    ///   before Ghost installed its handler, and was still killed on some
+    ///   stops. [`INIT_BIN`] is PID 1 instead: it passes SIGTERM on to Node,
+    ///   reaps it, and exits with Node's status; `-e 143` makes "ended by
+    ///   SIGTERM" a clean exit, for that early-boot case. Node receives the
+    ///   SIGTERM twice, from systemd and from tini, which Ghost's handler
+    ///   takes in its stride. Measured over 12 stops: 0 killed, every one
+    ///   logging "Ghost has shut down".
     ///
     /// Deliberately absent:
     ///
@@ -492,10 +509,10 @@ User={user}
 Group={user}
 WorkingDirectory={working_dir}
 Environment=NODE_ENV=production
-ExecStart={node_bin} "{working_dir}/index.js"
+ExecStart={init_bin} -e 143 -- {node_bin} "{working_dir}/index.js"
 Restart=on-failure
 RestartSec=5
-KillMode=mixed
+KillMode=control-group
 TimeoutStopSec=30
 
 # Sandbox (#187): what a compromised instance can reach is this instance.
@@ -537,6 +554,7 @@ IPAddressDeny=169.254.169.254
 WantedBy=multi-user.target
 "#,
             user = self.ghost.service_user,
+            init_bin = INIT_BIN,
             node_bin = self.ghost.node_bin,
             working_dir = working_dir.display(),
             source_dir = self.ghost.source_dir.display(),
@@ -1208,7 +1226,7 @@ mod tests {
             "Ghost must run as the configured service user, not root"
         );
         assert!(unit.contains(&format!(
-            "ExecStart=/usr/bin/node \"{}/index.js\"",
+            "ExecStart=/usr/bin/tini -e 143 -- /usr/bin/node \"{}/index.js\"",
             working_dir.display()
         )));
 
@@ -1501,6 +1519,38 @@ mod tests {
             "kept for a systemd older than PrivatePIDs, which ignores it"
         );
         assert!(lines.contains(&"PrivateIPC=yes".to_string()));
+    }
+
+    /// With `PrivatePIDs`, `KillMode=mixed` SIGKILLed the unit on about half of
+    /// all stops, and Node as PID 1 ignored an early SIGTERM (#195). Only the
+    /// two together stopped cleanly every time: an init as PID 1, and a kill
+    /// mode that waits for the whole cgroup.
+    #[test]
+    fn prod_unit_runs_ghost_under_an_init() {
+        let source = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let lines = prod_unit_lines(&source, &base.path().join("tasty-lucky-clover"));
+
+        let exec = lines
+            .iter()
+            .find_map(|l| l.strip_prefix("ExecStart="))
+            .expect("the unit must have an ExecStart= line");
+        let (init, node) = exec
+            .split_once(" -- ")
+            .expect("the init's own options must end with `--`, so Node's are not read as tini's");
+        assert_eq!(
+            init, "/usr/bin/tini -e 143",
+            "tini must be PID 1, and treat Node ended by SIGTERM (128 + 15) as a clean exit"
+        );
+        assert!(
+            node.starts_with("/usr/bin/node "),
+            "Node must run under the init, was: {exec}"
+        );
+        assert!(lines.contains(&"PrivatePIDs=yes".to_string()));
+        assert!(
+            lines.contains(&"KillMode=control-group".to_string()),
+            "KillMode=mixed skips the wait after SIGTERM under PrivatePIDs"
+        );
     }
 
     /// `RemoveIPC` removes every IPC object of the unit's uid when it stops.
