@@ -94,6 +94,8 @@ BASE_PACKAGES=(
     fail2ban unattended-upgrades nftables
     nginx
     nodejs
+    # PID 1 of every instance unit, in front of Node (#195): gl-core's INIT_BIN.
+    tini
     zfs-dkms zfsutils-linux linux-headers-amd64
     snapd
 )

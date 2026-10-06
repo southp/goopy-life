@@ -152,7 +152,15 @@ fn check_config(path: &std::path::Path) -> Result<(gl_core::Config, String), gl_
 /// and nothing would go red. Passed in rather than read here because CI's
 /// runner has an older systemd and macOS has none; [`systemd_version`] reads
 /// it on the host.
-fn check_host_paths(cfg: &gl_core::Config, systemd: Option<u32>) -> Result<(), gl_core::Error> {
+///
+/// `init_bin` is the init the instance unit runs Ghost under (#195), also
+/// production mode only: without it every unit fails to start. Passed in for
+/// the same reason; `main` passes `ghost_provisioner::INIT_BIN`.
+fn check_host_paths(
+    cfg: &gl_core::Config,
+    systemd: Option<u32>,
+    init_bin: &std::path::Path,
+) -> Result<(), gl_core::Error> {
     let ProvisionerConfig::Ghost(ghost) = &cfg.provisioner else {
         return Ok(());
     };
@@ -208,6 +216,13 @@ fn check_host_paths(cfg: &gl_core::Config, systemd: Option<u32>) -> Result<(), g
                  PrivatePIDs, which needs systemd {PRIVATE_PIDS_MIN_SYSTEMD} or newer"
             )),
         }
+    }
+
+    if !cfg.dev_mode && !is_executable(init_bin) {
+        problems.push(format!(
+            "{} is not an executable file: instance units run Ghost under it (#195)",
+            init_bin.display()
+        ));
     }
 
     if problems.is_empty() {
@@ -1164,7 +1179,11 @@ async fn main() {
                 // Printed before the host checks run, so a failure arrives
                 // next to the values it was judged against.
                 println!("{summary}");
-                if let Err(e) = check_host_paths(&cfg, systemd_version()) {
+                if let Err(e) = check_host_paths(
+                    &cfg,
+                    systemd_version(),
+                    std::path::Path::new(gl_core::goopy_provisioner::ghost_provisioner::INIT_BIN),
+                ) {
                     eprintln!("{e}");
                     std::process::exit(1);
                 }
@@ -3065,7 +3084,8 @@ kind = "Hello"
         let (dir, source_dir) = prepared_ghost_install();
         let cfg = ghost_config(&source_dir, &dir.path().join("node"));
 
-        check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD).expect("a prepared install must pass");
+        check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD, &dir.path().join("node"))
+            .expect("a prepared install must pass");
     }
 
     #[test]
@@ -3076,8 +3096,8 @@ kind = "Hello"
         let (dir, _) = prepared_ghost_install();
         let cfg = ghost_config(&dir.path().join("ghost-6.63.1"), &dir.path().join("node"));
 
-        let err =
-            check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD).expect_err("a typo'd source_dir must fail");
+        let err = check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD, &dir.path().join("node"))
+            .expect_err("a typo'd source_dir must fail");
         assert!(err.to_string().contains("source_dir"), "was: {err}");
     }
 
@@ -3089,7 +3109,7 @@ kind = "Hello"
         std::fs::remove_file(source_dir.join("package.json")).expect("remove package.json");
 
         let cfg = ghost_config(&source_dir, &dir.path().join("node"));
-        let err = check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD)
+        let err = check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD, &dir.path().join("node"))
             .expect_err("an unprepared install must fail");
         assert!(err.to_string().contains("package.json"), "was: {err}");
     }
@@ -3101,7 +3121,7 @@ kind = "Hello"
         std::fs::write(&not_node, b"").expect("create non-executable");
 
         let cfg = ghost_config(&source_dir, &not_node);
-        let err = check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD)
+        let err = check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD, &dir.path().join("node"))
             .expect_err("a non-executable node_bin must fail");
         assert!(err.to_string().contains("node_bin"), "was: {err}");
     }
@@ -3138,7 +3158,8 @@ kind = "Hello"
         let (dir, source_dir) = prepared_ghost_install();
         let cfg = ghost_config_running_as(&source_dir, &dir.path().join("node"), "root", false);
 
-        check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD).expect("an existing account must pass");
+        check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD, &dir.path().join("node"))
+            .expect("an existing account must pass");
     }
 
     #[test]
@@ -3153,8 +3174,8 @@ kind = "Hello"
             false,
         );
 
-        let err =
-            check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD).expect_err("a missing account must fail");
+        let err = check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD, &dir.path().join("node"))
+            .expect_err("a missing account must fail");
         assert!(
             err.to_string().contains("service_user") && err.to_string().contains(NO_SUCH_ACCOUNT),
             "the error must name the key and the account, was: {err}",
@@ -3169,7 +3190,8 @@ kind = "Hello"
         let cfg =
             ghost_config_running_as(&source_dir, &dir.path().join("node"), NO_SUCH_ACCOUNT, true);
 
-        check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD).expect("dev mode never reads service_user");
+        check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD, &dir.path().join("node"))
+            .expect("dev mode never reads service_user");
     }
 
     /// A host whose systemd has `PrivatePIDs`, so tests about other checks
@@ -3183,8 +3205,12 @@ kind = "Hello"
         let (dir, source_dir) = prepared_ghost_install();
         let cfg = ghost_config_running_as(&source_dir, &dir.path().join("node"), "root", false);
 
-        let err = check_host_paths(&cfg, Some(PRIVATE_PIDS_MIN_SYSTEMD - 1))
-            .expect_err("a systemd without PrivatePIDs must fail");
+        let err = check_host_paths(
+            &cfg,
+            Some(PRIVATE_PIDS_MIN_SYSTEMD - 1),
+            &dir.path().join("node"),
+        )
+        .expect_err("a systemd without PrivatePIDs must fail");
         assert!(
             err.to_string().contains("PrivatePIDs") && err.to_string().contains("257"),
             "the error must name the directive and the version it needs, was: {err}",
@@ -3196,7 +3222,8 @@ kind = "Hello"
         let (dir, source_dir) = prepared_ghost_install();
         let cfg = ghost_config_running_as(&source_dir, &dir.path().join("node"), "root", false);
 
-        let err = check_host_paths(&cfg, None).expect_err("a gate that cannot check must not pass");
+        let err = check_host_paths(&cfg, None, &dir.path().join("node"))
+            .expect_err("a gate that cannot check must not pass");
         assert!(err.to_string().contains("systemd"), "was: {err}");
     }
 
@@ -3206,7 +3233,8 @@ kind = "Hello"
         let (dir, source_dir) = prepared_ghost_install();
         let cfg = ghost_config_running_as(&source_dir, &dir.path().join("node"), "root", true);
 
-        check_host_paths(&cfg, None).expect("dev mode writes no systemd unit");
+        check_host_paths(&cfg, None, &dir.path().join("node"))
+            .expect("dev mode writes no systemd unit");
     }
 
     #[test]
@@ -3237,13 +3265,43 @@ kind = "Hello"
     }
 
     #[test]
+    fn check_host_paths_rejects_a_host_without_the_init() {
+        // Every instance unit execs the init first, so without it every
+        // spawn fails while the deploy reports green.
+        let (dir, source_dir) = prepared_ghost_install();
+        let cfg = ghost_config_running_as(&source_dir, &dir.path().join("node"), "root", false);
+
+        let err = check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD, &dir.path().join("tini"))
+            .expect_err("a missing init must fail");
+        assert!(
+            err.to_string().contains("tini") && err.to_string().contains("#195"),
+            "the error must name the init, was: {err}",
+        );
+    }
+
+    #[test]
+    fn check_host_paths_ignores_the_init_in_dev_mode() {
+        // Dev mode spawns Ghost as a plain process, with no unit and no init.
+        let (dir, source_dir) = prepared_ghost_install();
+        let cfg = ghost_config_running_as(&source_dir, &dir.path().join("node"), "root", true);
+
+        check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD, &dir.path().join("tini"))
+            .expect("dev mode runs no init");
+    }
+
+    #[test]
     fn check_host_paths_ignores_a_hello_config() {
         // Hello has no host-side paths at all, so the check must be a no-op
         // rather than something that has to be kept in step with it.
         let f = write_config(VALID_CONFIG);
         let (cfg, _) = check_config(f.path()).expect("a valid config must check out");
 
-        check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD).expect("Hello configures no host paths");
+        check_host_paths(
+            &cfg,
+            NEW_ENOUGH_SYSTEMD,
+            std::path::Path::new("/nonexistent"),
+        )
+        .expect("Hello configures no host paths");
     }
 
     // -----------------------------------------------------------------------

@@ -301,6 +301,18 @@ else
         "bootstrap: GL_SERV_PORT=$GL_SERV_PORT"
 fi
 
+# Every instance unit runs Ghost under gl-core's INIT_BIN (#195). Debian's tini
+# package installs /usr/bin/tini; a host without it fails every spawn.
+init_bin=$(sed -nE 's/^pub const INIT_BIN: &str = "([^"]*)";/\1/p' \
+    "$DEPLOY_DIR/../backend/gl-core/src/goopy_provisioner/ghost_provisioner.rs")
+if [[ $init_bin == /usr/bin/tini && " ${BASE_PACKAGES[*]} " == *" tini "* ]]; then
+    pass the_init_instances_run_under_is_installed
+else
+    fail the_init_instances_run_under_is_installed \
+        "gl-core INIT_BIN=$init_bin" \
+        "bootstrap BASE_PACKAGES: ${BASE_PACKAGES[*]}"
+fi
+
 # Every instance runs as service_user (#187); the bootstrap creates GHOST_USER.
 # If the two drift apart, the first deploy is refused on the host, by
 # --check-config's account check, instead of here.
