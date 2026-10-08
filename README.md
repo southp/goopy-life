@@ -2,14 +2,9 @@
 
 ## What is it?
 
-Goopy.life is an accountless service for creating ephemeral Ghost sites; just like poopy.life for WordPress.
+Goopy.life is an accountless service for creating ephemeral Ghost sites; just like poopy.life for WordPress. Try it out at https://goopy.life 💩 
 
 Users can create an ephemeral Ghost instance on Goopy.Life by just one click. The created instance will live for a limited of time with minimal resource that should be just enough for exploring Ghost but inadequate for any production usage. 
-
-## We are currently in the testing phase 🚧
-
-Soooooo play at your own risk 💩
-The production version can be found at https://goopy.life, and the dev version currently lives at https://southp.dev.
 
 ## Quick start
 
