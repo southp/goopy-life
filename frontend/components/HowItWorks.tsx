@@ -15,26 +15,25 @@ export default function HowItWorks({ lifeInHours, storageQuotaMb }: HowItWorksPr
 	return (
 		<Accordion title="How it works" defaultOpen>
 			<p>
-				A <strong>goopy</strong> is a freshly spun-up{' '}
+				goopy.life is an ephemeral {' '}
 				<a className="inline-link" href="https://ghost.org" target="_blank" rel="noopener noreferrer">
-					Ghost
+					<strong>Ghost</strong>
 				</a>{' '}
-				instance — yours, immediately, no account required. Hit the button, wait a few
-				seconds, and you land inside a fully functional Ghost admin. Do whatever you like:
-				kick the tyres, write a draft, show a client.
+				sandboxing service inspired by {' '}
+				<a className="inline-link" href="https://poopy.life" target="_blank" rel="noopener noreferrer">
+					poopy.life.
+				</a>{' '}
+				By one click, you got your Ghost instance up and running,{' '}
+				with a domain name that reads too funny for any serious production uses.
 			</p>
 			<p>
-				The catch? It&apos;s <strong>ephemeral</strong>. Your goopy lives for{' '}
-				<strong>{lifeLabel}</strong> and gets a <strong>{storageLabel}</strong> storage
-				allowance. After that it quietly evaporates — no backups, no exports, no lingering
-				data. Think of it as a sandcastle at high tide: beautiful, temporary, completely
-				intentional.
+				By being <strong>ephemeral</strong>, it means your Ghost instance lives for only a limited time.
+				After that it quietly evaporates. Like a transient traveler to this world, proudly strides, leaving no trace.
 			</p>
 			<ul className="explainer-list">
-				<li>No sign-up. No email. No password.</li>
 				<li>Lifetime: <strong>{lifeLabel}</strong></li>
 				<li>Disk quota: <strong>{storageLabel}</strong></li>
-				<li>Backups: none. Plan accordingly.</li>
+				<li>Backups: <strong>none</strong>. Seriously, there is none.</li>
 			</ul>
 		</Accordion>
 	);
