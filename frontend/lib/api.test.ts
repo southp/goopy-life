@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
-import { ApiRequestError, destroyGoopy, isLastWord } from "./api.ts";
+import { ApiRequestError, destroyGoopy, isLastWord, waitUntilGone } from "./api.ts";
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -69,4 +69,66 @@ test("only a refusal retrying can't change is the last word", () => {
 	assert.equal(isLastWord(new ApiRequestError("slow down", "too_many_requests")), false);
 	assert.equal(isLastWord(new ApiRequestError("HTTP 502", null)), false);
 	assert.equal(isLastWord(new Error("Failed to fetch")), false);
+});
+
+/** Answer each fetch with the next of `responses`, recording every call. */
+function stubFetchSequence(responses: (() => Response)[]) {
+	const calls: string[] = [];
+	globalThis.fetch = (async (url: string) => {
+		calls.push(url);
+		const next = responses[Math.min(calls.length, responses.length) - 1];
+		return next();
+	}) as typeof fetch;
+	return calls;
+}
+
+const despawning = () =>
+	new Response(JSON.stringify({ slug: "a-b-c", status: "Despawning" }), { status: 200 });
+const goneFromApi = () =>
+	new Response(JSON.stringify({ error: "not found", code: "not_found" }), { status: 404 });
+
+// Until the teardown ends the goopy still holds a slot; going idle earlier
+// lets "start over" run into a full server.
+test("waiting ends once the API says the goopy is gone", async () => {
+	const calls = stubFetchSequence([despawning, despawning, goneFromApi]);
+
+	await waitUntilGone("a-b-c", { intervalMs: 0 });
+
+	assert.equal(calls.length, 3);
+	assert.match(calls[0], /\/goopies\/a-b-c$/);
+});
+
+test("waiting ends when the teardown failed", async () => {
+	const calls = stubFetchSequence([
+		() => new Response(JSON.stringify({ slug: "a-b-c", status: "Failed" }), { status: 200 }),
+	]);
+
+	await waitUntilGone("a-b-c", { intervalMs: 0 });
+
+	assert.equal(calls.length, 1);
+});
+
+test("waiting rides out a transient error", async () => {
+	const calls = stubFetchSequence([
+		() => new Response("Bad Gateway", { status: 502 }),
+		() => new Response("<html>Not Found</html>", { status: 404 }),
+		goneFromApi,
+	]);
+
+	await waitUntilGone("a-b-c", { intervalMs: 0 });
+
+	assert.equal(calls.length, 3, "neither a 502 nor a foreign 404 ends the wait");
+});
+
+test("waiting stops when aborted", async () => {
+	const controller = new AbortController();
+	const calls = stubFetchSequence([
+		() => {
+			controller.abort();
+			return despawning();
+		},
+	]);
+
+	await assert.rejects(waitUntilGone("a-b-c", { intervalMs: 50, signal: controller.signal }));
+	assert.equal(calls.length, 1);
 });

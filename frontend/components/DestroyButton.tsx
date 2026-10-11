@@ -1,7 +1,8 @@
 'use client';
 
-import { useState } from 'react';
-import { destroyGoopy, isLastWord } from '@/lib/api';
+import { useEffect, useRef, useState } from 'react';
+import { destroyGoopy, isLastWord, waitUntilGone } from '@/lib/api';
+import { POLL_INTERVAL_MS } from '@/lib/constants';
 
 interface DestroyButtonProps {
 	slug: string;
@@ -28,6 +29,10 @@ export default function DestroyButton({
 }: DestroyButtonProps) {
 	const [phase, setPhase] = useState<Phase>("offered");
 	const [failed, setFailed] = useState(false);
+	// Cancels the wait for the teardown if the page goes away first.
+	const waiting = useRef<AbortController | null>(null);
+
+	useEffect(() => () => waiting.current?.abort(), []);
 
 	// The error line answers the last attempt. Once the visitor moves on —
 	// to confirm again, or to back out — it no longer describes anything.
@@ -41,7 +46,6 @@ export default function DestroyButton({
 		setFailed(false);
 		try {
 			await destroyGoopy(slug, token);
-			onDestroyed();
 		} catch (err: unknown) {
 			// Whatever the server said is for a log, not a visitor.
 			if (isLastWord(err)) {
@@ -53,7 +57,20 @@ export default function DestroyButton({
 			// May pass: the page stays as it was, with a line saying so.
 			setFailed(true);
 			setPhase("offered");
+			return;
 		}
+
+		// Accepted, but the goopy holds its slot until the teardown ends. Offer
+		// a new one only after that, or "start over" can hit a full server.
+		const controller = new AbortController();
+		waiting.current = controller;
+		try {
+			await waitUntilGone(slug, { intervalMs: POLL_INTERVAL_MS, signal: controller.signal });
+		} catch {
+			// Aborted: the page is gone, and there is nobody left to tell.
+			return;
+		}
+		onDestroyed();
 	}
 
 	switch (phase) {

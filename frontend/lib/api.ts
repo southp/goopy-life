@@ -96,6 +96,61 @@ export async function destroyGoopy(slug: string, token: string): Promise<void> {
 }
 
 /**
+ * Resolve once gl-serv says `slug` is gone, polling every `intervalMs`.
+ *
+ * A destroy is accepted (202) before its teardown runs, and until that ends the
+ * goopy still holds a slot. Waiting here is what keeps "destroy and start over"
+ * from hitting a full server with its own goopy (#203).
+ *
+ * Gone means gl-serv's own 404 — by the same rule as `destroyGoopy` — or a
+ * `Failed` row: the teardown failed, nothing usable is left, and the sweeper
+ * reaps it. Anything else, including errors, is "not yet". Rejects only when
+ * `signal` aborts.
+ */
+export async function waitUntilGone(
+	slug: string,
+	{ intervalMs, signal }: { intervalMs: number; signal?: AbortSignal },
+): Promise<void> {
+	for (;;) {
+		try {
+			const res = await fetch(`${apiBase()}/goopies/${slug}`, { signal });
+			if (res.ok) {
+				const data: GoopyResponse = await res.json();
+				if (data.status === "Failed") {
+					return;
+				}
+			} else if (isGone(res, await toApiError(res))) {
+				return;
+			}
+		} catch (err: unknown) {
+			if (signal?.aborted) {
+				throw err;
+			}
+			// A blip; the teardown is still running either way.
+		}
+		await sleep(intervalMs, signal);
+	}
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+	return new Promise((resolve, reject) => {
+		if (signal?.aborted) {
+			reject(signal.reason);
+			return;
+		}
+		const id = setTimeout(resolve, ms);
+		signal?.addEventListener(
+			"abort",
+			() => {
+				clearTimeout(id);
+				reject(signal.reason);
+			},
+			{ once: true },
+		);
+	});
+}
+
+/**
  * Whether a failed destroy is a refusal that retrying cannot change: the token
  * is not this goopy's (`forbidden`), or the goopy is not running (`conflict`).
  * Everything else — a rate limit, a 5xx, a network blip — may pass.
