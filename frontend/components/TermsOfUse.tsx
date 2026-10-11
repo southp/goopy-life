@@ -9,19 +9,19 @@ export default function TermsOfUse() {
 				following:
 			</p>
 			<ul className="tou-list">
-				<li>No abuse — don&apos;t use your goopy to spam, scrape, or attack other systems.</li>
+				<li>No abuse — don&apos;t use it to spam, scrape, or attack other systems.</li>
 				<li>No illegal content — anything prohibited by applicable law is prohibited here.</li>
 				<li>
-					No adult or explicit material — goopies may not be used to host pornographic or
+					No adult or explicit material — it may not be used to host pornographic or
 					otherwise not-safe-for-work content.
 				</li>
 				<li>
-					We reserve the right to terminate any goopy, at any time, for any reason — or
+					We reserve the right to terminate any spawned instances, at any time, for any reason — or
 					for no reason at all. Usually it&apos;s just the timer.
 				</li>
 			</ul>
 			<p className="tou-footer">
-				That&apos;s it. No legalese, no dark patterns. Just be a decent human.
+				That&apos;s it. <strong>Just be a decent human</strong>.
 			</p>
 		</Accordion>
 	);
