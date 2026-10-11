@@ -679,6 +679,62 @@ fn parse_event_row(
     })
 }
 
+/// Read `slug`'s row, or `None` if there is none.
+fn load_in(conn: &Connection, slug: &str) -> Result<Option<Goopy>, Error> {
+    let result = conn.query_row(
+        "SELECT slug, life_in_hours, created_at, status, working_dir,
+                port, provisioner_kind, service_version, build_sha
+         FROM goopies WHERE slug = ?1",
+        params![slug],
+        |row| {
+            Ok((
+                row.get::<_, String>("slug")?,
+                row.get::<_, i64>("life_in_hours")?,
+                row.get::<_, String>("created_at")?,
+                row.get::<_, String>("status")?,
+                row.get::<_, String>("working_dir")?,
+                row.get::<_, i64>("port")?,
+                row.get::<_, String>("provisioner_kind")?,
+                row.get::<_, String>("service_version")?,
+                row.get::<_, Option<String>>("build_sha")?,
+            ))
+        },
+    );
+
+    match result {
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(Error::Registry {
+            context: "load",
+            source: e.into(),
+        }),
+        Ok((
+            slug,
+            life_in_hours,
+            created_at_str,
+            status_str,
+            working_dir_str,
+            port,
+            provisioner_kind_str,
+            service_version,
+            build_sha,
+        )) => {
+            let gp = parse_row(
+                slug,
+                life_in_hours,
+                created_at_str,
+                status_str,
+                working_dir_str,
+                port,
+                provisioner_kind_str,
+                service_version,
+                build_sha,
+            )?;
+            tracing::debug!(slug = %gp.slug, "loaded goopy");
+            Ok(Some(gp))
+        }
+    }
+}
+
 /// Insert `gp`, mapping a UNIQUE violation on `slug` to [`Error::AlreadyExists`]
 /// so callers can retry with a fresh slug.
 fn insert_goopy(conn: &Connection, gp: &Goopy) -> Result<(), Error> {
@@ -742,58 +798,7 @@ impl GoopyRegistry for SqliteRegistry {
             source: e.into(),
         })?;
 
-        let result = conn.query_row(
-            "SELECT slug, life_in_hours, created_at, status, working_dir,
-                    port, provisioner_kind, service_version, build_sha
-             FROM goopies WHERE slug = ?1",
-            params![slug],
-            |row| {
-                Ok((
-                    row.get::<_, String>("slug")?,
-                    row.get::<_, i64>("life_in_hours")?,
-                    row.get::<_, String>("created_at")?,
-                    row.get::<_, String>("status")?,
-                    row.get::<_, String>("working_dir")?,
-                    row.get::<_, i64>("port")?,
-                    row.get::<_, String>("provisioner_kind")?,
-                    row.get::<_, String>("service_version")?,
-                    row.get::<_, Option<String>>("build_sha")?,
-                ))
-            },
-        );
-
-        match result {
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(Error::Registry {
-                context: "load",
-                source: e.into(),
-            }),
-            Ok((
-                slug,
-                life_in_hours,
-                created_at_str,
-                status_str,
-                working_dir_str,
-                port,
-                provisioner_kind_str,
-                service_version,
-                build_sha,
-            )) => {
-                let gp = parse_row(
-                    slug,
-                    life_in_hours,
-                    created_at_str,
-                    status_str,
-                    working_dir_str,
-                    port,
-                    provisioner_kind_str,
-                    service_version,
-                    build_sha,
-                )?;
-                tracing::debug!(slug = %gp.slug, "loaded goopy");
-                Ok(Some(gp))
-            }
-        }
+        load_in(&conn, slug)
     }
 
     #[tracing::instrument(skip(self))]
@@ -811,6 +816,20 @@ impl GoopyRegistry for SqliteRegistry {
         self.in_write_transaction("complete_spawn", |tx| {
             set_status_in(tx, slug, Status::Done)?;
             bump_usage_in(tx, utc_today(), UsageCounter::Provisioned)
+        })
+    }
+
+    #[tracing::instrument(skip(self))]
+    fn claim_for_despawn(&self, slug: &str) -> Result<Goopy, Error> {
+        self.in_write_transaction("claim_for_despawn", |tx| {
+            let Some(goopy) = load_in(tx, slug)? else {
+                return Err(Error::NotFound);
+            };
+            if goopy.status == Status::Spawning || goopy.status == Status::Despawning {
+                return Err(Error::Invalid);
+            }
+            set_status_in(tx, slug, Status::Despawning)?;
+            Ok(goopy)
         })
     }
 
@@ -1472,6 +1491,91 @@ mod tests {
         let r = registry();
         let err = r.update_status("no-such", Status::Done).unwrap_err();
         assert!(matches!(err, Error::NotFound));
+    }
+
+    #[test]
+    fn claim_for_despawn_marks_despawning_and_returns_the_prior_row() {
+        let r = registry();
+        for (slug, status) in [("was-done", Status::Done), ("was-failed", Status::Failed)] {
+            let mut gp = make_goopy(slug);
+            gp.status = status.clone();
+            r.save(&gp).unwrap();
+
+            let claimed = r.claim_for_despawn(slug).unwrap();
+
+            assert_eq!(claimed.status, status, "the row as it was before the claim");
+            assert_eq!(r.load(slug).unwrap().unwrap().status, Status::Despawning);
+        }
+    }
+
+    #[test]
+    fn claim_for_despawn_refuses_a_row_mid_spawn_or_mid_despawn() {
+        let r = registry();
+        for (slug, status) in [
+            ("mid-spawn", Status::Spawning),
+            ("mid-despawn", Status::Despawning),
+        ] {
+            let mut gp = make_goopy(slug);
+            gp.status = status.clone();
+            r.save(&gp).unwrap();
+
+            let err = r.claim_for_despawn(slug).unwrap_err();
+
+            assert!(matches!(err, Error::Invalid), "{slug}: got {err:?}");
+            assert_eq!(
+                r.load(slug).unwrap().unwrap().status,
+                status,
+                "{slug}: a refused claim must leave the status alone"
+            );
+        }
+    }
+
+    #[test]
+    fn claim_for_despawn_missing() {
+        let r = registry();
+        let err = r.claim_for_despawn("no-such").unwrap_err();
+        assert!(matches!(err, Error::NotFound));
+    }
+
+    /// The race #203 makes reachable: a double-clicked destroy, or one that
+    /// lands while the sweeper is reaping the same row. Exactly one claim may
+    /// win, or two teardowns run against one instance.
+    #[test]
+    fn concurrent_claims_on_one_slug_have_exactly_one_winner() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        // A file DB, so the pool hands out more than one connection and the
+        // claims genuinely contend; `:memory:` has a pool of one.
+        let dir = tempfile::tempdir().unwrap();
+        let r = Arc::new(SqliteRegistry::new(&dir.path().join("claims.db")).unwrap());
+        let mut gp = make_goopy("contended");
+        gp.status = Status::Done;
+        r.save(&gp).unwrap();
+
+        const CLAIMANTS: usize = 8;
+        let barrier = Arc::new(Barrier::new(CLAIMANTS));
+        let handles: Vec<_> = (0..CLAIMANTS)
+            .map(|_| {
+                let r = Arc::clone(&r);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    r.claim_for_despawn("contended")
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let winners = results.iter().filter(|r| r.is_ok()).count();
+        assert_eq!(winners, 1, "exactly one claim may win: {results:?}");
+        assert!(
+            results
+                .iter()
+                .filter_map(|r| r.as_ref().err())
+                .all(|e| matches!(e, Error::Invalid)),
+            "every loser must see the row already claimed: {results:?}"
+        );
     }
 
     #[test]

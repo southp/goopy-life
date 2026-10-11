@@ -293,18 +293,7 @@ where
     /// Check that `slug` may be despawned and claim it by marking it
     /// `Despawning`, returning the row as it stood before the claim.
     fn begin_despawn(&self, slug: &str) -> Result<Goopy, Error> {
-        let Some(goopy) = self.get(slug)? else {
-            return Err(Error::NotFound);
-        };
-
-        if goopy.status == Status::Spawning || goopy.status == Status::Despawning {
-            return Err(Error::Invalid);
-        }
-
-        // annotate the status
-        self.registry.update_status(slug, Status::Despawning)?;
-
-        Ok(goopy)
+        self.registry.claim_for_despawn(slug)
     }
 
     /// Release an instance's resources and settle its registry row.
@@ -714,6 +703,9 @@ mod tests {
         fn complete_spawn(&self, _slug: &str) -> Result<(), Error> {
             Ok(())
         }
+        fn claim_for_despawn(&self, _slug: &str) -> Result<Goopy, Error> {
+            Err(Error::NotFound)
+        }
         fn acquire_port(
             &self,
             _slug: &str,
@@ -1014,6 +1006,10 @@ mod tests {
             }
             /// Refused like every other status write this double sees.
             fn complete_spawn(&self, _: &str) -> Result<(), Error> {
+                Err(Error::Invalid)
+            }
+            /// Refused too: claiming a row for teardown is a status write.
+            fn claim_for_despawn(&self, _: &str) -> Result<Goopy, Error> {
                 Err(Error::Invalid)
             }
             fn acquire_port(&self, slug: &str, s: u32, e: u32) -> Result<u32, Error> {
@@ -1775,6 +1771,64 @@ mod tests {
         );
     }
 
+    /// Two despawns of one instance — a double-clicked destroy, or one racing
+    /// the sweeper — must run its teardown once, not once each (#203).
+    #[test]
+    fn concurrent_despawns_run_exactly_one_teardown() {
+        use std::sync::Barrier;
+
+        struct CountingProvisioner(Arc<Mutex<u32>>);
+
+        impl GoopyProvisioner for CountingProvisioner {
+            fn provision(&self, _goopy: &Goopy) -> Result<(), Error> {
+                Ok(())
+            }
+            fn deprovision(&self, _goopy: &Goopy) -> Result<(), Error> {
+                *self.0.lock().unwrap() += 1;
+                // Long enough that a second teardown, if one got through,
+                // would still be in flight alongside the first.
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                Ok(())
+            }
+            fn kind(&self) -> ProvisionerKind {
+                ProvisionerKind::Hello
+            }
+            fn service_version(&self) -> &str {
+                "9.9.9-mock"
+            }
+        }
+
+        // A file DB, so the despawns genuinely contend for the registry;
+        // `:memory:` has a pool of one and would serialise them.
+        let dir = tempfile::tempdir().unwrap();
+        let registry = SqliteRegistry::new(&dir.path().join("despawns.db")).unwrap();
+        seed_row(&registry, "double-click", 9000, Status::Done);
+
+        let teardowns = Arc::new(Mutex::new(0u32));
+        let gm = Arc::new(manager_with_provisioner(
+            registry,
+            CountingProvisioner(Arc::clone(&teardowns)),
+        ));
+
+        const CALLERS: usize = 4;
+        let barrier = Arc::new(Barrier::new(CALLERS));
+        let handles: Vec<_> = (0..CALLERS)
+            .map(|_| {
+                let gm = Arc::clone(&gm);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    gm.despawn_blocking("double-click")
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        assert_eq!(*teardowns.lock().unwrap(), 1, "results: {results:?}");
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        assert!(gm.get("double-click").unwrap().is_none());
+    }
+
     /// The sweeper and a hand-driven despawn run the same teardown, and only
     /// the phase can tell them apart once the row is gone.
     #[test]
@@ -1819,6 +1873,9 @@ mod tests {
         }
         fn complete_spawn(&self, slug: &str) -> Result<(), Error> {
             self.0.complete_spawn(slug)
+        }
+        fn claim_for_despawn(&self, slug: &str) -> Result<Goopy, Error> {
+            self.0.claim_for_despawn(slug)
         }
         fn acquire_port(&self, slug: &str, s: u32, e: u32) -> Result<u32, Error> {
             self.0.acquire_port(slug, s, e)
@@ -1886,6 +1943,9 @@ mod tests {
         }
         fn complete_spawn(&self, slug: &str) -> Result<(), Error> {
             self.0.complete_spawn(slug)
+        }
+        fn claim_for_despawn(&self, slug: &str) -> Result<Goopy, Error> {
+            self.0.claim_for_despawn(slug)
         }
         fn acquire_port(&self, slug: &str, s: u32, e: u32) -> Result<u32, Error> {
             self.0.acquire_port(slug, s, e)

@@ -25,6 +25,22 @@ pub trait GoopyRegistry {
     /// [`update_status`]: GoopyRegistry::update_status
     fn complete_spawn(&self, slug: &str) -> Result<(), Error>;
 
+    /// Claim `slug` for teardown: mark it [`Status::Despawning`] and return the
+    /// row as it stood before the claim, in one transaction.
+    ///
+    /// Refuses a row that is already `Spawning` or `Despawning` with
+    /// [`Error::Invalid`], and a missing one with [`Error::NotFound`].
+    ///
+    /// The check and the write share one write lock, so of two concurrent
+    /// claims on the same slug exactly one wins. A `load` followed by an
+    /// [`update_status`] let both see `Done` and both run the teardown —
+    /// harmless while only an operator and the sweeper despawned, reachable
+    /// once a visitor can (#203): a double-clicked destroy, or one that races
+    /// the sweeper.
+    ///
+    /// [`update_status`]: GoopyRegistry::update_status
+    fn claim_for_despawn(&self, slug: &str) -> Result<Goopy, Error>;
+
     /// Find the lowest unused port in `[range_start, range_end)`, mark it as
     /// allocated (recording which goopy instance owns it), and return it.
     /// Returns `Error::PortExhausted` if the entire range is exhausted.
