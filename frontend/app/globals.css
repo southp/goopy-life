@@ -133,6 +133,50 @@ body {
 	}
 }
 
+/*
+ * Destroying a goopy early (#203). Deliberately quieter than the CTA — an
+ * outline, not a fill — so it reads as an option rather than the next step, and
+ * only the confirming click turns red.
+ */
+.destroy-area {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	margin-top: 1rem;
+}
+
+.destroy-actions {
+	display: flex;
+	gap: 0.5rem;
+}
+
+.destroy-button {
+	height: 2.25rem;
+	padding: 0 1rem;
+	border: 1px solid #555;
+	border-radius: 64px;
+	background-color: transparent;
+	color: #aaa;
+	font: inherit;
+	font-size: 0.875rem;
+	cursor: pointer;
+	transition-property: color, background-color, border-color;
+	transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+	transition-duration: 150ms;
+}
+
+.destroy-button:hover {
+	border-color: #f87171;
+	color: #f87171;
+}
+
+.destroy-button.confirm,
+.destroy-button.confirm:hover {
+	border-color: #f87171;
+	background-color: #f87171;
+	color: var(--background);
+}
+
 .spinner {
 	display: inline-block;
 	width: 2rem;

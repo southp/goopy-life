@@ -9,6 +9,7 @@ import { parseStoredGoopy, serializeStoredGoopy, type StoredGoopy } from '@/lib/
 import { useCapacity } from '@/lib/useCapacity';
 import type { AppState, GoopyResponse } from '@/lib/types';
 import CapacityIndicator from '@/components/CapacityIndicator';
+import DestroyButton from '@/components/DestroyButton';
 import ErrorMessage from '@/components/ErrorMessage';
 import IssueLink from '@/components/IssueLink';
 import Spinner from '@/components/Spinner';
@@ -236,6 +237,14 @@ export default function GhostButton() {
 					</a>
 					{availableUntil !== null && (
 						<p className="expiry-message">Available until {availableUntil}</p>
+					)}
+					{/* Only with a token: without one, the server would refuse. */}
+					{state.token !== null && (
+						<DestroyButton
+							slug={state.slug}
+							token={state.token}
+							onDestroyed={handleReset}
+						/>
 					)}
 				</div>
 			);

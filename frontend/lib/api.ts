@@ -69,6 +69,24 @@ export async function getGoopy(
 	return res.json();
 }
 
+/**
+ * Destroy the goopy this browser spawned, before it expires (#203).
+ *
+ * `token` is the `despawn_token` from `POST /goopies`; the slug alone proves
+ * nothing, since it is the goopy's public subdomain. A 404 counts as success:
+ * the goopy is already gone, which is what was asked for.
+ */
+export async function destroyGoopy(slug: string, token: string): Promise<void> {
+	const res = await fetch(`${apiBase()}/goopies/${slug}`, {
+		method: "DELETE",
+		headers: { Authorization: `Bearer ${token}` },
+	});
+	if (res.ok || res.status === 404) {
+		return;
+	}
+	throw await toApiError(res);
+}
+
 // Live capacity. Cheap read, polled from the browser — unlike GET /config, which is
 // fetched once at build time and so cannot carry anything that changes at runtime.
 export async function getCapacity(
