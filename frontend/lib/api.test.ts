@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
-import { ApiRequestError, destroyGoopy } from "./api.ts";
+import { ApiRequestError, destroyGoopy, isLastWord } from "./api.ts";
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -58,4 +58,15 @@ test("a refusal surfaces with the API's code", async () => {
 		assert.equal(err.code, "forbidden");
 		return true;
 	});
+});
+
+// Retrying a refusal like these can never succeed, so the page must stop
+// offering it; anything else may pass and is worth another try.
+test("only a refusal retrying can't change is the last word", () => {
+	assert.equal(isLastWord(new ApiRequestError("forbidden", "forbidden")), true);
+	assert.equal(isLastWord(new ApiRequestError("instance is not running", "conflict")), true);
+
+	assert.equal(isLastWord(new ApiRequestError("slow down", "too_many_requests")), false);
+	assert.equal(isLastWord(new ApiRequestError("HTTP 502", null)), false);
+	assert.equal(isLastWord(new Error("Failed to fetch")), false);
 });

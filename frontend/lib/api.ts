@@ -95,6 +95,18 @@ export async function destroyGoopy(slug: string, token: string): Promise<void> {
 	throw err;
 }
 
+/**
+ * Whether a failed destroy is a refusal that retrying cannot change: the token
+ * is not this goopy's (`forbidden`), or the goopy is not running (`conflict`).
+ * Everything else — a rate limit, a 5xx, a network blip — may pass.
+ */
+export function isLastWord(err: unknown): boolean {
+	return (
+		err instanceof ApiRequestError &&
+		(err.code === "forbidden" || err.code === "conflict")
+	);
+}
+
 /** Whether a failed response is gl-serv saying the goopy does not exist. */
 function isGone(res: Response, err: ApiRequestError): boolean {
 	return res.status === 404 && err.code === "not_found";

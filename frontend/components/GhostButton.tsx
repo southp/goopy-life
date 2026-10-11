@@ -125,6 +125,20 @@ export default function GhostButton() {
 		setState({ kind: "idle" });
 	}, []);
 
+	// The server refused this browser's token for good (#203). Keep the page —
+	// the goopy is still running — but forget the token, so a reload does not
+	// offer a button that can only fail. `state` is left alone so that the
+	// destroy control can keep saying why it is gone.
+	const handleTokenRejected = useCallback(() => {
+		if (state.kind !== "done") {
+			return;
+		}
+		localStorage.setItem(
+			LOCALSTORAGE_KEY,
+			serializeStoredGoopy({ slug: state.slug, token: null }),
+		);
+	}, [state]);
+
 	// Depend only on the resuming slug and token (null when not resuming) so this
 	// effect fires once per entry into "resuming" rather than re-running — and
 	// recreating its AbortController — on every unrelated state transition.
@@ -244,6 +258,7 @@ export default function GhostButton() {
 							slug={state.slug}
 							token={state.token}
 							onDestroyed={handleReset}
+							onTokenRejected={handleTokenRejected}
 						/>
 					)}
 				</div>
