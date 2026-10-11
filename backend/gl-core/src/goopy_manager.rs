@@ -262,7 +262,7 @@ where
     /// [`despawn_blocking`]: GoopyManager::despawn_blocking
     #[tracing::instrument(skip(self))]
     pub fn despawn(&self, slug: String) -> Result<String, Error> {
-        let goopy = self.begin_despawn(&slug)?;
+        let goopy = self.claim_for_operator(&slug)?;
         self.teardown_in_background(goopy, EventPhase::Despawn);
         Ok(slug)
     }
@@ -282,44 +282,34 @@ where
     ///   had already started it: the visitor asked for the instance to go, and
     ///   it is going.
     ///
-    /// The token is checked before the claim, so a wrong token never touches
-    /// the row's status.
+    /// The token is checked inside the claim's transaction, against the row
+    /// the claim writes, so a wrong token never touches the row's status.
     ///
     /// [`spawn`]: GoopyManager::spawn
     /// [`despawn`]: GoopyManager::despawn
     #[tracing::instrument(skip(self, presented_token))]
     pub fn despawn_as_owner(&self, slug: &str, presented_token: &str) -> Result<(), Error> {
-        let Some(goopy) = self.get(slug)? else {
-            return Err(Error::NotFound);
+        let admit_owner = |row: &Goopy| {
+            let owns = row
+                .despawn_token_hash
+                .as_deref()
+                .is_some_and(|stored| crate::despawn_token::verify(presented_token, stored));
+            if owns {
+                Ok(())
+            } else {
+                tracing::info!(slug, "despawn refused: token does not match");
+                Err(Error::Forbidden)
+            }
         };
 
-        let owns = goopy
-            .despawn_token_hash
-            .as_deref()
-            .is_some_and(|stored| crate::despawn_token::verify(presented_token, stored));
-        if !owns {
-            tracing::info!(slug, "despawn refused: token does not match");
-            return Err(Error::Forbidden);
-        }
-
-        match goopy.status {
-            Status::Spawning => return Err(Error::Invalid),
-            Status::Despawning => return Ok(()),
-            _ => {}
-        }
-
-        match self.registry.claim_for_despawn(slug) {
-            Ok(claimed) => {
-                self.teardown_in_background(claimed, EventPhase::UserDespawn);
+        match self.registry.claim_for_despawn(slug, &admit_owner)? {
+            Claim::Claimed(goopy) => {
+                self.teardown_in_background(goopy, EventPhase::UserDespawn);
                 Ok(())
             }
-            // Claimed between the read above and here — by the sweeper, or by
-            // this visitor's own second click. The row was neither `Spawning`
-            // nor `Despawning` when read, and nothing returns a row to
-            // `Spawning`, so `Invalid` here can only mean another claim won and
-            // its teardown is underway.
-            Err(Error::Invalid) => Ok(()),
-            Err(e) => Err(e),
+            // The sweeper, or this visitor's own second click, got there
+            // first; either way the instance is going.
+            Claim::AlreadyClaimed => Ok(()),
         }
     }
 
@@ -368,14 +358,18 @@ where
     /// [`despawn_blocking`]: GoopyManager::despawn_blocking
     /// [`sweep`]: GoopyManager::sweep
     fn despawn_blocking_as(&self, slug: &str, phase: EventPhase) -> Result<(), Error> {
-        let goopy = self.begin_despawn(slug)?;
+        let goopy = self.claim_for_operator(slug)?;
         Self::teardown(&self.registry, &self.provisioner, &goopy, phase)
     }
 
-    /// Check that `slug` may be despawned and claim it by marking it
-    /// `Despawning`, returning the row as it stood before the claim.
-    fn begin_despawn(&self, slug: &str) -> Result<Goopy, Error> {
-        self.registry.claim_for_despawn(slug)
+    /// Claim `slug` for a despawn nobody has to be authorised for — an
+    /// operator's, or the sweeper's — refusing one already underway with
+    /// [`Error::Invalid`], which is what `gl-cli despawn` reports.
+    fn claim_for_operator(&self, slug: &str) -> Result<Goopy, Error> {
+        match self.registry.claim_for_despawn(slug, &admit_any)? {
+            Claim::Claimed(goopy) => Ok(goopy),
+            Claim::AlreadyClaimed => Err(Error::Invalid),
+        }
     }
 
     /// Release an instance's resources and settle its registry row.
@@ -785,7 +779,11 @@ mod tests {
         fn complete_spawn(&self, _slug: &str) -> Result<(), Error> {
             Ok(())
         }
-        fn claim_for_despawn(&self, _slug: &str) -> Result<Goopy, Error> {
+        fn claim_for_despawn(
+            &self,
+            _slug: &str,
+            _admit: &dyn Fn(&Goopy) -> Result<(), Error>,
+        ) -> Result<Claim, Error> {
             Err(Error::NotFound)
         }
         fn acquire_port(
@@ -1092,7 +1090,11 @@ mod tests {
                 Err(Error::Invalid)
             }
             /// Refused too: claiming a row for teardown is a status write.
-            fn claim_for_despawn(&self, _: &str) -> Result<Goopy, Error> {
+            fn claim_for_despawn(
+                &self,
+                _: &str,
+                _: &dyn Fn(&Goopy) -> Result<(), Error>,
+            ) -> Result<Claim, Error> {
                 Err(Error::Invalid)
             }
             fn acquire_port(&self, slug: &str, s: u32, e: u32) -> Result<u32, Error> {
@@ -2126,8 +2128,12 @@ mod tests {
         fn complete_spawn(&self, slug: &str) -> Result<(), Error> {
             self.0.complete_spawn(slug)
         }
-        fn claim_for_despawn(&self, slug: &str) -> Result<Goopy, Error> {
-            self.0.claim_for_despawn(slug)
+        fn claim_for_despawn(
+            &self,
+            slug: &str,
+            admit: &dyn Fn(&Goopy) -> Result<(), Error>,
+        ) -> Result<Claim, Error> {
+            self.0.claim_for_despawn(slug, admit)
         }
         fn acquire_port(&self, slug: &str, s: u32, e: u32) -> Result<u32, Error> {
             self.0.acquire_port(slug, s, e)
@@ -2196,8 +2202,12 @@ mod tests {
         fn complete_spawn(&self, slug: &str) -> Result<(), Error> {
             self.0.complete_spawn(slug)
         }
-        fn claim_for_despawn(&self, slug: &str) -> Result<Goopy, Error> {
-            self.0.claim_for_despawn(slug)
+        fn claim_for_despawn(
+            &self,
+            slug: &str,
+            admit: &dyn Fn(&Goopy) -> Result<(), Error>,
+        ) -> Result<Claim, Error> {
+            self.0.claim_for_despawn(slug, admit)
         }
         fn acquire_port(&self, slug: &str, s: u32, e: u32) -> Result<u32, Error> {
             self.0.acquire_port(slug, s, e)

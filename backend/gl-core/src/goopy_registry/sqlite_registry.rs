@@ -6,7 +6,7 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
-use super::GoopyRegistry;
+use super::{Claim, GoopyRegistry};
 use crate::goopy::Goopy;
 use crate::instance_event::{EventOutcome, EventPhase, InstanceEvent};
 use crate::shared_types::*;
@@ -863,17 +863,24 @@ impl GoopyRegistry for SqliteRegistry {
         })
     }
 
-    #[tracing::instrument(skip(self))]
-    fn claim_for_despawn(&self, slug: &str) -> Result<Goopy, Error> {
+    #[tracing::instrument(skip(self, admit))]
+    fn claim_for_despawn(
+        &self,
+        slug: &str,
+        admit: &dyn Fn(&Goopy) -> Result<(), Error>,
+    ) -> Result<Claim, Error> {
         self.in_write_transaction("claim_for_despawn", |tx| {
             let Some(goopy) = load_in(tx, slug)? else {
                 return Err(Error::NotFound);
             };
-            if goopy.status == Status::Spawning || goopy.status == Status::Despawning {
-                return Err(Error::Invalid);
+            admit(&goopy)?;
+            match goopy.status {
+                Status::Despawning => return Ok(Claim::AlreadyClaimed),
+                Status::Spawning => return Err(Error::Invalid),
+                _ => {}
             }
             set_status_in(tx, slug, Status::Despawning)?;
-            Ok(goopy)
+            Ok(Claim::Claimed(goopy))
         })
     }
 
@@ -1364,6 +1371,7 @@ impl SqliteRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::goopy_registry::admit_any;
     use std::path::PathBuf;
 
     fn make_goopy(slug: &str) -> Goopy {
@@ -1560,7 +1568,9 @@ mod tests {
             gp.status = status.clone();
             r.save(&gp).unwrap();
 
-            let claimed = r.claim_for_despawn(slug).unwrap();
+            let Claim::Claimed(claimed) = r.claim_for_despawn(slug, &admit_any).unwrap() else {
+                panic!("{slug}: expected a claim");
+            };
 
             assert_eq!(claimed.status, status, "the row as it was before the claim");
             assert_eq!(r.load(slug).unwrap().unwrap().status, Status::Despawning);
@@ -1568,32 +1578,61 @@ mod tests {
     }
 
     #[test]
-    fn claim_for_despawn_refuses_a_row_mid_spawn_or_mid_despawn() {
+    fn claim_for_despawn_refuses_a_row_mid_spawn() {
         let r = registry();
-        for (slug, status) in [
-            ("mid-spawn", Status::Spawning),
-            ("mid-despawn", Status::Despawning),
-        ] {
-            let mut gp = make_goopy(slug);
-            gp.status = status.clone();
-            r.save(&gp).unwrap();
+        r.save(&make_goopy("mid-spawn")).unwrap();
 
-            let err = r.claim_for_despawn(slug).unwrap_err();
+        let err = r.claim_for_despawn("mid-spawn", &admit_any).unwrap_err();
 
-            assert!(matches!(err, Error::Invalid), "{slug}: got {err:?}");
-            assert_eq!(
-                r.load(slug).unwrap().unwrap().status,
-                status,
-                "{slug}: a refused claim must leave the status alone"
-            );
-        }
+        assert!(matches!(err, Error::Invalid), "got {err:?}");
+        assert_eq!(
+            r.load("mid-spawn").unwrap().unwrap().status,
+            Status::Spawning,
+            "a refused claim must leave the status alone"
+        );
+    }
+
+    /// A teardown already underway is not an error: it is somebody else's,
+    /// and the caller decides what that means for it.
+    #[test]
+    fn claim_reports_already_claimed_for_a_despawning_row() {
+        let r = registry();
+        let mut gp = make_goopy("mid-despawn");
+        gp.status = Status::Despawning;
+        r.save(&gp).unwrap();
+
+        let claim = r.claim_for_despawn("mid-despawn", &admit_any).unwrap();
+
+        assert!(matches!(claim, Claim::AlreadyClaimed), "got {claim:?}");
     }
 
     #[test]
     fn claim_for_despawn_missing() {
         let r = registry();
-        let err = r.claim_for_despawn("no-such").unwrap_err();
+        let err = r.claim_for_despawn("no-such", &admit_any).unwrap_err();
         assert!(matches!(err, Error::NotFound));
+    }
+
+    /// The caller's conditions are judged inside the claim, against the row it
+    /// would write: refused, the row is left exactly as it was.
+    #[test]
+    fn a_refused_admit_writes_nothing() {
+        let r = registry();
+        let mut gp = make_goopy("guarded");
+        gp.status = Status::Done;
+        r.save(&gp).unwrap();
+
+        let seen = std::cell::Cell::new(None);
+        let err = r
+            .claim_for_despawn("guarded", &|row: &Goopy| {
+                seen.set(Some(row.status.clone()));
+                Err(Error::Forbidden)
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, Error::Forbidden), "got {err:?}");
+        assert_eq!(seen.take(), Some(Status::Done), "admit sees the loaded row");
+        assert_eq!(r.load("guarded").unwrap().unwrap().status, Status::Done);
     }
 
     /// The race #203 makes reachable: a double-clicked destroy, or one that
@@ -1620,19 +1659,22 @@ mod tests {
                 let barrier = Arc::clone(&barrier);
                 thread::spawn(move || {
                     barrier.wait();
-                    r.claim_for_despawn("contended")
+                    r.claim_for_despawn("contended", &admit_any)
                 })
             })
             .collect();
         let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
-        let winners = results.iter().filter(|r| r.is_ok()).count();
+        let winners = results
+            .iter()
+            .filter(|r| matches!(r, Ok(Claim::Claimed(_))))
+            .count();
         assert_eq!(winners, 1, "exactly one claim may win: {results:?}");
         assert!(
             results
                 .iter()
-                .filter_map(|r| r.as_ref().err())
-                .all(|e| matches!(e, Error::Invalid)),
+                .filter(|r| !matches!(r, Ok(Claim::Claimed(_))))
+                .all(|r| matches!(r, Ok(Claim::AlreadyClaimed))),
             "every loser must see the row already claimed: {results:?}"
         );
     }
