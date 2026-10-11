@@ -1,5 +1,5 @@
-//! Usage counters: how many instances were provisioned and how many failed to
-//! (#172).
+//! Usage counters: how many instances were provisioned, how many failed to be
+//! (#172), and how many their visitors destroyed before they expired (#203).
 //!
 //! Kept as a daily rollup plus an all-time total rather than derived from the
 //! instance event log, which cannot answer the question: it records no
@@ -12,36 +12,45 @@ use std::cmp::Reverse;
 
 use chrono::{Duration, NaiveDate};
 
-/// The two things counted.
+/// The things counted.
 ///
 /// `Provisioned` is bumped when the spawn thread marks an instance `Done`,
 /// which since #151 means it answered HTTP. `Failed` is bumped when a
 /// spawn-phase failure marks it `Failed`. A failed despawn or sweep is a
 /// cleanup problem, not a failed provision, and counts as neither.
+///
+/// `Destroyed` is bumped when an instance its visitor asked to destroy leaves
+/// the registry (#203) — when the teardown succeeds, not when the request is
+/// accepted, just as `Provisioned` waits for `Done`. Sweeps and `gl-cli
+/// despawn` are cleanup, not a visitor giving a slot back, and are not counted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageCounter {
     Provisioned,
     Failed,
+    Destroyed,
 }
 
-/// A pair of counts over some span of days.
+/// The counts over some span of days.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UsageCounts {
     pub provisioned: u64,
     pub failed: u64,
+    pub destroyed: u64,
 }
 
 impl UsageCounts {
-    pub const fn new(provisioned: u64, failed: u64) -> Self {
+    pub const fn new(provisioned: u64, failed: u64, destroyed: u64) -> Self {
         Self {
             provisioned,
             failed,
+            destroyed,
         }
     }
 
     fn add(&mut self, other: UsageCounts) {
         self.provisioned += other.provisioned;
         self.failed += other.failed;
+        self.destroyed += other.destroyed;
     }
 }
 
@@ -123,7 +132,7 @@ mod tests {
     fn row(d: &str, provisioned: u64, failed: u64) -> DailyUsage {
         DailyUsage {
             day: day(d),
-            counts: UsageCounts::new(provisioned, failed),
+            counts: UsageCounts::new(provisioned, failed, 0),
         }
     }
 
@@ -139,8 +148,28 @@ mod tests {
             day("2026-09-29"),
         );
 
-        assert_eq!(stats.last_7_days, UsageCounts::new(11, 1));
-        assert_eq!(stats.today, UsageCounts::new(1, 0));
+        assert_eq!(stats.last_7_days, UsageCounts::new(11, 1, 0));
+        assert_eq!(stats.today, UsageCounts::new(1, 0, 0));
+    }
+
+    #[test]
+    fn destroys_are_summed_like_the_other_counts() {
+        let destroyed = |d: &str, n: u64| DailyUsage {
+            day: day(d),
+            counts: UsageCounts::new(0, 0, n),
+        };
+        let stats = UsageStats::from_rows(
+            UsageCounts::default(),
+            vec![
+                destroyed("2026-09-29", 2),
+                destroyed("2026-09-23", 3),
+                destroyed("2026-09-22", 100),
+            ],
+            day("2026-09-29"),
+        );
+
+        assert_eq!(stats.last_7_days, UsageCounts::new(0, 0, 5));
+        assert_eq!(stats.today, UsageCounts::new(0, 0, 2));
     }
 
     #[test]

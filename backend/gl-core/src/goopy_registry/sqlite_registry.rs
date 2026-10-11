@@ -27,7 +27,8 @@ use crate::usage_stats::{DailyUsage, UsageCounter, UsageCounts, UsageStats};
 /// `goopies.build_sha` (#119).  Version 4 adds the usage counters,
 /// `usage_daily` and `usage_totals` (#172).  Version 5 measures an instance's
 /// lifetime in hours rather than days (#110).  Version 6 adds
-/// `goopies.despawn_token_hash` (#203).  A fresh database is fully
+/// `goopies.despawn_token_hash` (#203), and version 7 counts destroys
+/// alongside the other usage counters.  A fresh database is fully
 /// initialised by walking every step in order, so new steps append here rather
 /// than editing an existing one — an already-migrated database never re-runs a
 /// step it has passed.
@@ -166,6 +167,21 @@ const MIGRATIONS: &[(u32, &str)] = &[
         // [`migrate`] makes safe.
         "
     ALTER TABLE goopies ADD COLUMN despawn_token_hash TEXT;
+    ",
+    ),
+    (
+        7,
+        // Count the instances visitors destroyed before they expired (#203),
+        // next to the provisions and failures #172 counts.
+        //
+        // `NOT NULL DEFAULT 0` rather than nullable: nothing was destroyed
+        // early before this step, because nothing could be, so zero is the
+        // true count for every existing row rather than a guess. Not
+        // idempotent — `ADD COLUMN` fails if re-run — which the `user_version`
+        // guard in [`migrate`] makes safe.
+        "
+    ALTER TABLE usage_daily  ADD COLUMN destroyed INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE usage_totals ADD COLUMN destroyed INTEGER NOT NULL DEFAULT 0;
     ",
     ),
 ];
@@ -595,8 +611,8 @@ fn count_from(stored: i64) -> u64 {
 /// Count one `counter` against `day` and against the all-time total.
 ///
 /// Callers run this inside the transaction that makes the counted thing true —
-/// the `Done` or `Failed` status write — so the count cannot drift from the
-/// rows it describes.
+/// the `Done` or `Failed` status write, or the delete that reaps a destroyed
+/// instance — so the count cannot drift from the rows it describes.
 ///
 /// One literal statement pair per counter rather than a column name formatted
 /// into shared SQL, so nothing is ever spliced into a statement.
@@ -617,6 +633,12 @@ fn bump_usage_in(conn: &Connection, day: NaiveDate, counter: UsageCounter) -> Re
              ON CONFLICT(day) DO UPDATE SET failed = failed + 1",
             "INSERT INTO usage_totals (id, provisioned, failed) VALUES (1, 0, 1)
              ON CONFLICT(id) DO UPDATE SET failed = failed + 1",
+        ),
+        UsageCounter::Destroyed => (
+            "INSERT INTO usage_daily (day, destroyed) VALUES (?1, 1)
+             ON CONFLICT(day) DO UPDATE SET destroyed = destroyed + 1",
+            "INSERT INTO usage_totals (id, provisioned, failed, destroyed) VALUES (1, 0, 0, 1)
+             ON CONFLICT(id) DO UPDATE SET destroyed = destroyed + 1",
         ),
     };
 
@@ -1126,7 +1148,14 @@ impl GoopyRegistry for SqliteRegistry {
     fn delete_with_event(&self, slug: &str, event: &InstanceEvent) -> Result<(), Error> {
         self.in_write_transaction("delete_with_event", |tx| {
             delete_goopy_in(tx, slug)?;
-            insert_event_in(tx, event)
+            insert_event_in(tx, event)?;
+            // A visitor's destroy counts once the row is really gone, which is
+            // exactly when this commits. A sweep or an operator's despawn is
+            // cleanup, not a slot given back early, and is not counted.
+            if event.phase == EventPhase::UserDespawn {
+                bump_usage_in(tx, utc_today(), UsageCounter::Destroyed)?;
+            }
+            Ok(())
         })
     }
 
@@ -1226,12 +1255,13 @@ impl GoopyRegistry for SqliteRegistry {
         // hand-damaged table from turning `GET /stats` into a 500.
         let all_time = tx
             .query_row(
-                "SELECT provisioned, failed FROM usage_totals WHERE id = 1",
+                "SELECT provisioned, failed, destroyed FROM usage_totals WHERE id = 1",
                 [],
                 |row| {
                     Ok(UsageCounts {
                         provisioned: count_from(row.get(0)?),
                         failed: count_from(row.get(1)?),
+                        destroyed: count_from(row.get(2)?),
                     })
                 },
             )
@@ -1243,7 +1273,7 @@ impl GoopyRegistry for SqliteRegistry {
             .unwrap_or_default();
 
         let mut stmt = tx
-            .prepare("SELECT day, provisioned, failed FROM usage_daily")
+            .prepare("SELECT day, provisioned, failed, destroyed FROM usage_daily")
             .map_err(|e| Error::Registry {
                 context: "usage daily prepare",
                 source: e.into(),
@@ -1255,6 +1285,7 @@ impl GoopyRegistry for SqliteRegistry {
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
                 ))
             })
             .map_err(|e| Error::Registry {
@@ -1262,7 +1293,7 @@ impl GoopyRegistry for SqliteRegistry {
                 source: e.into(),
             })?
             .map(|r| {
-                let (day_str, provisioned, failed) = r.map_err(|e| Error::Registry {
+                let (day_str, provisioned, failed, destroyed) = r.map_err(|e| Error::Registry {
                     context: "usage daily row",
                     source: e.into(),
                 })?;
@@ -1279,6 +1310,7 @@ impl GoopyRegistry for SqliteRegistry {
                     counts: UsageCounts {
                         provisioned: count_from(provisioned),
                         failed: count_from(failed),
+                        destroyed: count_from(destroyed),
                     },
                 })
             })
@@ -2034,9 +2066,9 @@ mod tests {
     fn usage_stats_on_an_empty_registry_is_all_zeros() {
         let stats = registry().usage_stats(utc_today()).unwrap();
 
-        assert_eq!(stats.all_time, UsageCounts::new(0, 0));
-        assert_eq!(stats.last_7_days, UsageCounts::new(0, 0));
-        assert_eq!(stats.today, UsageCounts::new(0, 0));
+        assert_eq!(stats.all_time, UsageCounts::new(0, 0, 0));
+        assert_eq!(stats.last_7_days, UsageCounts::new(0, 0, 0));
+        assert_eq!(stats.today, UsageCounts::new(0, 0, 0));
         assert!(stats.daily.is_empty());
     }
 
@@ -2049,8 +2081,8 @@ mod tests {
 
         assert_eq!(r.load("u-done").unwrap().unwrap().status, Status::Done);
         let stats = r.usage_stats(utc_today()).unwrap();
-        assert_eq!(stats.today, UsageCounts::new(1, 0));
-        assert_eq!(stats.all_time, UsageCounts::new(1, 0));
+        assert_eq!(stats.today, UsageCounts::new(1, 0, 0));
+        assert_eq!(stats.all_time, UsageCounts::new(1, 0, 0));
         assert_eq!(stats.daily.len(), 1);
         assert_eq!(stats.daily[0].day, utc_today());
     }
@@ -2064,7 +2096,7 @@ mod tests {
         assert!(matches!(err, Error::NotFound), "{err:?}");
         assert_eq!(
             r.usage_stats(utc_today()).unwrap().all_time,
-            UsageCounts::new(0, 0)
+            UsageCounts::new(0, 0, 0)
         );
     }
 
@@ -2099,8 +2131,8 @@ mod tests {
         .unwrap();
 
         let stats = r.usage_stats(utc_today()).unwrap();
-        assert_eq!(stats.today, UsageCounts::new(0, 1));
-        assert_eq!(stats.all_time, UsageCounts::new(0, 1));
+        assert_eq!(stats.today, UsageCounts::new(0, 1, 0));
+        assert_eq!(stats.all_time, UsageCounts::new(0, 1, 0));
     }
 
     /// Cleanup problems are not failed provisions: the instance was served,
@@ -2125,8 +2157,95 @@ mod tests {
         assert_eq!(r.events(Some("u-cleanup"), 10).unwrap().len(), 2);
         assert_eq!(
             r.usage_stats(utc_today()).unwrap().all_time,
-            UsageCounts::new(0, 0)
+            UsageCounts::new(0, 0, 0)
         );
+    }
+
+    #[test]
+    fn a_visitors_destroy_counts_once_the_row_is_gone() {
+        let r = registry();
+        r.save(&make_goopy("u-destroyed")).unwrap();
+
+        r.delete_with_event(
+            "u-destroyed",
+            &InstanceEvent::reaped("u-destroyed", EventPhase::UserDespawn),
+        )
+        .unwrap();
+
+        assert!(r.load("u-destroyed").unwrap().is_none());
+        let stats = r.usage_stats(utc_today()).unwrap();
+        assert_eq!(stats.all_time, UsageCounts::new(0, 0, 1));
+        assert_eq!(stats.today, UsageCounts::new(0, 0, 1));
+    }
+
+    /// The sweeper reaping an expired instance and an operator's `gl-cli
+    /// despawn` are cleanup, not a visitor giving a slot back early.
+    #[test]
+    fn sweep_and_operator_reaps_are_not_counted_as_destroys() {
+        let r = registry();
+        for (slug, phase) in [
+            ("u-swept", EventPhase::Sweep),
+            ("u-by-hand", EventPhase::Despawn),
+        ] {
+            r.save(&make_goopy(slug)).unwrap();
+            r.delete_with_event(slug, &InstanceEvent::reaped(slug, phase))
+                .unwrap();
+        }
+
+        assert_eq!(
+            r.usage_stats(utc_today()).unwrap().all_time,
+            UsageCounts::new(0, 0, 0)
+        );
+    }
+
+    /// The count and the delete commit together: a destroy that cannot be
+    /// counted is not recorded as having happened, and the teardown's failure
+    /// path takes over as for any other failed delete.
+    #[test]
+    fn delete_with_event_rolls_back_when_the_destroy_count_write_fails() {
+        let r = registry();
+        r.save(&make_goopy("u-uncountable")).unwrap();
+        r.break_usage_writes();
+
+        let err = r
+            .delete_with_event(
+                "u-uncountable",
+                &InstanceEvent::reaped("u-uncountable", EventPhase::UserDespawn),
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, Error::Registry { .. }), "{err:?}");
+        assert!(
+            r.load("u-uncountable").unwrap().is_some(),
+            "the delete must roll back with the count"
+        );
+        assert!(r.events(Some("u-uncountable"), 10).unwrap().is_empty());
+    }
+
+    /// Counts recorded before step 7 must survive it, and every existing row
+    /// reads zero destroys — nothing could be destroyed early before #203.
+    #[test]
+    fn migration_adds_destroyed_keeping_every_existing_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("v6.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            seed_at_version(&conn, MIGRATIONS, 6);
+            conn.execute_batch(
+                "INSERT INTO usage_daily (day, provisioned, failed) VALUES ('2026-10-01', 4, 1);
+                 UPDATE usage_totals SET provisioned = 40, failed = 3 WHERE id = 1;",
+            )
+            .unwrap();
+        }
+
+        let r = SqliteRegistry::new(&db_path).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        assert_eq!(user_version(&conn), LATEST_VERSION);
+        let stats = r.usage_stats(utc_today()).unwrap();
+        assert_eq!(stats.all_time, UsageCounts::new(40, 3, 0));
+        assert_eq!(stats.daily.len(), 1);
+        assert_eq!(stats.daily[0].counts, UsageCounts::new(4, 1, 0));
     }
 
     #[test]
@@ -2141,7 +2260,7 @@ mod tests {
         assert_eq!(r.events(Some("u-dup"), 10).unwrap().len(), 1);
         assert_eq!(
             r.usage_stats(utc_today()).unwrap().all_time,
-            UsageCounts::new(0, 1)
+            UsageCounts::new(0, 1, 0)
         );
     }
 
@@ -2176,13 +2295,13 @@ mod tests {
 
         let stats = r.usage_stats(t).unwrap();
 
-        assert_eq!(stats.today, UsageCounts::new(1, 0));
+        assert_eq!(stats.today, UsageCounts::new(1, 0, 0));
         assert_eq!(
             stats.last_7_days,
-            UsageCounts::new(1, 1),
+            UsageCounts::new(1, 1, 0),
             "day -7 is outside"
         );
-        assert_eq!(stats.all_time, UsageCounts::new(2, 1));
+        assert_eq!(stats.all_time, UsageCounts::new(2, 1, 0));
         let days: Vec<_> = stats.daily.iter().map(|d| d.day).collect();
         assert_eq!(
             days,
@@ -2216,9 +2335,9 @@ mod tests {
 
         let stats = r.usage_stats(t).unwrap();
 
-        assert_eq!(stats.all_time, UsageCounts::new(0, 0));
-        assert_eq!(stats.today, UsageCounts::new(0, 0));
-        assert_eq!(stats.daily[0].counts, UsageCounts::new(0, 0));
+        assert_eq!(stats.all_time, UsageCounts::new(0, 0, 0));
+        assert_eq!(stats.today, UsageCounts::new(0, 0, 0));
+        assert_eq!(stats.daily[0].counts, UsageCounts::new(0, 0, 0));
     }
 
     #[test]
@@ -2239,7 +2358,7 @@ mod tests {
         assert_eq!(stats.daily[0].day, t - chrono::Duration::days(89));
         assert_eq!(
             stats.all_time,
-            UsageCounts::new(2, 1),
+            UsageCounts::new(2, 1, 0),
             "the total is never pruned"
         );
     }
@@ -2265,7 +2384,7 @@ mod tests {
         assert!(table_exists(&conn, "usage_totals"));
         assert_eq!(
             r.usage_stats(utc_today()).unwrap().all_time,
-            UsageCounts::new(0, 0)
+            UsageCounts::new(0, 0, 0)
         );
 
         // And the upgraded database counts.
@@ -2273,7 +2392,7 @@ mod tests {
         r.complete_spawn("u-upgraded").unwrap();
         assert_eq!(
             r.usage_stats(utc_today()).unwrap().all_time,
-            UsageCounts::new(1, 0)
+            UsageCounts::new(1, 0, 0)
         );
     }
 
@@ -2516,13 +2635,20 @@ mod tests {
         // First open: creates a fully-initialised DB at LATEST_VERSION.
         SqliteRegistry::new(&db_path).unwrap();
 
-        // Simulate an "old" database: drop both tables and reset user_version.
+        // Simulate a pre-versioning database: drop every table and reset
+        // user_version. The tables later steps create go too — a database
+        // from before versioning never had them, and leaving them behind at
+        // their latest shape makes a non-idempotent step like 7's
+        // `ADD COLUMN` collide with a column no real old database could have.
         {
             let conn = rusqlite::Connection::open(&db_path).unwrap();
             conn.execute_batch(
                 "
                 DROP TABLE IF EXISTS goopies;
                 DROP TABLE IF EXISTS allocated_ports;
+                DROP TABLE IF EXISTS instance_events;
+                DROP TABLE IF EXISTS usage_daily;
+                DROP TABLE IF EXISTS usage_totals;
                 PRAGMA user_version = 0;
                 ",
             )

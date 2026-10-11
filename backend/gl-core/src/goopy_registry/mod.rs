@@ -134,6 +134,13 @@ pub trait GoopyRegistry {
     /// event with a rolled-back delete claims a reap that did not happen, which
     /// is the lie #117 was filed about, written somewhere more durable than a
     /// log line.
+    ///
+    /// An [`EventPhase::UserDespawn`] event also counts one destroy against
+    /// today and the all-time total, in the same transaction (#203): a
+    /// visitor's destroy counts exactly when the instance is gone. Sweeps and
+    /// operator despawns are not counted.
+    ///
+    /// [`EventPhase::UserDespawn`]: crate::instance_event::EventPhase::UserDespawn
     fn delete_with_event(&self, slug: &str, event: &InstanceEvent) -> Result<(), Error>;
 
     /// Drop events that occurred strictly before `cutoff`, returning how many
@@ -153,8 +160,8 @@ pub trait GoopyRegistry {
 
     // -- usage counters (#172) --------------------------------------------
     //
-    // A daily rollup plus an all-time total. Written only by `complete_spawn`
-    // and `fail_with_event`; see [`crate::usage_stats`].
+    // A daily rollup plus an all-time total. Written only by `complete_spawn`,
+    // `fail_with_event` and `delete_with_event`; see [`crate::usage_stats`].
 
     /// Read the usage counters as of `today` (a UTC day).
     ///

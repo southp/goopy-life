@@ -435,11 +435,13 @@ struct CapacityResponse {
     max_provisioned: u32,
 }
 
-/// A provisioned/failed pair, as `GET /stats` reports it for every span.
+/// The counts `GET /stats` reports for every span.
 #[derive(serde::Serialize)]
 struct UsageCountsResponse {
     provisioned: u64,
     failed: u64,
+    /// Instances their visitors destroyed before they expired (#203).
+    destroyed: u64,
 }
 
 impl From<gl_core::UsageCounts> for UsageCountsResponse {
@@ -447,6 +449,7 @@ impl From<gl_core::UsageCounts> for UsageCountsResponse {
         Self {
             provisioned: c.provisioned,
             failed: c.failed,
+            destroyed: c.destroyed,
         }
     }
 }
@@ -460,8 +463,8 @@ struct DailyUsageResponse {
     counts: UsageCountsResponse,
 }
 
-/// Body of `GET /stats` — how many instances were provisioned, and how many
-/// failed to be (#172).
+/// Body of `GET /stats` — how many instances were provisioned, how many failed
+/// to be (#172), and how many their visitors destroyed early (#203).
 ///
 /// Counts only: no slugs and no failure `detail`, so nothing here identifies
 /// an instance or leaks the operator-only reason an event carries.
@@ -2612,7 +2615,7 @@ mod tests {
 
         let body = get_stats_body(app).await;
 
-        let zeros = serde_json::json!({ "provisioned": 0, "failed": 0 });
+        let zeros = serde_json::json!({ "provisioned": 0, "failed": 0, "destroyed": 0 });
         assert_eq!(body["all_time"], zeros);
         assert_eq!(body["last_7_days"], zeros);
         assert_eq!(body["today"], zeros);
@@ -2640,7 +2643,7 @@ mod tests {
 
         let body = get_stats_body(app).await;
 
-        let one_each = serde_json::json!({ "provisioned": 1, "failed": 1 });
+        let one_each = serde_json::json!({ "provisioned": 1, "failed": 1, "destroyed": 0 });
         assert_eq!(body["all_time"], one_each);
         assert_eq!(body["last_7_days"], one_each);
         assert_eq!(body["today"], one_each);
@@ -2650,6 +2653,7 @@ mod tests {
                 "day": Utc::now().date_naive().to_string(),
                 "provisioned": 1,
                 "failed": 1,
+                "destroyed": 0,
             }])
         );
         let text = body.to_string();
@@ -2657,6 +2661,35 @@ mod tests {
             !text.contains("stats-done") && !text.contains("stats-failed"),
             "nothing in /stats may identify an instance: {text}"
         );
+    }
+
+    /// A visitor's destroy shows up in every span once the instance is gone.
+    #[tokio::test]
+    async fn get_stats_counts_a_visitors_destroy() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let token = seed_owned_goopy(&registry, "given-back", 9501, Status::Done);
+        let app = make_router("goopy.life", registry);
+
+        let resp = app
+            .clone()
+            .oneshot(delete_request(
+                "given-back",
+                Some(&format!("Bearer {token}")),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        wait_for(&app, "given-back", |status, _| {
+            status == StatusCode::NOT_FOUND
+        })
+        .await;
+
+        let body = get_stats_body(app).await;
+
+        for span in ["all_time", "last_7_days", "today"] {
+            assert_eq!(body[span]["destroyed"], 1, "{span}");
+        }
+        assert_eq!(body["daily"][0]["destroyed"], 1);
     }
 
     /// Public and aggregate, so it belongs on the loose read limiter with

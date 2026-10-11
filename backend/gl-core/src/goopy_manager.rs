@@ -2002,6 +2002,30 @@ mod tests {
         assert_eq!(events.len(), 1, "{events:?}");
         assert_eq!(events[0].phase, EventPhase::UserDespawn);
         assert_eq!(events[0].outcome, EventOutcome::Reaped);
+        assert_eq!(gm.usage_stats().unwrap().all_time.destroyed, 1);
+    }
+
+    /// A destroy counts when the instance is gone, not when it is asked for:
+    /// a teardown that fails leaves a `Failed` row and no count.
+    #[test]
+    fn a_failed_teardown_is_not_counted_as_a_destroy() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let token = seed_owned_row(&registry, "stubborn", 9000, Status::Done);
+        let gm = manager_with_provisioner(
+            registry,
+            UndeprovisionableProvisioner {
+                deprovision_calls: Arc::new(Mutex::new(0)),
+            },
+        );
+
+        gm.despawn_as_owner("stubborn", token.as_str()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while gm.get("stubborn").unwrap().unwrap().status != Status::Failed {
+            assert!(std::time::Instant::now() < deadline, "never went Failed");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert_eq!(gm.usage_stats().unwrap().all_time.destroyed, 0);
     }
 
     #[test]
@@ -2352,8 +2376,8 @@ mod tests {
 
         assert_eq!(gm.get(&slug).unwrap().unwrap().status, Status::Done);
         let stats = gm.usage_stats().unwrap();
-        assert_eq!(stats.today, UsageCounts::new(1, 0));
-        assert_eq!(stats.all_time, UsageCounts::new(1, 0));
+        assert_eq!(stats.today, UsageCounts::new(1, 0, 0));
+        assert_eq!(stats.all_time, UsageCounts::new(1, 0, 0));
     }
 
     /// The instance is up and answering; a statistic must not keep it out of
@@ -2382,8 +2406,8 @@ mod tests {
 
         assert_eq!(gm.get(&slug).unwrap().unwrap().status, Status::Failed);
         let stats = gm.usage_stats().unwrap();
-        assert_eq!(stats.today, UsageCounts::new(0, 1));
-        assert_eq!(stats.all_time, UsageCounts::new(0, 1));
+        assert_eq!(stats.today, UsageCounts::new(0, 1, 0));
+        assert_eq!(stats.all_time, UsageCounts::new(0, 1, 0));
     }
 
     /// A teardown that fails is a cleanup problem: the instance was already
@@ -2400,7 +2424,7 @@ mod tests {
         let slug = gm.spawn().unwrap().slug;
         wait_for_spawn_to_settle(&gm, &slug);
         let before = gm.usage_stats().unwrap();
-        assert_eq!(before.all_time, UsageCounts::new(1, 0));
+        assert_eq!(before.all_time, UsageCounts::new(1, 0, 0));
 
         gm.despawn_blocking(&slug).unwrap_err();
 
@@ -2456,7 +2480,7 @@ mod tests {
         let days: Vec<_> = after.daily.iter().map(|d| d.day).collect();
         assert_eq!(days, [today, oldest_kept]);
         assert_eq!(after.all_time, before, "the total is never pruned");
-        assert_eq!(after.all_time, UsageCounts::new(3, 1));
+        assert_eq!(after.all_time, UsageCounts::new(3, 1, 0));
     }
 
     /// Retention is housekeeping, not a reap: a prune must not show up in the

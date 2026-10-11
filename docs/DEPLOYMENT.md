@@ -239,12 +239,12 @@ was built from.
 
 ### Usage stats: `GET /stats`
 
-gl-serv counts provisions and answers with the totals, publicly and on the read
-rate limiter:
+gl-serv counts provisions, failures and early destroys, and answers with the
+totals, publicly and on the read rate limiter:
 
 ```bash
 curl -sS https://<dev-api-host>/stats
-{"all_time":{"provisioned":1234,"failed":56},"last_7_days":{"provisioned":140,"failed":3},"today":{"provisioned":21,"failed":0},"window_days":90,"daily":[{"day":"2026-09-29","provisioned":21,"failed":0}]}
+{"all_time":{"provisioned":1234,"failed":56,"destroyed":310},"last_7_days":{"provisioned":140,"failed":3,"destroyed":37},"today":{"provisioned":21,"failed":0,"destroyed":6},"window_days":90,"daily":[{"day":"2026-09-29","provisioned":21,"failed":0,"destroyed":6}]}
 ```
 
 What counts:
@@ -253,6 +253,7 @@ What counts:
 |---|---|---|
 | `provisioned` | the spawn sets the instance `Done` | since #151 `Done` means it answered HTTP, so this counts instances a visitor could use |
 | `failed` | a spawn fails and sets the instance `Failed` | once per instance; a failed despawn or sweep is a cleanup problem and is not counted |
+| `destroyed` | an instance its visitor destroyed (`DELETE /goopies/:slug`, #203) leaves the registry | when the teardown succeeds, not when the request is accepted; sweeps and `gl-cli despawn` are not counted |
 
 - **Days are UTC.** `today` is the current UTC day so far. `last_7_days` is the
   last seven UTC days, today included.
@@ -266,6 +267,8 @@ What counts:
   filters it out; subtract it by hand if it matters.
 - **Counting starts at deploy.** Migration 4 creates the counters at zero, so
   nothing provisioned before the first deploy that carries them is counted.
+  Migration 7 adds `destroyed` at zero the same way, which is also the true
+  count: nothing could be destroyed early before it.
 
 ## The maintenance CLI on the host
 
