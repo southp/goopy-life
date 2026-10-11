@@ -13,7 +13,7 @@ export default function HowItWorks({ lifeInHours, storageQuotaMb }: HowItWorksPr
 	const storageLabel = storageQuotaMb === null ? "--" : `${storageQuotaMb} MB`;
 
 	return (
-		<Accordion title="How it works">
+		<Accordion title="How it works" defaultOpen>
 			<p>
 				A <strong>goopy</strong> is a freshly spun-up{' '}
 				<a className="inline-link" href="https://ghost.org" target="_blank" rel="noopener noreferrer">
