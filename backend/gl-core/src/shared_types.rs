@@ -220,6 +220,7 @@ mod tests {
             Error::RowParse { .. } => "row_parse",
             Error::CapacityFull { .. } => "capacity_full",
             Error::ReadinessTimeout { .. } => "readiness_timeout",
+            Error::Forbidden => "forbidden",
         }
     }
 
@@ -255,6 +256,7 @@ mod tests {
             Error::CapacityFull {
                 kind: CapacityKind::Provisioned,
             },
+            Error::Forbidden,
             Error::ReadinessTimeout {
                 slug: "a-b-c".into(),
                 waited_secs: 120,
@@ -361,6 +363,9 @@ pub enum Error {
         waited_secs: u64,
         last: String,
     },
+    /// The presented despawn token is not the one issued for this instance —
+    /// or the instance predates tokens and none was issued (#203).
+    Forbidden,
 }
 
 /// Which of the two instance caps a spawn ran into.
@@ -423,6 +428,7 @@ impl Error {
             Error::RowParse { .. } => "row_parse",
             Error::CapacityFull { .. } => "capacity_full",
             Error::ReadinessTimeout { .. } => "readiness_timeout",
+            Error::Forbidden => "forbidden",
         }
     }
 }
@@ -472,6 +478,7 @@ impl std::fmt::Display for Error {
                 f,
                 "{slug} did not serve HTTP within {waited_secs}s (last probe: {last})"
             ),
+            Error::Forbidden => write!(f, "despawn token does not match"),
         }
     }
 }

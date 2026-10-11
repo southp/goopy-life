@@ -263,7 +263,70 @@ where
     #[tracing::instrument(skip(self))]
     pub fn despawn(&self, slug: String) -> Result<String, Error> {
         let goopy = self.begin_despawn(&slug)?;
+        self.teardown_in_background(goopy, EventPhase::Despawn);
+        Ok(slug)
+    }
 
+    /// Despawn an instance on behalf of the visitor who spawned it (#203).
+    ///
+    /// `presented_token` must be the token [`spawn`] issued for `slug`; the
+    /// slug alone proves nothing, since it is the instance's public subdomain.
+    /// Like [`despawn`], this returns as soon as the teardown is underway.
+    ///
+    /// - [`Error::NotFound`] — no such instance.
+    /// - [`Error::Forbidden`] — the token does not match, or the instance
+    ///   predates tokens and was issued none.
+    /// - [`Error::Invalid`] — the instance is still `Spawning`; there is
+    ///   nothing to tear down yet.
+    /// - `Ok(())` — the teardown is underway, including when something else
+    ///   had already started it: the visitor asked for the instance to go, and
+    ///   it is going.
+    ///
+    /// The token is checked before the claim, so a wrong token never touches
+    /// the row's status.
+    ///
+    /// [`spawn`]: GoopyManager::spawn
+    /// [`despawn`]: GoopyManager::despawn
+    #[tracing::instrument(skip(self, presented_token))]
+    pub fn despawn_as_owner(&self, slug: &str, presented_token: &str) -> Result<(), Error> {
+        let Some(goopy) = self.get(slug)? else {
+            return Err(Error::NotFound);
+        };
+
+        let owns = goopy
+            .despawn_token_hash
+            .as_deref()
+            .is_some_and(|stored| crate::despawn_token::verify(presented_token, stored));
+        if !owns {
+            tracing::info!(slug, "despawn refused: token does not match");
+            return Err(Error::Forbidden);
+        }
+
+        match goopy.status {
+            Status::Spawning => return Err(Error::Invalid),
+            Status::Despawning => return Ok(()),
+            _ => {}
+        }
+
+        match self.registry.claim_for_despawn(slug) {
+            Ok(claimed) => {
+                self.teardown_in_background(claimed, EventPhase::UserDespawn);
+                Ok(())
+            }
+            // Claimed between the read above and here — by the sweeper, or by
+            // this visitor's own second click. The row was neither `Spawning`
+            // nor `Despawning` when read, and nothing returns a row to
+            // `Spawning`, so `Invalid` here can only mean another claim won and
+            // its teardown is underway.
+            Err(Error::Invalid) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Run [`teardown`] on a thread, for callers that answer before it ends.
+    ///
+    /// [`teardown`]: GoopyManager::teardown
+    fn teardown_in_background(&self, goopy: Goopy, phase: EventPhase) {
         let registry = Arc::clone(&self.registry);
         let provisioner = Arc::clone(&self.provisioner);
         let span = tracing::Span::current();
@@ -273,10 +336,8 @@ where
             // The caller was already told `Ok`, so a failure here can only be
             // reported through the log, the row's restored `Failed` status and
             // the event `teardown` records against it.
-            let _ = Self::teardown(&registry, &provisioner, &goopy, EventPhase::Despawn);
+            let _ = Self::teardown(&registry, &provisioner, &goopy, phase);
         });
-
-        Ok(slug)
     }
 
     /// Despawn an instance and wait for its teardown to finish.
@@ -1894,6 +1955,122 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].phase, EventPhase::Despawn);
         assert_eq!(events[0].outcome, EventOutcome::Reaped);
+    }
+
+    // ── despawn by the instance's owner (#203) ────────────────────────────
+
+    /// Seed a row carrying a token hash, as `spawn` leaves it, and return the
+    /// token its visitor would hold.
+    fn seed_owned_row(
+        registry: &SqliteRegistry,
+        slug: &str,
+        port: u32,
+        status: Status,
+    ) -> DespawnToken {
+        let token = DespawnToken::issue();
+        let goopy = Goopy {
+            despawn_token_hash: Some(token.hash()),
+            ..make_goopy(slug, 0, port, status)
+        };
+        registry.save(&goopy).unwrap();
+        registry.acquire_port(slug, port, port + 1).unwrap();
+        token
+    }
+
+    fn wait_until_gone<R, P>(gm: &GoopyManager<R, P>, slug: &str)
+    where
+        R: GoopyRegistry + Send + Sync + 'static,
+        P: GoopyProvisioner + Send + Sync + 'static,
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while gm.get(slug).unwrap().is_some() {
+            assert!(std::time::Instant::now() < deadline, "{slug} never left");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn the_owner_can_despawn_and_it_is_recorded_as_theirs() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let token = seed_owned_row(&registry, "mine", 9000, Status::Done);
+        let gm = manager_with_provisioner(registry, NoopProvisioner);
+
+        gm.despawn_as_owner("mine", token.as_str()).unwrap();
+        wait_until_gone(&gm, "mine");
+
+        let events = gm.events(Some("mine"), 10).unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].phase, EventPhase::UserDespawn);
+        assert_eq!(events[0].outcome, EventOutcome::Reaped);
+    }
+
+    #[test]
+    fn a_wrong_token_is_forbidden_and_leaves_the_instance_alone() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let token = seed_owned_row(&registry, "not-yours", 9000, Status::Done);
+        let gm = manager_with_provisioner(registry, NoopProvisioner);
+
+        for wrong in [
+            DespawnToken::issue().as_str().to_string(),
+            String::new(),
+            // The stored hash is not a key: a leaked row must not destroy.
+            token.hash(),
+        ] {
+            let err = gm.despawn_as_owner("not-yours", &wrong).unwrap_err();
+            assert!(matches!(err, Error::Forbidden), "got {err:?}");
+        }
+        assert_eq!(
+            gm.get("not-yours").unwrap().unwrap().status,
+            Status::Done,
+            "a refused despawn must not touch the status"
+        );
+    }
+
+    /// Rows from before tokens existed have no hash. No token may match one —
+    /// least of all an empty one.
+    #[test]
+    fn an_instance_issued_no_token_cannot_be_despawned_by_anyone() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_row(&registry, "legacy", 9000, Status::Done);
+        let gm = manager_with_provisioner(registry, NoopProvisioner);
+
+        for presented in ["", "anything"] {
+            let err = gm.despawn_as_owner("legacy", presented).unwrap_err();
+            assert!(matches!(err, Error::Forbidden), "got {err:?}");
+        }
+        assert_eq!(gm.get("legacy").unwrap().unwrap().status, Status::Done);
+    }
+
+    #[test]
+    fn the_owner_cannot_despawn_mid_spawn() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let token = seed_owned_row(&registry, "booting", 9000, Status::Spawning);
+        let gm = manager_with_provisioner(registry, NoopProvisioner);
+
+        let err = gm.despawn_as_owner("booting", token.as_str()).unwrap_err();
+
+        assert!(matches!(err, Error::Invalid), "got {err:?}");
+        assert_eq!(gm.get("booting").unwrap().unwrap().status, Status::Spawning);
+    }
+
+    /// A second click, or one landing while the sweeper reaps the row: the
+    /// visitor asked for it to go, and it is going.
+    #[test]
+    fn despawning_an_instance_already_on_its_way_out_is_accepted() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let token = seed_owned_row(&registry, "leaving", 9000, Status::Despawning);
+        let gm = manager_with_provisioner(registry, NoopProvisioner);
+
+        gm.despawn_as_owner("leaving", token.as_str()).unwrap();
+    }
+
+    #[test]
+    fn despawning_a_missing_instance_as_owner_is_not_found() {
+        let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
+        let err = gm
+            .despawn_as_owner("no-such", DespawnToken::issue().as_str())
+            .unwrap_err();
+        assert!(matches!(err, Error::NotFound), "got {err:?}");
     }
 
     /// A registry that cannot give a port back, standing in for a write that

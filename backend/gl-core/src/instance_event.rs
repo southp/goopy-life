@@ -41,8 +41,18 @@ use crate::shared_types::Error;
 pub enum EventPhase {
     /// Provisioning a new instance.
     Spawn,
-    /// A teardown somebody asked for — the API, or `gl-cli despawn`.
+    /// A teardown an operator asked for, with `gl-cli despawn`.
     Despawn,
+    /// A teardown the visitor who spawned the instance asked for, through
+    /// `DELETE /goopies/:slug` (#203).
+    ///
+    /// Distinct from [`Despawn`] for the same reason [`Sweep`] is: "how often
+    /// do visitors give an instance back early" is its own question, and the
+    /// operator's hand-driven cleanup would muddy the answer.
+    ///
+    /// [`Despawn`]: EventPhase::Despawn
+    /// [`Sweep`]: EventPhase::Sweep
+    UserDespawn,
     /// A teardown the sweeper started, because the instance expired or was
     /// already `Failed`.
     ///
@@ -60,6 +70,7 @@ impl std::fmt::Display for EventPhase {
         match self {
             EventPhase::Spawn => write!(f, "spawn"),
             EventPhase::Despawn => write!(f, "despawn"),
+            EventPhase::UserDespawn => write!(f, "user_despawn"),
             EventPhase::Sweep => write!(f, "sweep"),
         }
     }
@@ -72,6 +83,7 @@ impl std::str::FromStr for EventPhase {
         match s {
             "spawn" => Ok(EventPhase::Spawn),
             "despawn" => Ok(EventPhase::Despawn),
+            "user_despawn" => Ok(EventPhase::UserDespawn),
             "sweep" => Ok(EventPhase::Sweep),
             _ => Err(Error::Invalid),
         }
@@ -188,7 +200,12 @@ mod tests {
 
     #[test]
     fn event_phase_display_round_trip() {
-        for phase in [EventPhase::Spawn, EventPhase::Despawn, EventPhase::Sweep] {
+        for phase in [
+            EventPhase::Spawn,
+            EventPhase::Despawn,
+            EventPhase::UserDespawn,
+            EventPhase::Sweep,
+        ] {
             let s = phase.to_string();
             assert_eq!(EventPhase::from_str(&s).unwrap(), phase, "round-trip {s}");
         }

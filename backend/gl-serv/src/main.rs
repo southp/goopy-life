@@ -4,7 +4,7 @@ use std::time::Duration as StdDuration;
 
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Path, State};
-use axum::http::{HeaderValue, Method, Request, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -296,6 +296,7 @@ fn parse_systemd_version(output: &str) -> Option<u32> {
 
 trait ManagerService: Send + Sync {
     fn spawn(&self) -> Result<gl_core::Spawned, gl_core::Error>;
+    fn despawn_as_owner(&self, slug: &str, token: &str) -> Result<(), gl_core::Error>;
     fn get(&self, slug: &str) -> Result<Option<gl_core::Goopy>, gl_core::Error>;
     fn sweep(&self) -> Result<(u32, Vec<gl_core::Error>), gl_core::Error>;
     fn capacity(&self) -> Result<gl_core::Capacity, gl_core::Error>;
@@ -309,6 +310,10 @@ where
 {
     fn spawn(&self) -> Result<gl_core::Spawned, gl_core::Error> {
         GoopyManager::spawn(self)
+    }
+
+    fn despawn_as_owner(&self, slug: &str, token: &str) -> Result<(), gl_core::Error> {
+        GoopyManager::despawn_as_owner(self, slug, token)
     }
 
     fn get(&self, slug: &str) -> Result<Option<gl_core::Goopy>, gl_core::Error> {
@@ -349,6 +354,14 @@ struct SpawnResponse {
     /// never again — the registry keeps only its hash — so the client must
     /// keep it if it wants to destroy the instance early.
     despawn_token: String,
+}
+
+/// Body of a `202` from `DELETE /goopies/:slug`: the teardown is underway, not
+/// finished. A `GET` that answers `404` is what says it is gone.
+#[derive(serde::Serialize)]
+struct DespawnResponse {
+    slug: String,
+    status: String,
 }
 
 #[derive(serde::Serialize)]
@@ -478,6 +491,12 @@ struct ErrorResponse {
 enum AppError {
     NotFound(String),
     Invalid(String),
+    /// No usable credential: renders `401` with `WWW-Authenticate: Bearer`.
+    Unauthorized(String),
+    /// A credential that does not grant this: renders `403`.
+    Forbidden(String),
+    /// The request is fine but the resource is in the wrong state for it.
+    Conflict(String),
     ServiceUnavailable(String),
     /// A cap was hit. Renders 503 with a `Retry-After` header and a body that
     /// names which limit was exceeded (server-full vs. busy).
@@ -491,6 +510,23 @@ enum AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        // RFC 9110 requires a 401 to say which scheme it wants.
+        if let AppError::Unauthorized(message) = self {
+            let mut response = (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: message,
+                    code: "unauthorized".into(),
+                }),
+            )
+                .into_response();
+            response.headers_mut().insert(
+                axum::http::header::WWW_AUTHENTICATE,
+                HeaderValue::from_static("Bearer"),
+            );
+            return response;
+        }
+
         // CapacityFull needs an extra Retry-After header, so handle it up front.
         if let AppError::CapacityFull {
             message,
@@ -516,6 +552,9 @@ impl IntoResponse for AppError {
         let (status, message, code) = match self {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg, "not_found"),
             AppError::Invalid(msg) => (StatusCode::BAD_REQUEST, msg, "invalid"),
+            AppError::Unauthorized(_) => unreachable!("handled above"),
+            AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg, "forbidden"),
+            AppError::Conflict(msg) => (StatusCode::CONFLICT, msg, "conflict"),
             AppError::ServiceUnavailable(msg) => {
                 (StatusCode::SERVICE_UNAVAILABLE, msg, "service_unavailable")
             }
@@ -538,9 +577,10 @@ impl AppError {
     ///
     /// `capacity_retry_after_secs` becomes the `Retry-After` header on the 503 a
     /// capacity cap produces. Callers pass [`Config::sweep_interval_secs`],
-    /// because the sweep is the only thing that frees a slot: the API exposes no
-    /// despawn endpoint, so capacity is reclaimed when an instance outlives its
-    /// lifetime *and* the sweeper next runs. Deriving the hint from config
+    /// because the sweep is what frees a slot on a full server: a visitor can
+    /// give back their own instance early (#203), but nobody waiting on a 503
+    /// can count on that, so the dependable reclaim is an instance outliving
+    /// its lifetime *and* the sweeper next running. Deriving the hint from config
     /// rather than a constant also means it follows the operator if they shorten
     /// the interval.
     ///
@@ -549,6 +589,7 @@ impl AppError {
         match e {
             gl_core::Error::NotFound => AppError::NotFound("not found".into()),
             gl_core::Error::Invalid => AppError::Invalid("invalid".into()),
+            gl_core::Error::Forbidden => AppError::Forbidden("forbidden".into()),
             gl_core::Error::PortExhausted => {
                 AppError::ServiceUnavailable("port range exhausted".into())
             }
@@ -632,6 +673,71 @@ async fn get_goopy(
         expires_at: expires_at.to_rfc3339(),
         is_expired,
     }))
+}
+
+/// `DELETE /goopies/:slug` — destroy an instance before it expires, on behalf
+/// of the visitor who spawned it (#203).
+///
+/// Requires `Authorization: Bearer <despawn_token>`, the token `POST /goopies`
+/// returned. The slug is the instance's public subdomain, so it proves nothing
+/// on its own; the token is the only thing that does.
+///
+/// - `202` — the teardown is underway (or already was).
+/// - `401` — no bearer token.
+/// - `403` — the token is not this instance's, or the instance was issued
+///   none.
+/// - `404` — no such instance.
+/// - `409` — the instance is still spawning.
+///
+/// On the loose read limiter rather than the tight provision one: destroying
+/// and respawning is the "start over" flow, and charging both against the
+/// spawn budget would punish it. Guessing a token is hopeless at any rate.
+async fn despawn_goopy(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, AppError> {
+    let token = bearer_token(&headers)
+        .ok_or_else(|| AppError::Unauthorized("a bearer despawn token is required".into()))?;
+
+    tokio::task::spawn_blocking({
+        let state = Arc::clone(&state);
+        let slug = slug.clone();
+        move || state.manager.despawn_as_owner(&slug, &token)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("task join error: {e}")))?
+    .map_err(|e| match e {
+        // The only `Invalid` `despawn_as_owner` returns is a row still
+        // spawning, which is a state conflict rather than a malformed request.
+        gl_core::Error::Invalid => AppError::Conflict("instance is still spawning".into()),
+        other => AppError::from_core(other, state.cfg.sweep_interval_secs),
+    })?;
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(DespawnResponse {
+            slug,
+            status: "Despawning".into(),
+        }),
+    ))
+}
+
+/// The token from an `Authorization: Bearer <token>` header, if there is one.
+///
+/// The scheme is matched case-insensitively, as RFC 9110 says auth schemes
+/// are. Anything else — no header, another scheme, an empty token — is `None`.
+fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    let value = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    let token = token.trim();
+    if !scheme.eq_ignore_ascii_case("bearer") || token.is_empty() {
+        return None;
+    }
+    Some(token.to_string())
 }
 
 /// `GET /goopies/:slug/alive` — nginx's `auth_request` expiry gate.
@@ -945,13 +1051,30 @@ where
     });
 }
 
+/// The CORS policy: the frontend's origin, and the methods and headers it
+/// uses.
+///
+/// `DELETE` and `Authorization` are for the destroy button (#203). The headers
+/// are listed rather than `Any`, because `Any` answers a preflight with `*`,
+/// and the Fetch spec exempts `Authorization` from that wildcard: a browser
+/// would refuse every destroy before it was sent.
+fn cors_layer(origin: HeaderValue) -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list([origin]))
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        .allow_headers([
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::CONTENT_TYPE,
+        ])
+}
+
 /// Build the application router.
 ///
 /// Two separate `GovernorLayer`s are applied:
 /// - A **tight** limit (`provision_burst` / `provision_period_secs`) covers
 ///   only `POST /goopies` (the expensive provisioning path).
 /// - A **loose** limit (`read_burst` / `read_period_secs`) covers all read
-///   endpoints.
+///   endpoints, and `DELETE /goopies/:slug` (see [`despawn_goopy`] for why).
 ///
 /// All of them key on [`RealIpKeyExtractor`]: the client IP from `X-Real-IP`
 /// (set by nginx), falling back to the TCP peer address.
@@ -1032,7 +1155,7 @@ fn build_router(
         .with_state(Arc::clone(&state));
 
     let read_routes = Router::new()
-        .route("/goopies/{slug}", get(get_goopy))
+        .route("/goopies/{slug}", get(get_goopy).delete(despawn_goopy))
         .route("/config", get(get_config))
         .route("/capacity", get(get_capacity))
         .route("/version", get(get_version))
@@ -1226,10 +1349,7 @@ async fn main() {
         std::process::exit(1);
     });
 
-    let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::list([cors_origin]))
-        .allow_methods([Method::GET, Method::POST])
-        .allow_headers(tower_http::cors::Any);
+    let cors = cors_layer(cors_origin);
 
     let bind_address = cfg.bind_address.clone();
     let sweep_interval_secs = cfg.sweep_interval_secs;
@@ -1391,11 +1511,7 @@ mod tests {
             registry,
             NoopProvisioner,
         ));
-        let cors_origin = cfg.cors_origin.parse::<HeaderValue>().unwrap();
-        let cors = CorsLayer::new()
-            .allow_origin(AllowOrigin::list([cors_origin]))
-            .allow_methods([Method::GET, Method::POST])
-            .allow_headers(tower_http::cors::Any);
+        let cors = cors_layer(cfg.cors_origin.parse::<HeaderValue>().unwrap());
         let state = Arc::new(AppState { manager, cfg });
         build_router(state, cors, &rl)
     }
@@ -2044,6 +2160,331 @@ mod tests {
         assert_on_read_limiter("/version").await;
     }
 
+    // ── despawn_goopy (#203) ──────────────────────────────────────────────
+
+    /// Seed a row carrying a token hash, as `POST /goopies` leaves it, and
+    /// return the token its visitor would hold.
+    fn seed_owned_goopy(
+        registry: &SqliteRegistry,
+        slug: &str,
+        port: u32,
+        status: Status,
+    ) -> String {
+        let token = gl_core::DespawnToken::issue();
+        let goopy = Goopy {
+            despawn_token_hash: Some(token.hash()),
+            ..seed_goopy_unsaved(slug, port, status)
+        };
+        registry.save(&goopy).unwrap();
+        registry.acquire_port(slug, port, port + 1).unwrap();
+        token.as_str().to_string()
+    }
+
+    fn seed_goopy_unsaved(slug: &str, port: u32, status: Status) -> Goopy {
+        Goopy {
+            slug: slug.to_string(),
+            life_in_hours: 8,
+            created_at: Utc::now(),
+            working_dir: PathBuf::from(format!("/tmp/goopy-test/{slug}")),
+            port,
+            status,
+            provisioner_kind: ProvisionerKind::Hello,
+            service_version: "0.1.0".to_string(),
+            build_sha: None,
+            despawn_token_hash: None,
+        }
+    }
+
+    fn delete_request(slug: &str, authorization: Option<&str>) -> Request<Body> {
+        let mut req = Request::builder()
+            .header("x-real-ip", "127.0.0.1")
+            .method("DELETE")
+            .uri(format!("/goopies/{slug}"));
+        if let Some(value) = authorization {
+            req = req.header("authorization", value);
+        }
+        req.body(Body::empty()).unwrap()
+    }
+
+    async fn get_status(app: &Router, slug: &str) -> (StatusCode, Value) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
+                    .uri(format!("/goopies/{slug}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        (status, body_json(resp.into_body()).await)
+    }
+
+    /// Poll `GET /goopies/:slug` until `done` accepts the answer.
+    async fn wait_for(app: &Router, slug: &str, done: impl Fn(StatusCode, &Value) -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let (status, body) = get_status(app, slug).await;
+            if done(status, &body) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{slug} never got there: {status} {body}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// The whole flow, end to end: the token `POST` hands back is the one
+    /// `DELETE` takes, and the instance is gone afterwards.
+    #[tokio::test]
+    async fn the_spawners_token_destroys_their_instance() {
+        let app = make_router(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
+                    .method("POST")
+                    .uri("/goopies")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let spawned = body_json(resp.into_body()).await;
+        let slug = spawned["slug"].as_str().unwrap().to_string();
+        let token = spawned["despawn_token"].as_str().unwrap().to_string();
+        wait_for(&app, &slug, |_, body| body["status"] == "Done").await;
+
+        let resp = app
+            .clone()
+            .oneshot(delete_request(&slug, Some(&format!("Bearer {token}"))))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let body = body_json(resp.into_body()).await;
+        assert_eq!(body["slug"], slug.as_str());
+        assert_eq!(body["status"], "Despawning");
+        wait_for(&app, &slug, |status, _| status == StatusCode::NOT_FOUND).await;
+    }
+
+    /// Anything that is not a bearer token is no credential at all.
+    #[tokio::test]
+    async fn despawn_without_a_bearer_token_is_401_with_a_challenge() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let token = seed_owned_goopy(&registry, "no-creds", 9001, Status::Done);
+        let app = make_router("goopy.life", registry);
+
+        for authorization in [
+            None,
+            Some("Bearer"),
+            Some("Bearer    "),
+            Some(format!("Basic {token}").as_str()),
+            Some(token.as_str()),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(delete_request("no-creds", authorization))
+                .await
+                .unwrap();
+
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{authorization:?}");
+            assert_eq!(
+                resp.headers()
+                    .get(axum::http::header::WWW_AUTHENTICATE)
+                    .and_then(|v| v.to_str().ok()),
+                Some("Bearer"),
+            );
+            let body = body_json(resp.into_body()).await;
+            assert_eq!(body["code"], "unauthorized");
+        }
+        let (_, body) = get_status(&app, "no-creds").await;
+        assert_eq!(body["status"], "Done");
+    }
+
+    #[tokio::test]
+    async fn despawn_accepts_the_bearer_scheme_in_any_case() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let token = seed_owned_goopy(&registry, "shouty", 9001, Status::Done);
+        let app = make_router("goopy.life", registry);
+
+        let resp = app
+            .oneshot(delete_request("shouty", Some(&format!("BEARER {token}"))))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    }
+
+    /// The scoping the issue exists for: knowing the slug is not enough, and
+    /// another instance's token is no better than none.
+    #[tokio::test]
+    async fn despawn_with_someone_elses_token_is_403_and_changes_nothing() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_owned_goopy(&registry, "theirs", 9001, Status::Done);
+        let mine = seed_owned_goopy(&registry, "mine", 9002, Status::Done);
+        let app = make_router("goopy.life", registry);
+
+        let resp = app
+            .clone()
+            .oneshot(delete_request("theirs", Some(&format!("Bearer {mine}"))))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = body_json(resp.into_body()).await;
+        assert_eq!(body["code"], "forbidden");
+        for slug in ["theirs", "mine"] {
+            let (status, body) = get_status(&app, slug).await;
+            assert_eq!(status, StatusCode::OK, "{slug}");
+            assert_eq!(body["status"], "Done", "{slug}");
+        }
+    }
+
+    /// Instances spawned before tokens existed were issued none, so nobody
+    /// can destroy them early — they expire as they always did.
+    #[tokio::test]
+    async fn despawn_of_an_instance_issued_no_token_is_403() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        seed_goopy(&registry, "pre-203", 8, 0, 9001, Status::Done);
+        let app = make_router("goopy.life", registry);
+
+        let resp = app
+            .oneshot(delete_request(
+                "pre-203",
+                Some(&format!("Bearer {}", "0".repeat(64))),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn despawn_of_a_missing_instance_is_404() {
+        let app = make_router(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+        );
+
+        let resp = app
+            .oneshot(delete_request("no-such-slug", Some("Bearer abc")))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn despawn_mid_spawn_is_409() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let token = seed_owned_goopy(&registry, "booting", 9001, Status::Spawning);
+        let app = make_router("goopy.life", registry);
+
+        let resp = app
+            .oneshot(delete_request("booting", Some(&format!("Bearer {token}"))))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = body_json(resp.into_body()).await;
+        assert_eq!(body["code"], "conflict");
+    }
+
+    /// A second click while the first teardown runs: same answer, no error.
+    #[tokio::test]
+    async fn despawn_is_idempotent_while_the_teardown_runs() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let token = seed_owned_goopy(&registry, "leaving", 9001, Status::Despawning);
+        let app = make_router("goopy.life", registry);
+
+        let resp = app
+            .oneshot(delete_request("leaving", Some(&format!("Bearer {token}"))))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    }
+
+    /// Destroy-then-respawn is the "start over" flow; it must not cost a spawn.
+    #[tokio::test]
+    async fn despawn_is_not_on_the_provisioning_rate_limit() {
+        let rl = gl_core::config::RateLimitConfig {
+            provision_burst: 1,
+            ..Default::default()
+        };
+        let app = make_router_with_rl(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+            rl,
+        );
+
+        for attempt in 0..5 {
+            let resp = app
+                .clone()
+                .oneshot(delete_request("anything", None))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "DELETE #{attempt} must not be throttled by the provisioning limit",
+            );
+        }
+    }
+
+    /// The browser asks first. Without `DELETE` and an explicitly listed
+    /// `Authorization` in the answer — `*` does not cover it — the destroy
+    /// request is never sent.
+    #[tokio::test]
+    async fn cors_preflight_allows_a_delete_carrying_a_token() {
+        let app = make_router(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
+                    .method("OPTIONS")
+                    .uri("/goopies/some-slug")
+                    .header("Origin", "https://example.com")
+                    .header("Access-Control-Request-Method", "DELETE")
+                    .header("Access-Control-Request-Headers", "authorization")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(resp.status().is_success(), "{}", resp.status());
+        let header = |name: &str| {
+            resp.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+        };
+        assert_eq!(header("access-control-allow-origin"), "https://example.com");
+        assert!(header("access-control-allow-methods").contains("delete"));
+        let allowed_headers = header("access-control-allow-headers");
+        assert!(
+            allowed_headers
+                .split(',')
+                .any(|h| h.trim() == "authorization"),
+            "Authorization must be listed by name, got {allowed_headers:?}"
+        );
+    }
+
     // ── get_capacity ──────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -2650,6 +3091,9 @@ mod tests {
     impl ManagerService for CountingManager {
         fn spawn(&self) -> Result<gl_core::Spawned, gl_core::Error> {
             unimplemented!("the sweeper never spawns")
+        }
+        fn despawn_as_owner(&self, _slug: &str, _token: &str) -> Result<(), gl_core::Error> {
+            unimplemented!("the sweeper never despawns on a visitor's behalf")
         }
         fn get(&self, _slug: &str) -> Result<Option<gl_core::Goopy>, gl_core::Error> {
             unimplemented!("the sweeper never reads a single instance")

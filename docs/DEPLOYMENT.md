@@ -269,7 +269,8 @@ What counts:
 
 ## The maintenance CLI on the host
 
-`gl-serv` exposes no despawn route, so tearing down one instance by hand,
+`gl-serv`'s only despawn route serves the visitor who spawned the instance, and
+needs the token they were issued (#203). So tearing down one instance by hand,
 listing what exists and running `alloc`/`dealloc` need `gl-cli`. The deploy
 installs it at `/opt/goopy-life/bin/gl-cli` from the same `cargo build` as
 `gl-serv`.
