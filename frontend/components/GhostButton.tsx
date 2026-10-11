@@ -5,6 +5,7 @@ import { adminUrl } from '@/lib/admin';
 import { ApiRequestError, getGoopy, spawnGoopy } from '@/lib/api';
 import { LOCALSTORAGE_KEY, POLL_INTERVAL_MS } from '@/lib/constants';
 import { formatExpiry } from '@/lib/expiry';
+import { parseStoredGoopy, serializeStoredGoopy, type StoredGoopy } from '@/lib/session';
 import { useCapacity } from '@/lib/useCapacity';
 import type { AppState, GoopyResponse } from '@/lib/types';
 import CapacityIndicator from '@/components/CapacityIndicator';
@@ -22,8 +23,14 @@ function errorState(err: unknown): AppState {
 }
 
 /** The done state for a ready instance, from either the poll or a resume. */
-function doneState(data: GoopyResponse): AppState {
-	return { kind: "done", slug: data.slug, url: data.url, expiresAt: data.expires_at };
+function doneState(data: GoopyResponse, token: string | null): AppState {
+	return {
+		kind: "done",
+		slug: data.slug,
+		url: data.url,
+		expiresAt: data.expires_at,
+		token,
+	};
 }
 
 // The sole interactive element on the page: the "Ghost now!" CTA and its state
@@ -31,7 +38,9 @@ function doneState(data: GoopyResponse): AppState {
 // expired-redirect handling). Everything else on the page is server-rendered.
 export default function GhostButton() {
 	const [state, setState] = useState<AppState>({ kind: "idle" });
-	const [pollSlug, setPollSlug] = useState<string | null>(null);
+	// The goopy being polled until it is ready. Carries the token so the done
+	// state can offer the destroy button without re-reading localStorage.
+	const [polling, setPolling] = useState<StoredGoopy | null>(null);
 
 	// Only poll capacity while the button is actually offered. In every other
 	// state the number is not on screen, and a spawning or finished visitor has
@@ -54,17 +63,18 @@ export default function GhostButton() {
 			setState({ kind: "expired", slug: "" });
 			return;
 		}
-		const saved = localStorage.getItem(LOCALSTORAGE_KEY);
+		const saved = parseStoredGoopy(localStorage.getItem(LOCALSTORAGE_KEY));
 		if (saved) {
-			setState({ kind: "resuming", slug: saved });
+			setState({ kind: "resuming", slug: saved.slug, token: saved.token });
 		}
 	}, []);
 	/* eslint-enable react-hooks/set-state-in-effect */
 
 	useEffect(() => {
-		if (!pollSlug) {
+		if (!polling) {
 			return;
 		}
+		const pollSlug = polling.slug;
 
 		const controller = new AbortController();
 		let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -74,13 +84,13 @@ export default function GhostButton() {
 				const data = await getGoopy(pollSlug, controller.signal);
 
 				if (data.status === "Done") {
-					setState(doneState(data));
-					setPollSlug(null);
+					setState(doneState(data, polling.token));
+					setPolling(null);
 					return;
 				} else if (data.status !== "Spawning") {
 					localStorage.removeItem(LOCALSTORAGE_KEY);
 					setState({ kind: "failed", slug: pollSlug });
-					setPollSlug(null);
+					setPolling(null);
 					return;
 				}
 			} catch (err: unknown) {
@@ -89,7 +99,7 @@ export default function GhostButton() {
 				}
 				localStorage.removeItem(LOCALSTORAGE_KEY);
 				setState(errorState(err));
-				setPollSlug(null);
+				setPolling(null);
 				return;
 			}
 			timeoutId = setTimeout(tick, POLL_INTERVAL_MS);
@@ -106,24 +116,26 @@ export default function GhostButton() {
 				clearTimeout(timeoutId);
 			}
 		};
-	}, [pollSlug]);
+	}, [polling]);
 
 	const handleReset = useCallback(() => {
-		setPollSlug(null);
+		setPolling(null);
 		localStorage.removeItem(LOCALSTORAGE_KEY);
 		setState({ kind: "idle" });
 	}, []);
 
-	// Depend only on the resuming slug (null when not resuming) so this effect fires
-	// once per entry into "resuming" rather than re-running — and recreating its
-	// AbortController — on every unrelated state transition.
+	// Depend only on the resuming slug and token (null when not resuming) so this
+	// effect fires once per entry into "resuming" rather than re-running — and
+	// recreating its AbortController — on every unrelated state transition.
 	const resumingSlug = state.kind === "resuming" ? state.slug : null;
+	const resumingToken = state.kind === "resuming" ? state.token : null;
 
 	useEffect(() => {
 		if (resumingSlug === null) {
 			return;
 		}
 		const slug = resumingSlug;
+		const token = resumingToken;
 		const controller = new AbortController();
 
 		getGoopy(slug, controller.signal).then((data) => {
@@ -135,14 +147,14 @@ export default function GhostButton() {
 					localStorage.removeItem(LOCALSTORAGE_KEY);
 					setState({ kind: "expired", slug });
 				} else {
-					setState(doneState(data));
+					setState(doneState(data, token));
 				}
 			} else if (data.status !== "Spawning") {
 				localStorage.removeItem(LOCALSTORAGE_KEY);
 				setState({ kind: "failed", slug });
 			} else {
 				setState({ kind: "spawning" });
-				setPollSlug(slug);
+				setPolling({ slug, token });
 			}
 		}).catch((err: Error) => {
 			if (controller.signal.aborted) {
@@ -158,15 +170,16 @@ export default function GhostButton() {
 		});
 
 		return () => controller.abort();
-	}, [resumingSlug]);
+	}, [resumingSlug, resumingToken]);
 
 	async function handleGhostNow() {
 		setState({ kind: "spawning" });
 
 		try {
-			const { slug } = await spawnGoopy();
-			localStorage.setItem(LOCALSTORAGE_KEY, slug);
-			setPollSlug(slug);
+			const { slug, despawn_token } = await spawnGoopy();
+			const spawned: StoredGoopy = { slug, token: despawn_token ?? null };
+			localStorage.setItem(LOCALSTORAGE_KEY, serializeStoredGoopy(spawned));
+			setPolling(spawned);
 		} catch (err: unknown) {
 			// A capacity refusal needs no special handling here: the message from
 			// the server is shown as-is, and "Try again" re-enters the idle state,

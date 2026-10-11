@@ -11,6 +11,7 @@ import type {
 	ApiError,
 	CapacityResponse,
 	GoopyResponse,
+	SpawnResponse,
 	VersionResponse,
 } from "./types";
 
@@ -46,7 +47,7 @@ export async function toApiError(res: Response): Promise<ApiRequestError> {
 	}
 }
 
-export async function spawnGoopy(): Promise<{ slug: string }> {
+export async function spawnGoopy(): Promise<SpawnResponse> {
 	const res = await fetch(`${apiBase()}/goopies`, { method: "POST" });
 	if (!res.ok) {
 		throw await toApiError(res);

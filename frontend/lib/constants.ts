@@ -2,6 +2,9 @@
 
 export const GITHUB_REPO_URL = "https://github.com/southp/goopy-life";
 export const GITHUB_ISSUES_URL = `${GITHUB_REPO_URL}/issues`;
+// Holds a serialized StoredGoopy (lib/session.ts) — the slug and, since #203,
+// the despawn token. The name predates the token and is kept so that a visitor
+// mid-session when that shipped still resumes.
 export const LOCALSTORAGE_KEY = "goopy_slug";
 export const POLL_INTERVAL_MS = 2000;
 
