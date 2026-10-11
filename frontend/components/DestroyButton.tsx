@@ -29,6 +29,13 @@ export default function DestroyButton({
 	const [phase, setPhase] = useState<Phase>("offered");
 	const [failed, setFailed] = useState(false);
 
+	// The error line answers the last attempt. Once the visitor moves on —
+	// to confirm again, or to back out — it no longer describes anything.
+	function moveTo(next: "offered" | "confirming") {
+		setFailed(false);
+		setPhase(next);
+	}
+
 	async function handleConfirm() {
 		setPhase("destroying");
 		setFailed(false);
@@ -58,7 +65,7 @@ export default function DestroyButton({
 							Couldn&apos;t destroy it. Try again in a moment.
 						</p>
 					)}
-					<button className="destroy-button" onClick={() => setPhase("confirming")}>
+					<button className="destroy-button" onClick={() => moveTo("confirming")}>
 						Destroy
 					</button>
 				</div>
@@ -74,7 +81,7 @@ export default function DestroyButton({
 						<button className="destroy-button confirm" onClick={handleConfirm}>
 							Destroy
 						</button>
-						<button className="destroy-button" onClick={() => setPhase("offered")}>
+						<button className="destroy-button" onClick={() => moveTo("offered")}>
 							Keep it
 						</button>
 					</div>
