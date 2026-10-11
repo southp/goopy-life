@@ -276,8 +276,11 @@ where
     /// - [`Error::NotFound`] — no such instance.
     /// - [`Error::Forbidden`] — the token does not match, or the instance
     ///   predates tokens and was issued none.
-    /// - [`Error::Invalid`] — the instance is still `Spawning`; there is
-    ///   nothing to tear down yet.
+    /// - [`Error::Invalid`] — the instance is not running: still `Spawning`,
+    ///   or `Failed`. A failed spawn is the sweeper's to reap, and it already
+    ///   counted as `failed`; letting its visitor destroy it would count the
+    ///   same instance again as `destroyed`, a give-back of something that
+    ///   never served.
     /// - `Ok(())` — the teardown is underway, including when something else
     ///   had already started it: the visitor asked for the instance to go, and
     ///   it is going.
@@ -294,11 +297,15 @@ where
                 .despawn_token_hash
                 .as_deref()
                 .is_some_and(|stored| crate::despawn_token::verify(presented_token, stored));
-            if owns {
-                Ok(())
-            } else {
+            if !owns {
                 tracing::info!(slug, "despawn refused: token does not match");
-                Err(Error::Forbidden)
+                return Err(Error::Forbidden);
+            }
+            // `Despawning` is let through for the claim to report as already
+            // underway; every other state but `Done` is not the visitor's to end.
+            match row.status {
+                Status::Done | Status::Despawning => Ok(()),
+                _ => Err(Error::Invalid),
             }
         };
 
@@ -2077,6 +2084,27 @@ mod tests {
 
         assert!(matches!(err, Error::Invalid), "got {err:?}");
         assert_eq!(gm.get("booting").unwrap().unwrap().status, Status::Spawning);
+    }
+
+    /// A failed spawn already counted as `failed` and is the sweeper's to reap.
+    /// Letting its visitor destroy it would count it a second time, as an
+    /// early give-back of an instance that never served.
+    #[test]
+    fn the_owner_cannot_despawn_a_failed_spawn() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let token = seed_owned_row(&registry, "never-served", 9000, Status::Failed);
+        let gm = manager_with_provisioner(registry, NoopProvisioner);
+
+        let err = gm
+            .despawn_as_owner("never-served", token.as_str())
+            .unwrap_err();
+
+        assert!(matches!(err, Error::Invalid), "got {err:?}");
+        assert_eq!(
+            gm.get("never-served").unwrap().unwrap().status,
+            Status::Failed
+        );
+        assert_eq!(gm.usage_stats().unwrap().all_time.destroyed, 0);
     }
 
     /// A second click, or one landing while the sweeper reaps the row: the

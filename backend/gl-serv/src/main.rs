@@ -690,7 +690,8 @@ async fn get_goopy(
 /// - `403` — the token is not this instance's, or the instance was issued
 ///   none.
 /// - `404` — no such instance.
-/// - `409` — the instance is still spawning.
+/// - `409` — the instance is not running: still spawning, or failed (the
+///   sweeper reaps those).
 ///
 /// On the loose read limiter rather than the tight provision one: destroying
 /// and respawning is the "start over" flow, and charging both against the
@@ -711,9 +712,9 @@ async fn despawn_goopy(
     .await
     .map_err(|e| AppError::Internal(format!("task join error: {e}")))?
     .map_err(|e| match e {
-        // The only `Invalid` `despawn_as_owner` returns is a row still
-        // spawning, which is a state conflict rather than a malformed request.
-        gl_core::Error::Invalid => AppError::Conflict("instance is still spawning".into()),
+        // `despawn_as_owner` returns `Invalid` only for a row that is not
+        // running, which is a state conflict rather than a malformed request.
+        gl_core::Error::Invalid => AppError::Conflict("instance is not running".into()),
         other => AppError::from_core(other, state.cfg.sweep_interval_secs),
     })?;
 
@@ -2400,6 +2401,26 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CONFLICT);
         let body = body_json(resp.into_body()).await;
         assert_eq!(body["code"], "conflict");
+    }
+
+    #[tokio::test]
+    async fn despawn_of_a_failed_spawn_is_409() {
+        let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        let token = seed_owned_goopy(&registry, "never-served", 9001, Status::Failed);
+        let app = make_router("goopy.life", registry);
+
+        let resp = app
+            .clone()
+            .oneshot(delete_request(
+                "never-served",
+                Some(&format!("Bearer {token}")),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let (_, body) = get_status(&app, "never-served").await;
+        assert_eq!(body["status"], "Failed", "left for the sweeper");
     }
 
     /// A second click while the first teardown runs: same answer, no error.
