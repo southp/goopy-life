@@ -1,3 +1,4 @@
+use crate::despawn_token::DespawnToken;
 use crate::goopy::*;
 use crate::goopy_provisioner::*;
 use crate::goopy_registry::*;
@@ -84,6 +85,18 @@ impl Capacity {
     }
 }
 
+/// What [`GoopyManager::spawn`] hands back for an instance it has started
+/// provisioning.
+#[derive(Debug)]
+pub struct Spawned {
+    pub slug: String,
+    pub port: u32,
+    /// The token that lets the caller destroy this instance before it expires
+    /// (#203). This is the only place it ever appears in the clear: the
+    /// registry keeps its hash, so a caller that drops it cannot get it back.
+    pub despawn_token: DespawnToken,
+}
+
 pub struct GoopyManager<
     Registry: GoopyRegistry + Send + Sync + 'static,
     Provisioner: GoopyProvisioner + Send + Sync + 'static,
@@ -124,10 +137,13 @@ where
     }
 
     #[tracing::instrument(skip(self))]
-    pub fn spawn(&self) -> Result<(String, u32), Error> {
+    pub fn spawn(&self) -> Result<Spawned, Error> {
         if self.goopy_life_in_hours <= 0 {
             return Err(Error::Invalid);
         }
+
+        let despawn_token = DespawnToken::issue();
+        let despawn_token_hash = despawn_token.hash();
 
         const MAX_RETRIES: usize = 10;
 
@@ -154,6 +170,7 @@ where
                 provisioner_kind: self.provisioner.kind(),
                 service_version: self.provisioner.service_version().to_string(),
                 build_sha: Some(crate::build_info::GIT_SHA.to_string()),
+                despawn_token_hash: Some(despawn_token_hash.clone()),
             };
 
             // Capacity is enforced by the insert itself rather than by a
@@ -225,7 +242,11 @@ where
             }
         });
 
-        Ok((slug, port))
+        Ok(Spawned {
+            slug,
+            port,
+            despawn_token,
+        })
     }
 
     /// Despawn an instance without waiting for its teardown.
@@ -805,6 +826,7 @@ mod tests {
             provisioner_kind: ProvisionerKind::Hello,
             service_version: "0.1.0".to_string(),
             build_sha: None,
+            despawn_token_hash: None,
         }
     }
 
@@ -1084,7 +1106,7 @@ mod tests {
     #[test]
     fn spawn_returns_slug_and_port() {
         let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
-        let (slug, port) = gm.spawn().expect("spawn should succeed");
+        let Spawned { slug, port, .. } = gm.spawn().expect("spawn should succeed");
         assert!(!slug.is_empty(), "slug should be non-empty");
         assert!(
             (9000..9100).contains(&port),
@@ -1095,7 +1117,7 @@ mod tests {
     #[test]
     fn get_finds_goopy_after_spawn() {
         let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
-        let (slug, _) = gm.spawn().unwrap();
+        let slug = gm.spawn().unwrap().slug;
         let g = gm.get(&slug).unwrap().expect("should find goopy");
         // NoopProvisioner completes synchronously, so status may be Done already.
         assert!(
@@ -1114,7 +1136,7 @@ mod tests {
     #[test]
     fn spawn_records_the_build_sha_of_the_provisioning_binary() {
         let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
-        let (slug, _) = gm.spawn().unwrap();
+        let slug = gm.spawn().unwrap().slug;
         let g = gm.get(&slug).unwrap().expect("should find goopy");
         // Recorded as-is, `unknown` included: a test build is unstamped, and
         // that is a fact about the binary rather than a missing value.
@@ -1126,6 +1148,34 @@ mod tests {
         );
     }
 
+    /// The registry must hold what verifies the token, never the token: a copy
+    /// of the database is not a key to every instance in it (#203).
+    #[test]
+    fn spawn_stores_only_the_hash_of_the_token_it_returns() {
+        let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
+        let spawned = gm.spawn().unwrap();
+        let stored = gm
+            .get(&spawned.slug)
+            .unwrap()
+            .expect("should find goopy")
+            .despawn_token_hash
+            .expect("a spawned instance carries a token hash");
+
+        assert_ne!(stored, spawned.despawn_token.as_str());
+        assert!(crate::despawn_token::verify(
+            spawned.despawn_token.as_str(),
+            &stored
+        ));
+    }
+
+    #[test]
+    fn every_spawn_gets_its_own_token() {
+        let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
+        let a = gm.spawn().unwrap();
+        let b = gm.spawn().unwrap();
+        assert_ne!(a.despawn_token.as_str(), b.despawn_token.as_str());
+    }
+
     #[test]
     fn get_missing_returns_none() {
         let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
@@ -1135,8 +1185,8 @@ mod tests {
     #[test]
     fn list_returns_spawned_instances() {
         let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
-        let (slug1, _) = gm.spawn().unwrap();
-        let (slug2, _) = gm.spawn().unwrap();
+        let slug1 = gm.spawn().unwrap().slug;
+        let slug2 = gm.spawn().unwrap().slug;
         let goopies = gm.list().unwrap();
         let slugs: Vec<&str> = goopies.iter().map(|g| g.slug.as_str()).collect();
         assert!(slugs.contains(&slug1.as_str()), "should contain slug1");
@@ -1149,7 +1199,7 @@ mod tests {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         let gm = make_test_manager(registry);
 
-        let (slug, _) = gm.spawn().unwrap();
+        let slug = gm.spawn().unwrap().slug;
 
         // Wait for the spawn background thread to finish by polling registry status.
         // NoopProvisioner is instant so this usually completes on the first check.
@@ -1233,6 +1283,7 @@ mod tests {
             provisioner_kind: ProvisionerKind::Hello,
             service_version: "0.1.0".to_string(),
             build_sha: None,
+            despawn_token_hash: None,
         };
         registry.save(&failed).unwrap();
         // Register the port so we can verify it gets released.
@@ -1651,7 +1702,7 @@ mod tests {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         let gm = manager_with_provisioner(registry, UnprovisionableProvisioner);
 
-        let (slug, _) = gm.spawn().unwrap();
+        let slug = gm.spawn().unwrap().slug;
         wait_for_spawn_to_settle(&gm, &slug);
 
         assert_eq!(gm.get(&slug).unwrap().unwrap().status, Status::Failed);
@@ -1991,7 +2042,7 @@ mod tests {
             100,
         );
 
-        let (slug, _) = gm.spawn().unwrap();
+        let slug = gm.spawn().unwrap().slug;
 
         // The row never leaves Spawning here — that is the failure being
         // simulated — so wait on the event rather than on the status.
@@ -2070,7 +2121,7 @@ mod tests {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         let gm = manager_with_provisioner(registry, UnprovisionableProvisioner);
 
-        let (slug, _) = gm.spawn().unwrap();
+        let slug = gm.spawn().unwrap().slug;
         wait_for_spawn_to_settle(&gm, &slug);
         assert_eq!(gm.get(&slug).unwrap().unwrap().status, Status::Failed);
 
@@ -2119,7 +2170,7 @@ mod tests {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         let gm = manager_with_provisioner(registry, NoopProvisioner);
 
-        let (slug, _) = gm.spawn().unwrap();
+        let slug = gm.spawn().unwrap().slug;
         wait_for_spawn_to_settle(&gm, &slug);
 
         assert_eq!(gm.get(&slug).unwrap().unwrap().status, Status::Done);
@@ -2136,7 +2187,7 @@ mod tests {
         registry.break_usage_writes();
         let gm = manager_with_provisioner(registry, NoopProvisioner);
 
-        let (slug, _) = gm.spawn().unwrap();
+        let slug = gm.spawn().unwrap().slug;
         wait_for_spawn_to_settle(&gm, &slug);
 
         assert_eq!(gm.get(&slug).unwrap().unwrap().status, Status::Done);
@@ -2149,7 +2200,7 @@ mod tests {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         let gm = manager_with_provisioner(registry, UnprovisionableProvisioner);
 
-        let (slug, _) = gm.spawn().unwrap();
+        let slug = gm.spawn().unwrap().slug;
         wait_for_spawn_to_settle(&gm, &slug);
 
         assert_eq!(gm.get(&slug).unwrap().unwrap().status, Status::Failed);
@@ -2169,7 +2220,7 @@ mod tests {
                 deprovision_calls: Arc::new(Mutex::new(0)),
             },
         );
-        let (slug, _) = gm.spawn().unwrap();
+        let slug = gm.spawn().unwrap().slug;
         wait_for_spawn_to_settle(&gm, &slug);
         let before = gm.usage_stats().unwrap();
         assert_eq!(before.all_time, UsageCounts::new(1, 0));
@@ -2419,7 +2470,7 @@ mod tests {
         let gm = manager_with_caps(registry, 1, 1);
 
         // First spawn succeeds and (via NoopProvisioner) reaches Done.
-        let (slug, _) = gm.spawn().expect("first spawn should succeed");
+        let slug = gm.spawn().expect("first spawn should succeed").slug;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             let g = gm.get(&slug).unwrap().unwrap();

@@ -247,7 +247,9 @@ fn main() {
                         spinner.enable_steady_tick(Duration::from_millis(100));
 
                         match gm.spawn() {
-                            Ok((slug, port)) => {
+                            // The despawn token is for a visitor's browser; an
+                            // operator despawns by slug, so it is dropped here.
+                            Ok(Spawned { slug, port, .. }) => {
                                 spinner.set_message(format!("Spawning {slug} (port {port}) ..."));
                                 pending_slugs.push(slug);
                             }

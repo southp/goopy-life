@@ -295,7 +295,7 @@ fn parse_systemd_version(output: &str) -> Option<u32> {
 // ---------------------------------------------------------------------------
 
 trait ManagerService: Send + Sync {
-    fn spawn(&self) -> Result<String, gl_core::Error>;
+    fn spawn(&self) -> Result<gl_core::Spawned, gl_core::Error>;
     fn get(&self, slug: &str) -> Result<Option<gl_core::Goopy>, gl_core::Error>;
     fn sweep(&self) -> Result<(u32, Vec<gl_core::Error>), gl_core::Error>;
     fn capacity(&self) -> Result<gl_core::Capacity, gl_core::Error>;
@@ -307,8 +307,8 @@ where
     R: gl_core::goopy_registry::GoopyRegistry + Send + Sync + 'static,
     P: gl_core::goopy_provisioner::GoopyProvisioner + Send + Sync + 'static,
 {
-    fn spawn(&self) -> Result<String, gl_core::Error> {
-        GoopyManager::spawn(self).map(|(slug, _)| slug)
+    fn spawn(&self) -> Result<gl_core::Spawned, gl_core::Error> {
+        GoopyManager::spawn(self)
     }
 
     fn get(&self, slug: &str) -> Result<Option<gl_core::Goopy>, gl_core::Error> {
@@ -345,6 +345,10 @@ struct AppState {
 struct SpawnResponse {
     slug: String,
     status: String,
+    /// The bearer token for `DELETE /goopies/:slug` (#203). Returned here and
+    /// never again — the registry keeps only its hash — so the client must
+    /// keep it if it wants to destroy the instance early.
+    despawn_token: String,
 }
 
 #[derive(serde::Serialize)]
@@ -577,7 +581,7 @@ impl AppError {
 // ---------------------------------------------------------------------------
 
 async fn spawn_goopy(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
-    let slug = tokio::task::spawn_blocking({
+    let spawned = tokio::task::spawn_blocking({
         let state = Arc::clone(&state);
         move || state.manager.spawn()
     })
@@ -588,8 +592,9 @@ async fn spawn_goopy(State(state): State<Arc<AppState>>) -> Result<impl IntoResp
     Ok((
         StatusCode::CREATED,
         Json(SpawnResponse {
-            slug,
+            slug: spawned.slug,
             status: "Spawning".into(),
+            despawn_token: spawned.despawn_token.as_str().to_string(),
         }),
     ))
 }
@@ -1425,6 +1430,7 @@ mod tests {
             provisioner_kind: ProvisionerKind::Hello,
             service_version: "0.1.0".to_string(),
             build_sha: None,
+            despawn_token_hash: None,
         };
         registry.save(&goopy).unwrap();
         registry.acquire_port(slug, port, port + 1).unwrap();
@@ -1456,6 +1462,57 @@ mod tests {
         let body = body_json(resp.into_body()).await;
         assert!(body["slug"].is_string(), "slug should be present");
         assert_eq!(body["status"], "Spawning");
+    }
+
+    /// The token is handed out once, to the spawner. `GET /goopies/:slug` is
+    /// public — anyone who knows the subdomain can call it — so neither the
+    /// token nor its hash may ever appear there (#203).
+    #[tokio::test]
+    async fn spawn_returns_a_despawn_token_that_get_never_reveals() {
+        let app = make_router(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
+                    .method("POST")
+                    .uri("/goopies")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let spawned = body_json(resp.into_body()).await;
+        let slug = spawned["slug"].as_str().unwrap();
+        let token = spawned["despawn_token"]
+            .as_str()
+            .expect("the spawner must receive a despawn token");
+        assert_eq!(token.len(), 64);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
+                    .uri(format!("/goopies/{slug}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(!body.contains(token), "GET leaked the token: {body}");
+        assert!(
+            !body.contains(&gl_core::despawn_token::hash(token)),
+            "GET leaked the token hash: {body}"
+        );
+        assert!(!body.contains("despawn_token"), "{body}");
     }
 
     #[tokio::test]
@@ -2591,7 +2648,7 @@ mod tests {
     }
 
     impl ManagerService for CountingManager {
-        fn spawn(&self) -> Result<String, gl_core::Error> {
+        fn spawn(&self) -> Result<gl_core::Spawned, gl_core::Error> {
             unimplemented!("the sweeper never spawns")
         }
         fn get(&self, _slug: &str) -> Result<Option<gl_core::Goopy>, gl_core::Error> {

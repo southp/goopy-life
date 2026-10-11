@@ -26,7 +26,8 @@ use crate::usage_stats::{DailyUsage, UsageCounter, UsageCounts, UsageStats};
 /// Version 2 adds `instance_events` (#118).  Version 3 adds
 /// `goopies.build_sha` (#119).  Version 4 adds the usage counters,
 /// `usage_daily` and `usage_totals` (#172).  Version 5 measures an instance's
-/// lifetime in hours rather than days (#110).  A fresh database is fully
+/// lifetime in hours rather than days (#110).  Version 6 adds
+/// `goopies.despawn_token_hash` (#203).  A fresh database is fully
 /// initialised by walking every step in order, so new steps append here rather
 /// than editing an existing one — an already-migrated database never re-runs a
 /// step it has passed.
@@ -151,6 +152,20 @@ const MIGRATIONS: &[(u32, &str)] = &[
         "
     ALTER TABLE goopies RENAME COLUMN life_in_days TO life_in_hours;
     UPDATE goopies SET life_in_hours = life_in_hours * 24;
+    ",
+    ),
+    (
+        6,
+        // The hash of the token that lets a visitor destroy the instance they
+        // spawned (#203). Only the hash: see `crate::despawn_token`.
+        //
+        // Nullable with no default, as `build_sha` is: rows that predate this
+        // step were issued no token, and NULL is what makes them impossible to
+        // destroy early rather than destroyable by anyone. Not idempotent —
+        // `ADD COLUMN` fails if re-run — which the `user_version` guard in
+        // [`migrate`] makes safe.
+        "
+    ALTER TABLE goopies ADD COLUMN despawn_token_hash TEXT;
     ",
     ),
 ];
@@ -367,6 +382,7 @@ fn parse_row(
     provisioner_kind_str: String,
     service_version: String,
     build_sha: Option<String>,
+    despawn_token_hash: Option<String>,
 ) -> Result<Goopy, Error> {
     let created_at = created_at_str.parse::<DateTime<Utc>>().map_err(|e| {
         tracing::error!(
@@ -416,6 +432,7 @@ fn parse_row(
         provisioner_kind,
         service_version,
         build_sha,
+        despawn_token_hash,
     })
 }
 
@@ -683,7 +700,8 @@ fn parse_event_row(
 fn load_in(conn: &Connection, slug: &str) -> Result<Option<Goopy>, Error> {
     let result = conn.query_row(
         "SELECT slug, life_in_hours, created_at, status, working_dir,
-                port, provisioner_kind, service_version, build_sha
+                port, provisioner_kind, service_version, build_sha,
+                despawn_token_hash
          FROM goopies WHERE slug = ?1",
         params![slug],
         |row| {
@@ -697,6 +715,7 @@ fn load_in(conn: &Connection, slug: &str) -> Result<Option<Goopy>, Error> {
                 row.get::<_, String>("provisioner_kind")?,
                 row.get::<_, String>("service_version")?,
                 row.get::<_, Option<String>>("build_sha")?,
+                row.get::<_, Option<String>>("despawn_token_hash")?,
             ))
         },
     );
@@ -717,6 +736,7 @@ fn load_in(conn: &Connection, slug: &str) -> Result<Option<Goopy>, Error> {
             provisioner_kind_str,
             service_version,
             build_sha,
+            despawn_token_hash,
         )) => {
             let gp = parse_row(
                 slug,
@@ -728,6 +748,7 @@ fn load_in(conn: &Connection, slug: &str) -> Result<Option<Goopy>, Error> {
                 provisioner_kind_str,
                 service_version,
                 build_sha,
+                despawn_token_hash,
             )?;
             tracing::debug!(slug = %gp.slug, "loaded goopy");
             Ok(Some(gp))
@@ -741,8 +762,8 @@ fn insert_goopy(conn: &Connection, gp: &Goopy) -> Result<(), Error> {
     let result = conn.execute(
         "INSERT OR FAIL INTO goopies
          (slug, life_in_hours, created_at, status, working_dir, port,
-          provisioner_kind, service_version, build_sha)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+          provisioner_kind, service_version, build_sha, despawn_token_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             gp.slug,
             i64::from(gp.life_in_hours),
@@ -753,6 +774,7 @@ fn insert_goopy(conn: &Connection, gp: &Goopy) -> Result<(), Error> {
             gp.provisioner_kind.to_string(),
             gp.service_version,
             gp.build_sha,
+            gp.despawn_token_hash,
         ],
     );
 
@@ -853,7 +875,8 @@ impl GoopyRegistry for SqliteRegistry {
         let mut stmt = conn
             .prepare(
                 "SELECT slug, life_in_hours, created_at, status, working_dir,
-                        port, provisioner_kind, service_version, build_sha
+                        port, provisioner_kind, service_version, build_sha,
+                        despawn_token_hash
                  FROM goopies ORDER BY created_at",
             )
             .map_err(|e| Error::Registry {
@@ -873,6 +896,7 @@ impl GoopyRegistry for SqliteRegistry {
                     row.get::<_, String>("provisioner_kind")?,
                     row.get::<_, String>("service_version")?,
                     row.get::<_, Option<String>>("build_sha")?,
+                    row.get::<_, Option<String>>("despawn_token_hash")?,
                 ))
             })
             .map_err(|e| Error::Registry {
@@ -890,6 +914,7 @@ impl GoopyRegistry for SqliteRegistry {
                     provisioner_kind_str,
                     service_version,
                     build_sha,
+                    despawn_token_hash,
                 ) = r.map_err(|e| Error::Registry {
                     context: "list row",
                     source: e.into(),
@@ -904,6 +929,7 @@ impl GoopyRegistry for SqliteRegistry {
                     provisioner_kind_str,
                     service_version,
                     build_sha,
+                    despawn_token_hash,
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1319,6 +1345,7 @@ mod tests {
             provisioner_kind: ProvisionerKind::Hello,
             service_version: "0.1.0".to_string(),
             build_sha: Some("c50c932aa1b2c3d4e5f60718293a4b5c6d7e8f90".to_string()),
+            despawn_token_hash: None,
         }
     }
 
@@ -2290,6 +2317,63 @@ mod tests {
                 "{slug} must keep the expiry it had"
             );
         }
+    }
+
+    #[test]
+    fn despawn_token_hash_round_trips_through_save_load_and_list() {
+        let r = registry();
+        let issued = Goopy {
+            despawn_token_hash: Some("ab".repeat(32)),
+            ..make_goopy("issued")
+        };
+        let legacy = make_goopy("legacy");
+        r.save(&issued).unwrap();
+        r.save(&legacy).unwrap();
+
+        assert_eq!(
+            r.load("issued").unwrap().unwrap().despawn_token_hash,
+            issued.despawn_token_hash
+        );
+        assert_eq!(r.load("legacy").unwrap().unwrap().despawn_token_hash, None);
+
+        let listed: Vec<_> = r
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|g| g.despawn_token_hash)
+            .collect();
+        assert!(listed.contains(&issued.despawn_token_hash));
+        assert!(listed.contains(&None));
+    }
+
+    /// Instances running when step 6 lands were issued no token. They must
+    /// read back with none — not with something any token could match.
+    #[test]
+    fn migration_adds_despawn_token_hash_leaving_existing_rows_without_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("v5.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            seed_at_version(&conn, MIGRATIONS, 5);
+            conn.execute(
+                "INSERT INTO goopies (slug, life_in_hours, created_at, status, working_dir, port, provisioner_kind, service_version) \
+                 VALUES ('old-row', 8, '2026-10-01T00:00:00Z', 'Done', '/tmp/old-row', 8080, 'Hello', '0.1.0')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let r = SqliteRegistry::new(&db_path).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        assert_eq!(user_version(&conn), LATEST_VERSION);
+        assert!(column_exists(&conn, "goopies", "despawn_token_hash"));
+        let old = r
+            .load("old-row")
+            .unwrap()
+            .expect("old row survives migration");
+        assert_eq!(old.despawn_token_hash, None);
+        assert_eq!(old.status, Status::Done, "the rest of the row is untouched");
     }
 
     #[test]

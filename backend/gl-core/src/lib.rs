@@ -1,5 +1,6 @@
 pub mod build_info;
 pub mod config;
+pub mod despawn_token;
 mod goopy;
 mod goopy_manager;
 pub mod goopy_provisioner;
@@ -12,6 +13,7 @@ pub mod sys_utils;
 pub mod usage_stats;
 
 pub use config::Config;
+pub use despawn_token::DespawnToken;
 pub use goopy::*;
 pub use goopy_manager::*;
 pub use instance_event::{EventOutcome, EventPhase, InstanceEvent};
