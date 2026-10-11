@@ -37,6 +37,19 @@ test("destroying a goopy that is already gone succeeds", async () => {
 	await destroyGoopy("happy-tiny-goose", "abc123");
 });
 
+// Forgetting the token on a 404 nobody can vouch for would strand a goopy that
+// may still be running, holding a slot for hours.
+test("a 404 that is not the API's own is an error, not \"gone\"", async () => {
+	globalThis.fetch = (async () =>
+		new Response("<html>Not Found</html>", { status: 404 })) as typeof fetch;
+
+	await assert.rejects(destroyGoopy("happy-tiny-goose", "abc123"), (err: unknown) => {
+		assert.ok(err instanceof ApiRequestError);
+		assert.equal(err.code, null);
+		return true;
+	});
+});
+
 test("a refusal surfaces with the API's code", async () => {
 	stubFetch(403, { error: "forbidden", code: "forbidden" });
 

@@ -73,18 +73,31 @@ export async function getGoopy(
  * Destroy the goopy this browser spawned, before it expires (#203).
  *
  * `token` is the `despawn_token` from `POST /goopies`; the slug alone proves
- * nothing, since it is the goopy's public subdomain. A 404 counts as success:
- * the goopy is already gone, which is what was asked for.
+ * nothing, since it is the goopy's public subdomain.
+ *
+ * gl-serv's own 404 counts as success: the goopy is already gone, which is what
+ * was asked for. Any other 404 — a proxy, a wrong API URL — throws, because the
+ * caller forgets the token on success, and the token is the only way to destroy
+ * a goopy that may still be running.
  */
 export async function destroyGoopy(slug: string, token: string): Promise<void> {
 	const res = await fetch(`${apiBase()}/goopies/${slug}`, {
 		method: "DELETE",
 		headers: { Authorization: `Bearer ${token}` },
 	});
-	if (res.ok || res.status === 404) {
+	if (res.ok) {
 		return;
 	}
-	throw await toApiError(res);
+	const err = await toApiError(res);
+	if (isGone(res, err)) {
+		return;
+	}
+	throw err;
+}
+
+/** Whether a failed response is gl-serv saying the goopy does not exist. */
+function isGone(res: Response, err: ApiRequestError): boolean {
+	return res.status === 404 && err.code === "not_found";
 }
 
 // Live capacity. Cheap read, polled from the browser — unlike GET /config, which is
