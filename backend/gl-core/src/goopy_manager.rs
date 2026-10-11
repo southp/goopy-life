@@ -342,31 +342,45 @@ where
     /// The blocking counterpart of [`despawn`]: it returns once the instance is
     /// actually gone from the registry, or with the error that stopped it.
     ///
-    /// Used by [`sweep`], which runs on a background task where nobody is
-    /// waiting on a response, so the extra thread bought nothing — and cost the
-    /// sweep any knowledge of whether the teardown worked.
-    ///
     /// [`despawn`]: GoopyManager::despawn
-    /// [`sweep`]: GoopyManager::sweep
     #[tracing::instrument(skip(self))]
     pub fn despawn_blocking(&self, slug: &str) -> Result<(), Error> {
-        self.despawn_blocking_as(slug, EventPhase::Despawn)
+        let goopy = self.claim_for_operator(slug)?;
+        Self::teardown(
+            &self.registry,
+            &self.provisioner,
+            &goopy,
+            EventPhase::Despawn,
+        )
     }
 
-    /// [`despawn_blocking`], recording its events under `phase`.
+    /// Tear down one instance [`sweep`] chose, waiting for the outcome.
     ///
-    /// The teardown is identical whoever asked for it, but the event log's
-    /// readers care who did: "what did the sweeper reclaim" and "what did
-    /// somebody tear down by hand" are different questions, and once the row is
-    /// gone the log is the only thing that can still tell them apart. So
-    /// [`sweep`] goes through here with [`EventPhase::Sweep`] while the public
-    /// entry point keeps [`EventPhase::Despawn`].
+    /// Blocking, like [`despawn_blocking`]: the sweep runs where nobody waits
+    /// on a response, and needs to know whether the teardown worked. Recorded
+    /// as [`EventPhase::Sweep`], because "what did the sweeper reclaim" and
+    /// "what did somebody tear down" are different questions, and once the row
+    /// is gone the log is the only thing that can still tell them apart.
     ///
-    /// [`despawn_blocking`]: GoopyManager::despawn_blocking
+    /// `Ok(true)` when this call removed the row. `Ok(false)` when there was
+    /// nothing left for the sweep to do: between its `list()` and this claim,
+    /// someone else — since #203, routinely a visitor's destroy — claimed the
+    /// row (`AlreadyClaimed`) or already finished removing it (`NotFound`).
+    /// Neither is a failure, so neither may reach the sweep's `errors`.
+    ///
     /// [`sweep`]: GoopyManager::sweep
-    fn despawn_blocking_as(&self, slug: &str, phase: EventPhase) -> Result<(), Error> {
-        let goopy = self.claim_for_operator(slug)?;
-        Self::teardown(&self.registry, &self.provisioner, &goopy, phase)
+    /// [`despawn_blocking`]: GoopyManager::despawn_blocking
+    fn reap(&self, slug: &str) -> Result<bool, Error> {
+        let goopy = match self.registry.claim_for_despawn(slug, &admit_any) {
+            Ok(Claim::Claimed(goopy)) => goopy,
+            Ok(Claim::AlreadyClaimed) | Err(Error::NotFound) => {
+                tracing::debug!(slug, "sweep: already being removed by someone else");
+                return Ok(false);
+            }
+            Err(e) => return Err(e),
+        };
+        Self::teardown(&self.registry, &self.provisioner, &goopy, EventPhase::Sweep)?;
+        Ok(true)
     }
 
     /// Claim `slug` for a despawn nobody has to be authorised for — an
@@ -652,11 +666,14 @@ where
     /// are managed separately.
     ///
     /// Instances with `Spawning` or `Despawning` status are skipped to avoid
-    /// interfering with in-progress operations.
+    /// interfering with in-progress operations — including ones that turn
+    /// `Despawning`, or vanish, between the listing and the claim, which a
+    /// visitor's destroy (#203) makes routine. Those count as neither swept nor
+    /// failed (see `GoopyManager::reap`).
     ///
     /// Returns `(swept_count, per_instance_errors)`. `swept_count` is the
     /// number of instances **actually removed from the registry**, not the
-    /// number of teardowns started: the sweep uses [`despawn_blocking`], so an
+    /// number of teardowns started: the sweep waits on each teardown, so an
     /// instance that cannot be deprovisioned lands in the error list instead of
     /// the count, every run, for as long as it stays stuck. Errors are
     /// collected rather than aborting the sweep early.
@@ -679,7 +696,6 @@ where
     /// Meant to be called periodically (e.g. via `tokio::time::interval` in
     /// `gl-serv`), from a context where blocking is acceptable.
     ///
-    /// [`despawn_blocking`]: GoopyManager::despawn_blocking
     #[tracing::instrument(skip(self))]
     pub fn sweep(&self) -> Result<(u32, Vec<Error>), Error> {
         let now = Utc::now();
@@ -716,8 +732,9 @@ where
             };
 
             if should_reap {
-                match self.despawn_blocking_as(&gp.slug, EventPhase::Sweep) {
-                    Ok(()) => swept += 1,
+                match self.reap(&gp.slug) {
+                    Ok(true) => swept += 1,
+                    Ok(false) => {}
                     Err(e) => {
                         tracing::error!(
                             slug = %gp.slug,
@@ -1169,6 +1186,113 @@ mod tests {
         assert_eq!(swept, 0);
         assert_eq!(errors.len(), 1);
         assert!(matches!(errors[0], Error::Invalid));
+    }
+
+    /// A registry whose `list()` answers from a snapshot taken earlier, to put
+    /// the sweep on the losing side of a race: it lists a row, then something
+    /// else claims or removes it before the sweep's own claim.
+    struct StaleListRegistry {
+        inner: SqliteRegistry,
+        snapshot: Vec<Goopy>,
+    }
+
+    impl GoopyRegistry for StaleListRegistry {
+        fn list(&self) -> Result<Vec<Goopy>, Error> {
+            Ok(self.snapshot.clone())
+        }
+        fn save(&self, gp: &Goopy) -> Result<(), Error> {
+            self.inner.save(gp)
+        }
+        fn load(&self, slug: &str) -> Result<Option<Goopy>, Error> {
+            self.inner.load(slug)
+        }
+        fn delete(&self, slug: &str) -> Result<(), Error> {
+            self.inner.delete(slug)
+        }
+        fn update_status(&self, slug: &str, status: Status) -> Result<(), Error> {
+            self.inner.update_status(slug, status)
+        }
+        fn complete_spawn(&self, slug: &str) -> Result<(), Error> {
+            self.inner.complete_spawn(slug)
+        }
+        fn claim_for_despawn(
+            &self,
+            slug: &str,
+            admit: &dyn Fn(&Goopy) -> Result<(), Error>,
+        ) -> Result<Claim, Error> {
+            self.inner.claim_for_despawn(slug, admit)
+        }
+        fn acquire_port(&self, slug: &str, s: u32, e: u32) -> Result<u32, Error> {
+            self.inner.acquire_port(slug, s, e)
+        }
+        fn release_port(&self, port: u32) -> Result<(), Error> {
+            self.inner.release_port(port)
+        }
+        fn count_provisioned(&self) -> Result<u32, Error> {
+            self.inner.count_provisioned()
+        }
+        fn count_active(&self) -> Result<u32, Error> {
+            self.inner.count_active()
+        }
+        fn save_within_caps(&self, gp: &Goopy, mp: u32, ma: u32) -> Result<(), Error> {
+            self.inner.save_within_caps(gp, mp, ma)
+        }
+        fn record_event(&self, event: &InstanceEvent) -> Result<(), Error> {
+            self.inner.record_event(event)
+        }
+        fn fail_with_event(&self, slug: &str, event: &InstanceEvent) -> Result<(), Error> {
+            self.inner.fail_with_event(slug, event)
+        }
+        fn delete_with_event(&self, slug: &str, event: &InstanceEvent) -> Result<(), Error> {
+            self.inner.delete_with_event(slug, event)
+        }
+        fn prune_events_before(&self, cutoff: chrono::DateTime<Utc>) -> Result<u32, Error> {
+            self.inner.prune_events_before(cutoff)
+        }
+        fn events(&self, slug: Option<&str>, limit: u32) -> Result<Vec<InstanceEvent>, Error> {
+            self.inner.events(slug, limit)
+        }
+        fn usage_stats(&self, today: chrono::NaiveDate) -> Result<UsageStats, Error> {
+            self.inner.usage_stats(today)
+        }
+        fn prune_usage_before(&self, day: chrono::NaiveDate) -> Result<u32, Error> {
+            self.inner.prune_usage_before(day)
+        }
+    }
+
+    /// The race #203 made routine: the sweep lists an expired instance, and
+    /// before it claims the row a visitor's destroy has claimed it — or already
+    /// finished removing it. Nothing failed, so the sweep must report nothing:
+    /// not a reap it did not do, and not an error (`sweep complete failed=1`).
+    #[test]
+    fn sweep_skips_rows_a_visitor_is_already_reaping() {
+        let inner = SqliteRegistry::new(Path::new(":memory:")).unwrap();
+        // What is really there now: one row mid-destroy, one already gone.
+        inner
+            .save(&make_goopy("being-destroyed", 10, 9000, Status::Despawning))
+            .unwrap();
+        // What the sweep's listing saw a moment earlier: both expired and `Done`.
+        let snapshot = vec![
+            make_goopy("being-destroyed", 10, 9000, Status::Done),
+            make_goopy("already-gone", 10, 9001, Status::Done),
+        ];
+        let gm = manager_with(
+            StaleListRegistry { inner, snapshot },
+            NoopProvisioner,
+            100,
+            100,
+        );
+
+        let (swept, errors) = gm.sweep().unwrap();
+
+        assert_eq!(swept, 0);
+        assert!(errors.is_empty(), "nothing failed: {errors:?}");
+        assert_eq!(
+            gm.get("being-destroyed").unwrap().unwrap().status,
+            Status::Despawning,
+            "the visitor's teardown is left to finish on its own"
+        );
+        assert!(gm.events(None, 10).unwrap().is_empty());
     }
 
     // ── spawn / get / list / despawn state machine ────────────────────────
