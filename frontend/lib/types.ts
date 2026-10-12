@@ -79,6 +79,9 @@ export type AppState =
 	| { kind: "spawning" }
 	// `expiresAt` is the API's ISO timestamp, kept raw; it is formatted for display.
 	| { kind: "done"; slug: string; url: string; expiresAt: string; token: string | null }
+	// A destroy is underway (the page was reloaded mid-"Destroying…"); waits
+	// for the goopy to be gone, then returns to idle.
+	| { kind: "leaving"; slug: string }
 	| { kind: "expired"; slug: string }
 	| { kind: "failed"; slug: string }
 	// `code` is the API's error code (or null when the response carried none); it
