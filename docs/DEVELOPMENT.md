@@ -97,8 +97,9 @@ A thin layer over `gl-core`. Since `GoopyRegistry` is sync, the server uses `spa
 
 Planned endpoints (full API is in progress — see #6):
 
-- `POST /goopies` — create a goopy
+- `POST /goopies` — create a goopy; the response carries a one-time `despawn_token`
 - `GET /goopies/:slug` — query goopy info
+- `DELETE /goopies/:slug` — destroy a goopy before it expires; needs `Authorization: Bearer <despawn_token>` (#203)
 - `GET /goopies/:slug/alive` — expiration check (used by nginx `auth_request`)
 - `GET /config` — public configuration for the frontend
 

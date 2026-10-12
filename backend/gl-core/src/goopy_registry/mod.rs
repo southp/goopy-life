@@ -7,6 +7,22 @@ use crate::usage_stats::UsageStats;
 
 use chrono::{DateTime, NaiveDate, Utc};
 
+/// What [`GoopyRegistry::claim_for_despawn`] found.
+#[derive(Debug)]
+pub enum Claim {
+    /// This caller now owns the teardown. Carries the row as it stood before
+    /// the claim marked it `Despawning`.
+    Claimed(Goopy),
+    /// The row was already `Despawning`: another caller owns the teardown.
+    AlreadyClaimed,
+}
+
+/// Ask nothing of the row before claiming it: an operator's or the sweeper's
+/// despawn.
+pub fn admit_any(_: &Goopy) -> Result<(), Error> {
+    Ok(())
+}
+
 pub trait GoopyRegistry {
     fn save(&self, gp: &Goopy) -> Result<(), Error>;
     fn load(&self, slug: &str) -> Result<Option<Goopy>, Error>;
@@ -24,6 +40,38 @@ pub trait GoopyRegistry {
     ///
     /// [`update_status`]: GoopyRegistry::update_status
     fn complete_spawn(&self, slug: &str) -> Result<(), Error>;
+
+    /// Claim `slug` for teardown: mark it [`Status::Despawning`] and return the
+    /// row as it stood before the claim, in one transaction.
+    ///
+    /// In order, against the row as loaded inside that transaction:
+    ///
+    /// 1. No row — [`Error::NotFound`].
+    /// 2. `admit(&row)` — any error it returns is returned as is, and nothing
+    ///    is written. This is where a caller puts its own conditions, such as a
+    ///    visitor's token ([`admit_any`] when there are none), so that they are
+    ///    judged against the same row the claim then writes.
+    /// 3. Already `Despawning` — [`Claim::AlreadyClaimed`]: someone else's
+    ///    teardown is underway.
+    /// 4. `Spawning` — [`Error::Invalid`]: there is nothing to tear down yet.
+    /// 5. Otherwise the row is marked `Despawning` — [`Claim::Claimed`].
+    ///
+    /// Everything shares one write lock, so of two concurrent claims on the
+    /// same slug exactly one gets `Claimed`. A `load` followed by an
+    /// [`update_status`] let both see `Done` and both run the teardown —
+    /// harmless while only an operator and the sweeper despawned, reachable
+    /// once a visitor can (#203): a double-clicked destroy, or one that races
+    /// the sweeper.
+    ///
+    /// `admit` is a `&dyn Fn` rather than a generic parameter so that the
+    /// trait stays usable as a trait object.
+    ///
+    /// [`update_status`]: GoopyRegistry::update_status
+    fn claim_for_despawn(
+        &self,
+        slug: &str,
+        admit: &dyn Fn(&Goopy) -> Result<(), Error>,
+    ) -> Result<Claim, Error>;
 
     /// Find the lowest unused port in `[range_start, range_end)`, mark it as
     /// allocated (recording which goopy instance owns it), and return it.
@@ -118,6 +166,13 @@ pub trait GoopyRegistry {
     /// event with a rolled-back delete claims a reap that did not happen, which
     /// is the lie #117 was filed about, written somewhere more durable than a
     /// log line.
+    ///
+    /// An [`EventPhase::UserDespawn`] event also counts one destroy against
+    /// today and the all-time total, in the same transaction (#203): a
+    /// visitor's destroy counts exactly when the instance is gone. Sweeps and
+    /// operator despawns are not counted.
+    ///
+    /// [`EventPhase::UserDespawn`]: crate::instance_event::EventPhase::UserDespawn
     fn delete_with_event(&self, slug: &str, event: &InstanceEvent) -> Result<(), Error>;
 
     /// Drop events that occurred strictly before `cutoff`, returning how many
@@ -137,8 +192,8 @@ pub trait GoopyRegistry {
 
     // -- usage counters (#172) --------------------------------------------
     //
-    // A daily rollup plus an all-time total. Written only by `complete_spawn`
-    // and `fail_with_event`; see [`crate::usage_stats`].
+    // A daily rollup plus an all-time total. Written only by `complete_spawn`,
+    // `fail_with_event` and `delete_with_event`; see [`crate::usage_stats`].
 
     /// Read the usage counters as of `today` (a UTC day).
     ///

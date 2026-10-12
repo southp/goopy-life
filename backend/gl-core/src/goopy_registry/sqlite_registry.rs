@@ -6,7 +6,7 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
-use super::GoopyRegistry;
+use super::{Claim, GoopyRegistry};
 use crate::goopy::Goopy;
 use crate::instance_event::{EventOutcome, EventPhase, InstanceEvent};
 use crate::shared_types::*;
@@ -26,7 +26,9 @@ use crate::usage_stats::{DailyUsage, UsageCounter, UsageCounts, UsageStats};
 /// Version 2 adds `instance_events` (#118).  Version 3 adds
 /// `goopies.build_sha` (#119).  Version 4 adds the usage counters,
 /// `usage_daily` and `usage_totals` (#172).  Version 5 measures an instance's
-/// lifetime in hours rather than days (#110).  A fresh database is fully
+/// lifetime in hours rather than days (#110).  Version 6 adds
+/// `goopies.despawn_token_hash` (#203), and version 7 counts destroys
+/// alongside the other usage counters.  A fresh database is fully
 /// initialised by walking every step in order, so new steps append here rather
 /// than editing an existing one — an already-migrated database never re-runs a
 /// step it has passed.
@@ -151,6 +153,35 @@ const MIGRATIONS: &[(u32, &str)] = &[
         "
     ALTER TABLE goopies RENAME COLUMN life_in_days TO life_in_hours;
     UPDATE goopies SET life_in_hours = life_in_hours * 24;
+    ",
+    ),
+    (
+        6,
+        // The hash of the token that lets a visitor destroy the instance they
+        // spawned (#203). Only the hash: see `crate::despawn_token`.
+        //
+        // Nullable with no default, as `build_sha` is: rows that predate this
+        // step were issued no token, and NULL is what makes them impossible to
+        // destroy early rather than destroyable by anyone. Not idempotent —
+        // `ADD COLUMN` fails if re-run — which the `user_version` guard in
+        // [`migrate`] makes safe.
+        "
+    ALTER TABLE goopies ADD COLUMN despawn_token_hash TEXT;
+    ",
+    ),
+    (
+        7,
+        // Count the instances visitors destroyed before they expired (#203),
+        // next to the provisions and failures #172 counts.
+        //
+        // `NOT NULL DEFAULT 0` rather than nullable: nothing was destroyed
+        // early before this step, because nothing could be, so zero is the
+        // true count for every existing row rather than a guess. Not
+        // idempotent — `ADD COLUMN` fails if re-run — which the `user_version`
+        // guard in [`migrate`] makes safe.
+        "
+    ALTER TABLE usage_daily  ADD COLUMN destroyed INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE usage_totals ADD COLUMN destroyed INTEGER NOT NULL DEFAULT 0;
     ",
     ),
 ];
@@ -367,6 +398,7 @@ fn parse_row(
     provisioner_kind_str: String,
     service_version: String,
     build_sha: Option<String>,
+    despawn_token_hash: Option<String>,
 ) -> Result<Goopy, Error> {
     let created_at = created_at_str.parse::<DateTime<Utc>>().map_err(|e| {
         tracing::error!(
@@ -416,6 +448,7 @@ fn parse_row(
         provisioner_kind,
         service_version,
         build_sha,
+        despawn_token_hash,
     })
 }
 
@@ -578,8 +611,8 @@ fn count_from(stored: i64) -> u64 {
 /// Count one `counter` against `day` and against the all-time total.
 ///
 /// Callers run this inside the transaction that makes the counted thing true —
-/// the `Done` or `Failed` status write — so the count cannot drift from the
-/// rows it describes.
+/// the `Done` or `Failed` status write, or the delete that reaps a destroyed
+/// instance — so the count cannot drift from the rows it describes.
 ///
 /// One literal statement pair per counter rather than a column name formatted
 /// into shared SQL, so nothing is ever spliced into a statement.
@@ -600,6 +633,12 @@ fn bump_usage_in(conn: &Connection, day: NaiveDate, counter: UsageCounter) -> Re
              ON CONFLICT(day) DO UPDATE SET failed = failed + 1",
             "INSERT INTO usage_totals (id, provisioned, failed) VALUES (1, 0, 1)
              ON CONFLICT(id) DO UPDATE SET failed = failed + 1",
+        ),
+        UsageCounter::Destroyed => (
+            "INSERT INTO usage_daily (day, destroyed) VALUES (?1, 1)
+             ON CONFLICT(day) DO UPDATE SET destroyed = destroyed + 1",
+            "INSERT INTO usage_totals (id, provisioned, failed, destroyed) VALUES (1, 0, 0, 1)
+             ON CONFLICT(id) DO UPDATE SET destroyed = destroyed + 1",
         ),
     };
 
@@ -679,14 +718,74 @@ fn parse_event_row(
     })
 }
 
+/// Read `slug`'s row, or `None` if there is none.
+fn load_in(conn: &Connection, slug: &str) -> Result<Option<Goopy>, Error> {
+    let result = conn.query_row(
+        "SELECT slug, life_in_hours, created_at, status, working_dir,
+                port, provisioner_kind, service_version, build_sha,
+                despawn_token_hash
+         FROM goopies WHERE slug = ?1",
+        params![slug],
+        |row| {
+            Ok((
+                row.get::<_, String>("slug")?,
+                row.get::<_, i64>("life_in_hours")?,
+                row.get::<_, String>("created_at")?,
+                row.get::<_, String>("status")?,
+                row.get::<_, String>("working_dir")?,
+                row.get::<_, i64>("port")?,
+                row.get::<_, String>("provisioner_kind")?,
+                row.get::<_, String>("service_version")?,
+                row.get::<_, Option<String>>("build_sha")?,
+                row.get::<_, Option<String>>("despawn_token_hash")?,
+            ))
+        },
+    );
+
+    match result {
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(Error::Registry {
+            context: "load",
+            source: e.into(),
+        }),
+        Ok((
+            slug,
+            life_in_hours,
+            created_at_str,
+            status_str,
+            working_dir_str,
+            port,
+            provisioner_kind_str,
+            service_version,
+            build_sha,
+            despawn_token_hash,
+        )) => {
+            let gp = parse_row(
+                slug,
+                life_in_hours,
+                created_at_str,
+                status_str,
+                working_dir_str,
+                port,
+                provisioner_kind_str,
+                service_version,
+                build_sha,
+                despawn_token_hash,
+            )?;
+            tracing::debug!(slug = %gp.slug, "loaded goopy");
+            Ok(Some(gp))
+        }
+    }
+}
+
 /// Insert `gp`, mapping a UNIQUE violation on `slug` to [`Error::AlreadyExists`]
 /// so callers can retry with a fresh slug.
 fn insert_goopy(conn: &Connection, gp: &Goopy) -> Result<(), Error> {
     let result = conn.execute(
         "INSERT OR FAIL INTO goopies
          (slug, life_in_hours, created_at, status, working_dir, port,
-          provisioner_kind, service_version, build_sha)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+          provisioner_kind, service_version, build_sha, despawn_token_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             gp.slug,
             i64::from(gp.life_in_hours),
@@ -697,6 +796,7 @@ fn insert_goopy(conn: &Connection, gp: &Goopy) -> Result<(), Error> {
             gp.provisioner_kind.to_string(),
             gp.service_version,
             gp.build_sha,
+            gp.despawn_token_hash,
         ],
     );
 
@@ -742,58 +842,7 @@ impl GoopyRegistry for SqliteRegistry {
             source: e.into(),
         })?;
 
-        let result = conn.query_row(
-            "SELECT slug, life_in_hours, created_at, status, working_dir,
-                    port, provisioner_kind, service_version, build_sha
-             FROM goopies WHERE slug = ?1",
-            params![slug],
-            |row| {
-                Ok((
-                    row.get::<_, String>("slug")?,
-                    row.get::<_, i64>("life_in_hours")?,
-                    row.get::<_, String>("created_at")?,
-                    row.get::<_, String>("status")?,
-                    row.get::<_, String>("working_dir")?,
-                    row.get::<_, i64>("port")?,
-                    row.get::<_, String>("provisioner_kind")?,
-                    row.get::<_, String>("service_version")?,
-                    row.get::<_, Option<String>>("build_sha")?,
-                ))
-            },
-        );
-
-        match result {
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(Error::Registry {
-                context: "load",
-                source: e.into(),
-            }),
-            Ok((
-                slug,
-                life_in_hours,
-                created_at_str,
-                status_str,
-                working_dir_str,
-                port,
-                provisioner_kind_str,
-                service_version,
-                build_sha,
-            )) => {
-                let gp = parse_row(
-                    slug,
-                    life_in_hours,
-                    created_at_str,
-                    status_str,
-                    working_dir_str,
-                    port,
-                    provisioner_kind_str,
-                    service_version,
-                    build_sha,
-                )?;
-                tracing::debug!(slug = %gp.slug, "loaded goopy");
-                Ok(Some(gp))
-            }
-        }
+        load_in(&conn, slug)
     }
 
     #[tracing::instrument(skip(self))]
@@ -811,6 +860,27 @@ impl GoopyRegistry for SqliteRegistry {
         self.in_write_transaction("complete_spawn", |tx| {
             set_status_in(tx, slug, Status::Done)?;
             bump_usage_in(tx, utc_today(), UsageCounter::Provisioned)
+        })
+    }
+
+    #[tracing::instrument(skip(self, admit))]
+    fn claim_for_despawn(
+        &self,
+        slug: &str,
+        admit: &dyn Fn(&Goopy) -> Result<(), Error>,
+    ) -> Result<Claim, Error> {
+        self.in_write_transaction("claim_for_despawn", |tx| {
+            let Some(goopy) = load_in(tx, slug)? else {
+                return Err(Error::NotFound);
+            };
+            admit(&goopy)?;
+            match goopy.status {
+                Status::Despawning => return Ok(Claim::AlreadyClaimed),
+                Status::Spawning => return Err(Error::Invalid),
+                _ => {}
+            }
+            set_status_in(tx, slug, Status::Despawning)?;
+            Ok(Claim::Claimed(goopy))
         })
     }
 
@@ -834,7 +904,8 @@ impl GoopyRegistry for SqliteRegistry {
         let mut stmt = conn
             .prepare(
                 "SELECT slug, life_in_hours, created_at, status, working_dir,
-                        port, provisioner_kind, service_version, build_sha
+                        port, provisioner_kind, service_version, build_sha,
+                        despawn_token_hash
                  FROM goopies ORDER BY created_at",
             )
             .map_err(|e| Error::Registry {
@@ -854,6 +925,7 @@ impl GoopyRegistry for SqliteRegistry {
                     row.get::<_, String>("provisioner_kind")?,
                     row.get::<_, String>("service_version")?,
                     row.get::<_, Option<String>>("build_sha")?,
+                    row.get::<_, Option<String>>("despawn_token_hash")?,
                 ))
             })
             .map_err(|e| Error::Registry {
@@ -871,6 +943,7 @@ impl GoopyRegistry for SqliteRegistry {
                     provisioner_kind_str,
                     service_version,
                     build_sha,
+                    despawn_token_hash,
                 ) = r.map_err(|e| Error::Registry {
                     context: "list row",
                     source: e.into(),
@@ -885,6 +958,7 @@ impl GoopyRegistry for SqliteRegistry {
                     provisioner_kind_str,
                     service_version,
                     build_sha,
+                    despawn_token_hash,
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1081,7 +1155,14 @@ impl GoopyRegistry for SqliteRegistry {
     fn delete_with_event(&self, slug: &str, event: &InstanceEvent) -> Result<(), Error> {
         self.in_write_transaction("delete_with_event", |tx| {
             delete_goopy_in(tx, slug)?;
-            insert_event_in(tx, event)
+            insert_event_in(tx, event)?;
+            // A visitor's destroy counts once the row is really gone, which is
+            // exactly when this commits. A sweep or an operator's despawn is
+            // cleanup, not a slot given back early, and is not counted.
+            if event.phase == EventPhase::UserDespawn {
+                bump_usage_in(tx, utc_today(), UsageCounter::Destroyed)?;
+            }
+            Ok(())
         })
     }
 
@@ -1181,12 +1262,13 @@ impl GoopyRegistry for SqliteRegistry {
         // hand-damaged table from turning `GET /stats` into a 500.
         let all_time = tx
             .query_row(
-                "SELECT provisioned, failed FROM usage_totals WHERE id = 1",
+                "SELECT provisioned, failed, destroyed FROM usage_totals WHERE id = 1",
                 [],
                 |row| {
                     Ok(UsageCounts {
                         provisioned: count_from(row.get(0)?),
                         failed: count_from(row.get(1)?),
+                        destroyed: count_from(row.get(2)?),
                     })
                 },
             )
@@ -1198,7 +1280,7 @@ impl GoopyRegistry for SqliteRegistry {
             .unwrap_or_default();
 
         let mut stmt = tx
-            .prepare("SELECT day, provisioned, failed FROM usage_daily")
+            .prepare("SELECT day, provisioned, failed, destroyed FROM usage_daily")
             .map_err(|e| Error::Registry {
                 context: "usage daily prepare",
                 source: e.into(),
@@ -1210,6 +1292,7 @@ impl GoopyRegistry for SqliteRegistry {
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
                 ))
             })
             .map_err(|e| Error::Registry {
@@ -1217,7 +1300,7 @@ impl GoopyRegistry for SqliteRegistry {
                 source: e.into(),
             })?
             .map(|r| {
-                let (day_str, provisioned, failed) = r.map_err(|e| Error::Registry {
+                let (day_str, provisioned, failed, destroyed) = r.map_err(|e| Error::Registry {
                     context: "usage daily row",
                     source: e.into(),
                 })?;
@@ -1234,6 +1317,7 @@ impl GoopyRegistry for SqliteRegistry {
                     counts: UsageCounts {
                         provisioned: count_from(provisioned),
                         failed: count_from(failed),
+                        destroyed: count_from(destroyed),
                     },
                 })
             })
@@ -1287,6 +1371,7 @@ impl SqliteRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::goopy_registry::admit_any;
     use std::path::PathBuf;
 
     fn make_goopy(slug: &str) -> Goopy {
@@ -1300,6 +1385,7 @@ mod tests {
             provisioner_kind: ProvisionerKind::Hello,
             service_version: "0.1.0".to_string(),
             build_sha: Some("c50c932aa1b2c3d4e5f60718293a4b5c6d7e8f90".to_string()),
+            despawn_token_hash: None,
         }
     }
 
@@ -1472,6 +1558,125 @@ mod tests {
         let r = registry();
         let err = r.update_status("no-such", Status::Done).unwrap_err();
         assert!(matches!(err, Error::NotFound));
+    }
+
+    #[test]
+    fn claim_for_despawn_marks_despawning_and_returns_the_prior_row() {
+        let r = registry();
+        for (slug, status) in [("was-done", Status::Done), ("was-failed", Status::Failed)] {
+            let mut gp = make_goopy(slug);
+            gp.status = status.clone();
+            r.save(&gp).unwrap();
+
+            let Claim::Claimed(claimed) = r.claim_for_despawn(slug, &admit_any).unwrap() else {
+                panic!("{slug}: expected a claim");
+            };
+
+            assert_eq!(claimed.status, status, "the row as it was before the claim");
+            assert_eq!(r.load(slug).unwrap().unwrap().status, Status::Despawning);
+        }
+    }
+
+    #[test]
+    fn claim_for_despawn_refuses_a_row_mid_spawn() {
+        let r = registry();
+        r.save(&make_goopy("mid-spawn")).unwrap();
+
+        let err = r.claim_for_despawn("mid-spawn", &admit_any).unwrap_err();
+
+        assert!(matches!(err, Error::Invalid), "got {err:?}");
+        assert_eq!(
+            r.load("mid-spawn").unwrap().unwrap().status,
+            Status::Spawning,
+            "a refused claim must leave the status alone"
+        );
+    }
+
+    /// A teardown already underway is not an error: it is somebody else's,
+    /// and the caller decides what that means for it.
+    #[test]
+    fn claim_reports_already_claimed_for_a_despawning_row() {
+        let r = registry();
+        let mut gp = make_goopy("mid-despawn");
+        gp.status = Status::Despawning;
+        r.save(&gp).unwrap();
+
+        let claim = r.claim_for_despawn("mid-despawn", &admit_any).unwrap();
+
+        assert!(matches!(claim, Claim::AlreadyClaimed), "got {claim:?}");
+    }
+
+    #[test]
+    fn claim_for_despawn_missing() {
+        let r = registry();
+        let err = r.claim_for_despawn("no-such", &admit_any).unwrap_err();
+        assert!(matches!(err, Error::NotFound));
+    }
+
+    /// The caller's conditions are judged inside the claim, against the row it
+    /// would write: refused, the row is left exactly as it was.
+    #[test]
+    fn a_refused_admit_writes_nothing() {
+        let r = registry();
+        let mut gp = make_goopy("guarded");
+        gp.status = Status::Done;
+        r.save(&gp).unwrap();
+
+        let seen = std::cell::Cell::new(None);
+        let err = r
+            .claim_for_despawn("guarded", &|row: &Goopy| {
+                seen.set(Some(row.status.clone()));
+                Err(Error::Forbidden)
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, Error::Forbidden), "got {err:?}");
+        assert_eq!(seen.take(), Some(Status::Done), "admit sees the loaded row");
+        assert_eq!(r.load("guarded").unwrap().unwrap().status, Status::Done);
+    }
+
+    /// The race #203 makes reachable: a double-clicked destroy, or one that
+    /// lands while the sweeper is reaping the same row. Exactly one claim may
+    /// win, or two teardowns run against one instance.
+    #[test]
+    fn concurrent_claims_on_one_slug_have_exactly_one_winner() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        // A file DB, so the pool hands out more than one connection and the
+        // claims genuinely contend; `:memory:` has a pool of one.
+        let dir = tempfile::tempdir().unwrap();
+        let r = Arc::new(SqliteRegistry::new(&dir.path().join("claims.db")).unwrap());
+        let mut gp = make_goopy("contended");
+        gp.status = Status::Done;
+        r.save(&gp).unwrap();
+
+        const CLAIMANTS: usize = 8;
+        let barrier = Arc::new(Barrier::new(CLAIMANTS));
+        let handles: Vec<_> = (0..CLAIMANTS)
+            .map(|_| {
+                let r = Arc::clone(&r);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    r.claim_for_despawn("contended", &admit_any)
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let winners = results
+            .iter()
+            .filter(|r| matches!(r, Ok(Claim::Claimed(_))))
+            .count();
+        assert_eq!(winners, 1, "exactly one claim may win: {results:?}");
+        assert!(
+            results
+                .iter()
+                .filter(|r| !matches!(r, Ok(Claim::Claimed(_))))
+                .all(|r| matches!(r, Ok(Claim::AlreadyClaimed))),
+            "every loser must see the row already claimed: {results:?}"
+        );
     }
 
     #[test]
@@ -1903,9 +2108,9 @@ mod tests {
     fn usage_stats_on_an_empty_registry_is_all_zeros() {
         let stats = registry().usage_stats(utc_today()).unwrap();
 
-        assert_eq!(stats.all_time, UsageCounts::new(0, 0));
-        assert_eq!(stats.last_7_days, UsageCounts::new(0, 0));
-        assert_eq!(stats.today, UsageCounts::new(0, 0));
+        assert_eq!(stats.all_time, UsageCounts::new(0, 0, 0));
+        assert_eq!(stats.last_7_days, UsageCounts::new(0, 0, 0));
+        assert_eq!(stats.today, UsageCounts::new(0, 0, 0));
         assert!(stats.daily.is_empty());
     }
 
@@ -1918,8 +2123,8 @@ mod tests {
 
         assert_eq!(r.load("u-done").unwrap().unwrap().status, Status::Done);
         let stats = r.usage_stats(utc_today()).unwrap();
-        assert_eq!(stats.today, UsageCounts::new(1, 0));
-        assert_eq!(stats.all_time, UsageCounts::new(1, 0));
+        assert_eq!(stats.today, UsageCounts::new(1, 0, 0));
+        assert_eq!(stats.all_time, UsageCounts::new(1, 0, 0));
         assert_eq!(stats.daily.len(), 1);
         assert_eq!(stats.daily[0].day, utc_today());
     }
@@ -1933,7 +2138,7 @@ mod tests {
         assert!(matches!(err, Error::NotFound), "{err:?}");
         assert_eq!(
             r.usage_stats(utc_today()).unwrap().all_time,
-            UsageCounts::new(0, 0)
+            UsageCounts::new(0, 0, 0)
         );
     }
 
@@ -1968,8 +2173,8 @@ mod tests {
         .unwrap();
 
         let stats = r.usage_stats(utc_today()).unwrap();
-        assert_eq!(stats.today, UsageCounts::new(0, 1));
-        assert_eq!(stats.all_time, UsageCounts::new(0, 1));
+        assert_eq!(stats.today, UsageCounts::new(0, 1, 0));
+        assert_eq!(stats.all_time, UsageCounts::new(0, 1, 0));
     }
 
     /// Cleanup problems are not failed provisions: the instance was served,
@@ -1994,8 +2199,95 @@ mod tests {
         assert_eq!(r.events(Some("u-cleanup"), 10).unwrap().len(), 2);
         assert_eq!(
             r.usage_stats(utc_today()).unwrap().all_time,
-            UsageCounts::new(0, 0)
+            UsageCounts::new(0, 0, 0)
         );
+    }
+
+    #[test]
+    fn a_visitors_destroy_counts_once_the_row_is_gone() {
+        let r = registry();
+        r.save(&make_goopy("u-destroyed")).unwrap();
+
+        r.delete_with_event(
+            "u-destroyed",
+            &InstanceEvent::reaped("u-destroyed", EventPhase::UserDespawn),
+        )
+        .unwrap();
+
+        assert!(r.load("u-destroyed").unwrap().is_none());
+        let stats = r.usage_stats(utc_today()).unwrap();
+        assert_eq!(stats.all_time, UsageCounts::new(0, 0, 1));
+        assert_eq!(stats.today, UsageCounts::new(0, 0, 1));
+    }
+
+    /// The sweeper reaping an expired instance and an operator's `gl-cli
+    /// despawn` are cleanup, not a visitor giving a slot back early.
+    #[test]
+    fn sweep_and_operator_reaps_are_not_counted_as_destroys() {
+        let r = registry();
+        for (slug, phase) in [
+            ("u-swept", EventPhase::Sweep),
+            ("u-by-hand", EventPhase::Despawn),
+        ] {
+            r.save(&make_goopy(slug)).unwrap();
+            r.delete_with_event(slug, &InstanceEvent::reaped(slug, phase))
+                .unwrap();
+        }
+
+        assert_eq!(
+            r.usage_stats(utc_today()).unwrap().all_time,
+            UsageCounts::new(0, 0, 0)
+        );
+    }
+
+    /// The count and the delete commit together: a destroy that cannot be
+    /// counted is not recorded as having happened, and the teardown's failure
+    /// path takes over as for any other failed delete.
+    #[test]
+    fn delete_with_event_rolls_back_when_the_destroy_count_write_fails() {
+        let r = registry();
+        r.save(&make_goopy("u-uncountable")).unwrap();
+        r.break_usage_writes();
+
+        let err = r
+            .delete_with_event(
+                "u-uncountable",
+                &InstanceEvent::reaped("u-uncountable", EventPhase::UserDespawn),
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, Error::Registry { .. }), "{err:?}");
+        assert!(
+            r.load("u-uncountable").unwrap().is_some(),
+            "the delete must roll back with the count"
+        );
+        assert!(r.events(Some("u-uncountable"), 10).unwrap().is_empty());
+    }
+
+    /// Counts recorded before step 7 must survive it, and every existing row
+    /// reads zero destroys — nothing could be destroyed early before #203.
+    #[test]
+    fn migration_adds_destroyed_keeping_every_existing_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("v6.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            seed_at_version(&conn, MIGRATIONS, 6);
+            conn.execute_batch(
+                "INSERT INTO usage_daily (day, provisioned, failed) VALUES ('2026-10-01', 4, 1);
+                 UPDATE usage_totals SET provisioned = 40, failed = 3 WHERE id = 1;",
+            )
+            .unwrap();
+        }
+
+        let r = SqliteRegistry::new(&db_path).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        assert_eq!(user_version(&conn), LATEST_VERSION);
+        let stats = r.usage_stats(utc_today()).unwrap();
+        assert_eq!(stats.all_time, UsageCounts::new(40, 3, 0));
+        assert_eq!(stats.daily.len(), 1);
+        assert_eq!(stats.daily[0].counts, UsageCounts::new(4, 1, 0));
     }
 
     #[test]
@@ -2010,7 +2302,7 @@ mod tests {
         assert_eq!(r.events(Some("u-dup"), 10).unwrap().len(), 1);
         assert_eq!(
             r.usage_stats(utc_today()).unwrap().all_time,
-            UsageCounts::new(0, 1)
+            UsageCounts::new(0, 1, 0)
         );
     }
 
@@ -2045,13 +2337,13 @@ mod tests {
 
         let stats = r.usage_stats(t).unwrap();
 
-        assert_eq!(stats.today, UsageCounts::new(1, 0));
+        assert_eq!(stats.today, UsageCounts::new(1, 0, 0));
         assert_eq!(
             stats.last_7_days,
-            UsageCounts::new(1, 1),
+            UsageCounts::new(1, 1, 0),
             "day -7 is outside"
         );
-        assert_eq!(stats.all_time, UsageCounts::new(2, 1));
+        assert_eq!(stats.all_time, UsageCounts::new(2, 1, 0));
         let days: Vec<_> = stats.daily.iter().map(|d| d.day).collect();
         assert_eq!(
             days,
@@ -2085,9 +2377,9 @@ mod tests {
 
         let stats = r.usage_stats(t).unwrap();
 
-        assert_eq!(stats.all_time, UsageCounts::new(0, 0));
-        assert_eq!(stats.today, UsageCounts::new(0, 0));
-        assert_eq!(stats.daily[0].counts, UsageCounts::new(0, 0));
+        assert_eq!(stats.all_time, UsageCounts::new(0, 0, 0));
+        assert_eq!(stats.today, UsageCounts::new(0, 0, 0));
+        assert_eq!(stats.daily[0].counts, UsageCounts::new(0, 0, 0));
     }
 
     #[test]
@@ -2108,7 +2400,7 @@ mod tests {
         assert_eq!(stats.daily[0].day, t - chrono::Duration::days(89));
         assert_eq!(
             stats.all_time,
-            UsageCounts::new(2, 1),
+            UsageCounts::new(2, 1, 0),
             "the total is never pruned"
         );
     }
@@ -2134,7 +2426,7 @@ mod tests {
         assert!(table_exists(&conn, "usage_totals"));
         assert_eq!(
             r.usage_stats(utc_today()).unwrap().all_time,
-            UsageCounts::new(0, 0)
+            UsageCounts::new(0, 0, 0)
         );
 
         // And the upgraded database counts.
@@ -2142,7 +2434,7 @@ mod tests {
         r.complete_spawn("u-upgraded").unwrap();
         assert_eq!(
             r.usage_stats(utc_today()).unwrap().all_time,
-            UsageCounts::new(1, 0)
+            UsageCounts::new(1, 0, 0)
         );
     }
 
@@ -2186,6 +2478,63 @@ mod tests {
                 "{slug} must keep the expiry it had"
             );
         }
+    }
+
+    #[test]
+    fn despawn_token_hash_round_trips_through_save_load_and_list() {
+        let r = registry();
+        let issued = Goopy {
+            despawn_token_hash: Some("ab".repeat(32)),
+            ..make_goopy("issued")
+        };
+        let legacy = make_goopy("legacy");
+        r.save(&issued).unwrap();
+        r.save(&legacy).unwrap();
+
+        assert_eq!(
+            r.load("issued").unwrap().unwrap().despawn_token_hash,
+            issued.despawn_token_hash
+        );
+        assert_eq!(r.load("legacy").unwrap().unwrap().despawn_token_hash, None);
+
+        let listed: Vec<_> = r
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|g| g.despawn_token_hash)
+            .collect();
+        assert!(listed.contains(&issued.despawn_token_hash));
+        assert!(listed.contains(&None));
+    }
+
+    /// Instances running when step 6 lands were issued no token. They must
+    /// read back with none — not with something any token could match.
+    #[test]
+    fn migration_adds_despawn_token_hash_leaving_existing_rows_without_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("v5.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            seed_at_version(&conn, MIGRATIONS, 5);
+            conn.execute(
+                "INSERT INTO goopies (slug, life_in_hours, created_at, status, working_dir, port, provisioner_kind, service_version) \
+                 VALUES ('old-row', 8, '2026-10-01T00:00:00Z', 'Done', '/tmp/old-row', 8080, 'Hello', '0.1.0')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let r = SqliteRegistry::new(&db_path).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        assert_eq!(user_version(&conn), LATEST_VERSION);
+        assert!(column_exists(&conn, "goopies", "despawn_token_hash"));
+        let old = r
+            .load("old-row")
+            .unwrap()
+            .expect("old row survives migration");
+        assert_eq!(old.despawn_token_hash, None);
+        assert_eq!(old.status, Status::Done, "the rest of the row is untouched");
     }
 
     #[test]
@@ -2328,13 +2677,20 @@ mod tests {
         // First open: creates a fully-initialised DB at LATEST_VERSION.
         SqliteRegistry::new(&db_path).unwrap();
 
-        // Simulate an "old" database: drop both tables and reset user_version.
+        // Simulate a pre-versioning database: drop every table and reset
+        // user_version. The tables later steps create go too — a database
+        // from before versioning never had them, and leaving them behind at
+        // their latest shape makes a non-idempotent step like 7's
+        // `ADD COLUMN` collide with a column no real old database could have.
         {
             let conn = rusqlite::Connection::open(&db_path).unwrap();
             conn.execute_batch(
                 "
                 DROP TABLE IF EXISTS goopies;
                 DROP TABLE IF EXISTS allocated_ports;
+                DROP TABLE IF EXISTS instance_events;
+                DROP TABLE IF EXISTS usage_daily;
+                DROP TABLE IF EXISTS usage_totals;
                 PRAGMA user_version = 0;
                 ",
             )

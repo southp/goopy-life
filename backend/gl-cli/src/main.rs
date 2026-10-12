@@ -13,7 +13,8 @@ use std::time::Duration;
 #[command(long_about = "\
 Maintenance CLI for a Goopy.Life host.
 
-gl-serv has no despawn route, so tearing down a single instance, listing what \
+gl-serv's only despawn route serves the visitor who spawned the instance, and \
+needs the token they were issued. So tearing down a single instance, listing what \
 exists, reading why something failed, and allocating or releasing storage by \
 hand all happen here. The deploy installs it at /opt/goopy-life/bin/gl-cli \
 from the same build as gl-serv, so the two always share a gl-core -- and \
@@ -247,7 +248,9 @@ fn main() {
                         spinner.enable_steady_tick(Duration::from_millis(100));
 
                         match gm.spawn() {
-                            Ok((slug, port)) => {
+                            // The despawn token is for a visitor's browser; an
+                            // operator despawns by slug, so it is dropped here.
+                            Ok(Spawned { slug, port, .. }) => {
                                 spinner.set_message(format!("Spawning {slug} (port {port}) ..."));
                                 pending_slugs.push(slug);
                             }

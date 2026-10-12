@@ -23,6 +23,13 @@ pub struct Goopy {
     /// is kept apart from `Some("unknown")`, which is a recorded fact (an
     /// unstamped local build did the provisioning).
     pub build_sha: Option<String>,
+    /// The SHA-256 of the token that lets whoever spawned this instance
+    /// destroy it (#203) — never the token itself. See
+    /// [`crate::despawn_token`].
+    ///
+    /// `None` for rows created before the column existed, and for any row no
+    /// token was issued for: such an instance can only expire.
+    pub despawn_token_hash: Option<String>,
 }
 
 impl Goopy {

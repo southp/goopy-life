@@ -741,6 +741,7 @@ mod tests {
             provisioner_kind: ProvisionerKind::Ghost,
             service_version: "5.87.1".to_string(),
             build_sha: None,
+            despawn_token_hash: None,
         }
     }
 

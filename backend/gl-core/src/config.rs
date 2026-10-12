@@ -1216,6 +1216,7 @@ version = "5.87.1"
                 provisioner_kind: ProvisionerKind::Hello,
                 service_version: "0.1.0".to_string(),
                 build_sha: None,
+                despawn_token_hash: None,
             })
             .expect("deprovision against a mock should succeed");
 
