@@ -8,6 +8,15 @@ export type GoopyStatus =
 	| "Archived"
 	| "Empty";
 
+// Body of `POST /goopies`.
+export interface SpawnResponse {
+	slug: string;
+	status: GoopyStatus;
+	// The bearer token for destroying this goopy early (#203). Returned once, here
+	// and never again. Optional: a backend from before #203 sends none.
+	despawn_token?: string;
+}
+
 export interface GoopyResponse {
 	slug: string;
 	status: GoopyStatus;
@@ -65,10 +74,11 @@ export interface VersionResponse {
 // State machine for the interactive "Ghost now!" CTA.
 export type AppState =
 	| { kind: "idle" }
-	| { kind: "resuming"; slug: string }
+	// `token` lets this browser destroy the goopy early; null when it has none.
+	| { kind: "resuming"; slug: string; token: string | null }
 	| { kind: "spawning" }
 	// `expiresAt` is the API's ISO timestamp, kept raw; it is formatted for display.
-	| { kind: "done"; slug: string; url: string; expiresAt: string }
+	| { kind: "done"; slug: string; url: string; expiresAt: string; token: string | null }
 	| { kind: "expired"; slug: string }
 	| { kind: "failed"; slug: string }
 	// `code` is the API's error code (or null when the response carried none); it

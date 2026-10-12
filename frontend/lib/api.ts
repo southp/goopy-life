@@ -11,6 +11,7 @@ import type {
 	ApiError,
 	CapacityResponse,
 	GoopyResponse,
+	SpawnResponse,
 	VersionResponse,
 } from "./types";
 
@@ -46,7 +47,7 @@ export async function toApiError(res: Response): Promise<ApiRequestError> {
 	}
 }
 
-export async function spawnGoopy(): Promise<{ slug: string }> {
+export async function spawnGoopy(): Promise<SpawnResponse> {
 	const res = await fetch(`${apiBase()}/goopies`, { method: "POST" });
 	if (!res.ok) {
 		throw await toApiError(res);
@@ -66,6 +67,104 @@ export async function getGoopy(
 		throw await toApiError(res);
 	}
 	return res.json();
+}
+
+/**
+ * Destroy the goopy this browser spawned, before it expires (#203).
+ *
+ * `token` is the `despawn_token` from `POST /goopies`; the slug alone proves
+ * nothing, since it is the goopy's public subdomain.
+ *
+ * gl-serv's own 404 counts as success: the goopy is already gone, which is what
+ * was asked for. Any other 404 — a proxy, a wrong API URL — throws, because the
+ * caller forgets the token on success, and the token is the only way to destroy
+ * a goopy that may still be running.
+ */
+export async function destroyGoopy(slug: string, token: string): Promise<void> {
+	const res = await fetch(`${apiBase()}/goopies/${slug}`, {
+		method: "DELETE",
+		headers: { Authorization: `Bearer ${token}` },
+	});
+	if (res.ok) {
+		return;
+	}
+	const err = await toApiError(res);
+	if (isGone(res, err)) {
+		return;
+	}
+	throw err;
+}
+
+/**
+ * Resolve once gl-serv says `slug` is gone, polling every `intervalMs`.
+ *
+ * A destroy is accepted (202) before its teardown runs, and until that ends the
+ * goopy still holds a slot. Waiting here is what keeps "destroy and start over"
+ * from hitting a full server with its own goopy (#203).
+ *
+ * Gone means gl-serv's own 404 — by the same rule as `destroyGoopy` — or a
+ * `Failed` row: the teardown failed, nothing usable is left, and the sweeper
+ * reaps it. Anything else, including errors, is "not yet". Rejects only when
+ * `signal` aborts.
+ */
+export async function waitUntilGone(
+	slug: string,
+	{ intervalMs, signal }: { intervalMs: number; signal?: AbortSignal },
+): Promise<void> {
+	for (;;) {
+		try {
+			const res = await fetch(`${apiBase()}/goopies/${slug}`, { signal });
+			if (res.ok) {
+				const data: GoopyResponse = await res.json();
+				if (data.status === "Failed") {
+					return;
+				}
+			} else if (isGone(res, await toApiError(res))) {
+				return;
+			}
+		} catch (err: unknown) {
+			if (signal?.aborted) {
+				throw err;
+			}
+			// A blip; the teardown is still running either way.
+		}
+		await sleep(intervalMs, signal);
+	}
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+	return new Promise((resolve, reject) => {
+		if (signal?.aborted) {
+			reject(signal.reason);
+			return;
+		}
+		const id = setTimeout(resolve, ms);
+		signal?.addEventListener(
+			"abort",
+			() => {
+				clearTimeout(id);
+				reject(signal.reason);
+			},
+			{ once: true },
+		);
+	});
+}
+
+/**
+ * Whether a failed destroy is a refusal that retrying cannot change: the token
+ * is not this goopy's (`forbidden`), or the goopy is not running (`conflict`).
+ * Everything else — a rate limit, a 5xx, a network blip — may pass.
+ */
+export function isLastWord(err: unknown): boolean {
+	return (
+		err instanceof ApiRequestError &&
+		(err.code === "forbidden" || err.code === "conflict")
+	);
+}
+
+/** Whether a failed response is gl-serv saying the goopy does not exist. */
+function isGone(res: Response, err: ApiRequestError): boolean {
+	return res.status === 404 && err.code === "not_found";
 }
 
 // Live capacity. Cheap read, polled from the browser — unlike GET /config, which is
