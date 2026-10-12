@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { adminUrl } from '@/lib/admin';
-import { ApiRequestError, getGoopy, spawnGoopy } from '@/lib/api';
+import { ApiRequestError, getGoopy, spawnGoopy, waitUntilGone } from '@/lib/api';
 import { LOCALSTORAGE_KEY, POLL_INTERVAL_MS } from '@/lib/constants';
 import { formatExpiry } from '@/lib/expiry';
+import { resumeAt } from '@/lib/resume';
 import { parseStoredGoopy, serializeStoredGoopy, type StoredGoopy } from '@/lib/session';
 import { useCapacity } from '@/lib/useCapacity';
 import type { AppState, GoopyResponse } from '@/lib/types';
@@ -157,19 +158,27 @@ export default function GhostButton() {
 			if (controller.signal.aborted) {
 				return;
 			}
-			if (data.status === "Done") {
-				if (data.is_expired) {
+			switch (resumeAt(data)) {
+				case "done":
+					setState(doneState(data, token));
+					break;
+				case "expired":
 					localStorage.removeItem(LOCALSTORAGE_KEY);
 					setState({ kind: "expired", slug });
-				} else {
-					setState(doneState(data, token));
-				}
-			} else if (data.status !== "Spawning") {
-				localStorage.removeItem(LOCALSTORAGE_KEY);
-				setState({ kind: "failed", slug });
-			} else {
-				setState({ kind: "spawning" });
-				setPolling({ slug, token });
+					break;
+				case "spawning":
+					setState({ kind: "spawning" });
+					setPolling({ slug, token });
+					break;
+				case "leaving":
+					// Kept in localStorage until it is gone, so reloading again
+					// lands here again rather than on a fresh page.
+					setState({ kind: "leaving", slug });
+					break;
+				case "failed":
+					localStorage.removeItem(LOCALSTORAGE_KEY);
+					setState({ kind: "failed", slug });
+					break;
 			}
 		}).catch((err: Error) => {
 			if (controller.signal.aborted) {
@@ -186,6 +195,24 @@ export default function GhostButton() {
 
 		return () => controller.abort();
 	}, [resumingSlug, resumingToken]);
+
+	// Finish what a destroy started before the reload: the goopy holds its slot
+	// until the teardown ends, so offer a new one only once it is gone — as the
+	// destroy button itself does (#203).
+	const leavingSlug = state.kind === "leaving" ? state.slug : null;
+
+	useEffect(() => {
+		if (leavingSlug === null) {
+			return;
+		}
+		const controller = new AbortController();
+		waitUntilGone(leavingSlug, { intervalMs: POLL_INTERVAL_MS, signal: controller.signal })
+			.then(handleReset)
+			.catch(() => {
+				// Aborted: this effect is being torn down, nothing to update.
+			});
+		return () => controller.abort();
+	}, [leavingSlug, handleReset]);
 
 	async function handleGhostNow() {
 		setState({ kind: "spawning" });
@@ -235,6 +262,14 @@ export default function GhostButton() {
 				<>
 					<Spinner />
 					<p className="spawning-message">Spawning…</p>
+				</>
+			);
+
+		case "leaving":
+			return (
+				<>
+					<Spinner />
+					<p className="spawning-message">Destroying…</p>
 				</>
 			);
 
