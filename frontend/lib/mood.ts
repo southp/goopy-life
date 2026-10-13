@@ -28,19 +28,17 @@ export type Mood =
 	// that inflates back to normal. Plays once, then back to calm.
 	| "reborn";
 
-// Two flags live outside AppState, so they are passed alongside it:
-// - `destroying`: the destroy button on the done page has a destroy in flight
-// - `justDestroyed`: a destroy has just finished, and the explosion has not
-//   played out yet
-export function moodFor(state: AppState, destroying = false, justDestroyed = false): Mood {
+// `justDestroyed`: a destroy has just finished, and the explosion has not
+// played out yet. It lives outside AppState, so it is passed alongside.
+export function moodFor(state: AppState, justDestroyed = false): Mood {
 	switch (state.kind) {
 		case "idle":
 			return justDestroyed ? "reborn" : "calm";
 		case "spawning":
 			return "wobbling";
 		case "done":
-			return destroying ? "brewing" : "proud";
-		// A destroy picked up after a reload.
+			return "proud";
+		// A destroy underway, whether just accepted or picked up after a reload.
 		case "leaving":
 			return "brewing";
 		case "failed":

@@ -46,9 +46,6 @@ export default function GhostButton() {
 	// The goopy being polled until it is ready. Carries the token so the done
 	// state can offer the destroy button without re-reading localStorage.
 	const [polling, setPolling] = useState<StoredGoopy | null>(null);
-	// The destroy button has a destroy in flight. Its own state, since only the
-	// goopy above it needs to know.
-	const [destroying, setDestroying] = useState(false);
 	// A destroy just finished: the goopy plays its explosion once, then says
 	// so through onRebornEnd.
 	const [justDestroyed, setJustDestroyed] = useState(false);
@@ -131,7 +128,6 @@ export default function GhostButton() {
 
 	const handleReset = useCallback(() => {
 		setPolling(null);
-		setDestroying(false);
 		setJustDestroyed(false);
 		localStorage.removeItem(LOCALSTORAGE_KEY);
 		setState({ kind: "idle" });
@@ -145,6 +141,15 @@ export default function GhostButton() {
 	}, [handleReset]);
 
 	const handleRebornEnd = useCallback(() => setJustDestroyed(false), []);
+
+	// The server accepted a destroy (#203). Move on to "leaving", which waits
+	// out the teardown — the same wait a reload mid-destroy resumes.
+	const handleAccepted = useCallback(() => {
+		if (state.kind !== "done") {
+			return;
+		}
+		setState({ kind: "leaving", slug: state.slug });
+	}, [state]);
 
 	// The server refused this browser's token for good (#203). Keep the page —
 	// the goopy is still running — but forget the token, so a reload does not
@@ -216,9 +221,9 @@ export default function GhostButton() {
 		return () => controller.abort();
 	}, [resumingSlug, resumingToken]);
 
-	// Finish what a destroy started before the reload: the goopy holds its slot
-	// until the teardown ends, so offer a new one only once it is gone — as the
-	// destroy button itself does (#203).
+	// Finish a destroy, whether just accepted or picked up after a reload: the
+	// goopy holds its slot until the teardown ends, so offer a new one only once
+	// it is gone, or "start over" can hit a full server (#203).
 	const leavingSlug = state.kind === "leaving" ? state.slug : null;
 
 	useEffect(() => {
@@ -316,9 +321,8 @@ export default function GhostButton() {
 							<DestroyButton
 								slug={state.slug}
 								token={state.token}
-								onDestroyed={handleDestroyed}
+								onAccepted={handleAccepted}
 								onTokenRejected={handleTokenRejected}
-							onDestroyingChange={setDestroying}
 							/>
 						)}
 					</div>
@@ -360,7 +364,7 @@ export default function GhostButton() {
 	return (
 		<>
 			<Goopy
-				mood={moodFor(state, destroying, justDestroyed)}
+				mood={moodFor(state, justDestroyed)}
 				onRebornEnd={handleRebornEnd}
 			/>
 			<div className="cta-area">{renderCta()}</div>

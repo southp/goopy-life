@@ -27,12 +27,9 @@ test("a ready goopy is proud", () => {
 	assert.equal(moodFor(done), "proud");
 });
 
+// Covers a destroy just accepted and one resumed after a reload alike: both
+// are "leaving".
 test("a goopy being destroyed brews", () => {
-	assert.equal(moodFor(done, true), "brewing");
-});
-
-// Reloaded mid-"Destroying…": the same teardown, so the same look.
-test("a destroy resumed after a reload brews too", () => {
 	assert.equal(moodFor({ kind: "leaving", slug: "a-b-c" }), "brewing");
 });
 
@@ -52,11 +49,11 @@ test("an expected refusal is only sad", () => {
 });
 
 test("a goopy that was just destroyed is reborn", () => {
-	assert.equal(moodFor({ kind: "idle" }, false, true), "reborn");
+	assert.equal(moodFor({ kind: "idle" }, true), "reborn");
 });
 
 // The flag only means something on the way back to idle: anything else the
 // visitor does next takes over at once.
 test("a new spawn interrupts the rebirth", () => {
-	assert.equal(moodFor({ kind: "spawning" }, false, true), "wobbling");
+	assert.equal(moodFor({ kind: "spawning" }, true), "wobbling");
 });
