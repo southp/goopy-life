@@ -5,6 +5,7 @@ import { adminUrl } from '@/lib/admin';
 import { ApiRequestError, getGoopy, spawnGoopy, waitUntilGone } from '@/lib/api';
 import { LOCALSTORAGE_KEY, POLL_INTERVAL_MS } from '@/lib/constants';
 import { formatExpiry } from '@/lib/expiry';
+import { moodFor } from '@/lib/mood';
 import { resumeAt } from '@/lib/resume';
 import { parseStoredGoopy, serializeStoredGoopy, type StoredGoopy } from '@/lib/session';
 import { useCapacity } from '@/lib/useCapacity';
@@ -339,7 +340,7 @@ export default function GhostButton() {
 
 	return (
 		<>
-			<Goopy />
+			<Goopy mood={moodFor(state)} />
 			<div className="cta-area">{renderCta()}</div>
 		</>
 	);

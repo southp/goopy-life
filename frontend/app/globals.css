@@ -80,6 +80,87 @@ body {
 	text-shadow: 0 0 20px rgba(255, 255, 255, 0.8);
 }
 
+/*
+ * Spawning: a pudding on a plate. Both layers pivot on the bottom edge, so the
+ * goopy stays put at its base and everything above it does the moving. Three
+ * loops on periods that never line up, so the wobble does not visibly repeat:
+ *   - the body bounces, squashing as it lands and stretching as it leaves
+ *   - the body shakes side to side
+ *   - the glyph circles its "waist" — a lean that sweeps round, top over base
+ * The bounce and shake run on one element by animating the separate translate,
+ * scale and rotate properties rather than one shared transform.
+ */
+.goopy[data-mood="wobbling"] .goopy-body {
+	transform-origin: 50% 100%;
+	animation:
+		goopy-bounce 0.9s ease-in-out infinite,
+		goopy-shake 1.3s ease-in-out infinite;
+}
+
+.goopy[data-mood="wobbling"] .goopy-glyph {
+	transform-origin: 50% 100%;
+	animation: goopy-hula 1.1s linear infinite;
+}
+
+@keyframes goopy-bounce {
+	0%,
+	100% {
+		translate: 0 0;
+		scale: 1.12 0.88;
+	}
+	20% {
+		translate: 0 -0.25rem;
+		scale: 0.92 1.1;
+	}
+	50% {
+		translate: 0 -1.25rem;
+		scale: 1 1;
+	}
+	80% {
+		translate: 0 -0.25rem;
+		scale: 0.95 1.06;
+	}
+}
+
+@keyframes goopy-shake {
+	0%,
+	100% {
+		rotate: -5deg;
+	}
+	50% {
+		rotate: 5deg;
+	}
+}
+
+@keyframes goopy-hula {
+	0%,
+	100% {
+		transform: translateX(0.4rem) skewX(0);
+	}
+	25% {
+		transform: translateX(0) skewX(-9deg);
+	}
+	50% {
+		transform: translateX(-0.4rem) skewX(0);
+	}
+	75% {
+		transform: translateX(0) skewX(9deg);
+	}
+}
+
+/*
+ * Without motion, the moods keep only what they show standing still: a colour,
+ * a decoration. The spinner and the copy under the goopy still carry the state.
+ * Kept last in this section: it wins over the mood rules above it by order, at
+ * the same specificity.
+ */
+@media (prefers-reduced-motion: reduce) {
+	.goopy[data-mood] .goopy-body,
+	.goopy[data-mood] .goopy-glyph {
+		animation: none;
+	}
+}
+
 .cta-area {
 	min-height: 8rem;
 	display: flex;
