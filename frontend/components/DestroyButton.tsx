@@ -1,15 +1,17 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
-import { destroyGoopy, isLastWord, waitUntilGone } from '@/lib/api';
-import { POLL_INTERVAL_MS } from '@/lib/constants';
+import { useState } from 'react';
+import { destroyGoopy, isLastWord } from '@/lib/api';
 
 interface DestroyButtonProps {
 	slug: string;
 	/** The despawn token this browser was issued when it spawned `slug`. */
 	token: string;
-	/** Called once the goopy is gone (or was already). */
-	onDestroyed: () => void;
+	/**
+	 * Called once the server has accepted the destroy (or the goopy was already
+	 * gone). The teardown is still running: waiting for it is the caller's job.
+	 */
+	onAccepted: () => void;
 	/** Called when the server refuses this token for good, so it can be forgotten. */
 	onTokenRejected: () => void;
 }
@@ -24,15 +26,11 @@ type Phase = "offered" | "confirming" | "destroying" | "refused";
 export default function DestroyButton({
 	slug,
 	token,
-	onDestroyed,
+	onAccepted,
 	onTokenRejected,
 }: DestroyButtonProps) {
 	const [phase, setPhase] = useState<Phase>("offered");
 	const [failed, setFailed] = useState(false);
-	// Cancels the wait for the teardown if the page goes away first.
-	const waiting = useRef<AbortController | null>(null);
-
-	useEffect(() => () => waiting.current?.abort(), []);
 
 	// The error line answers the last attempt. Once the visitor moves on —
 	// to confirm again, or to back out — it no longer describes anything.
@@ -60,17 +58,10 @@ export default function DestroyButton({
 			return;
 		}
 
-		// Accepted, but the goopy holds its slot until the teardown ends. Offer
-		// a new one only after that, or "start over" can hit a full server.
-		const controller = new AbortController();
-		waiting.current = controller;
-		try {
-			await waitUntilGone(slug, { intervalMs: POLL_INTERVAL_MS, signal: controller.signal });
-		} catch {
-			// Aborted: the page is gone, and there is nobody left to tell.
-			return;
-		}
-		onDestroyed();
+		// Accepted, but the goopy holds its slot until the teardown ends. The
+		// page hands it to its "leaving" state, which waits for that — the same
+		// wait a reload mid-destroy resumes.
+		onAccepted();
 	}
 
 	switch (phase) {

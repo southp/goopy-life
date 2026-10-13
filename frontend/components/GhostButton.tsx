@@ -5,6 +5,7 @@ import { adminUrl } from '@/lib/admin';
 import { ApiRequestError, getGoopy, spawnGoopy, waitUntilGone } from '@/lib/api';
 import { LOCALSTORAGE_KEY, POLL_INTERVAL_MS } from '@/lib/constants';
 import { formatExpiry } from '@/lib/expiry';
+import { moodFor } from '@/lib/mood';
 import { resumeAt } from '@/lib/resume';
 import { parseStoredGoopy, serializeStoredGoopy, type StoredGoopy } from '@/lib/session';
 import { useCapacity } from '@/lib/useCapacity';
@@ -12,6 +13,7 @@ import type { AppState, GoopyResponse } from '@/lib/types';
 import CapacityIndicator from '@/components/CapacityIndicator';
 import DestroyButton from '@/components/DestroyButton';
 import ErrorMessage from '@/components/ErrorMessage';
+import Goopy from '@/components/Goopy';
 import IssueLink from '@/components/IssueLink';
 import Spinner from '@/components/Spinner';
 
@@ -35,14 +37,19 @@ function doneState(data: GoopyResponse, token: string | null): AppState {
 	};
 }
 
-// The sole interactive element on the page: the "Ghost now!" CTA and its state
-// machine (spawn → poll → done/failed, plus resume-from-localStorage and the
-// expired-redirect handling). Everything else on the page is server-rendered.
+// The sole interactive element on the page: the hero goopy, the "Ghost now!"
+// CTA under it, and their state machine (spawn → poll → done/failed, plus
+// resume-from-localStorage and the expired-redirect handling). Everything else
+// on the page is server-rendered.
 export default function GhostButton() {
 	const [state, setState] = useState<AppState>({ kind: "idle" });
 	// The goopy being polled until it is ready. Carries the token so the done
 	// state can offer the destroy button without re-reading localStorage.
 	const [polling, setPolling] = useState<StoredGoopy | null>(null);
+	// A destroy just finished, so the goopy explodes and reinflates. Cleared by
+	// whatever the visitor does next; until then the explosion's last frame,
+	// which looks calm, simply holds.
+	const [justDestroyed, setJustDestroyed] = useState(false);
 
 	// Only poll capacity while the button is actually offered. In every other
 	// state the number is not on screen, and a spawning or finished visitor has
@@ -122,9 +129,26 @@ export default function GhostButton() {
 
 	const handleReset = useCallback(() => {
 		setPolling(null);
+		setJustDestroyed(false);
 		localStorage.removeItem(LOCALSTORAGE_KEY);
 		setState({ kind: "idle" });
 	}, []);
+
+	// A reset that the goopy celebrates: kept apart from handleReset, which
+	// "Try again" also uses.
+	const handleDestroyed = useCallback(() => {
+		handleReset();
+		setJustDestroyed(true);
+	}, [handleReset]);
+
+	// The server accepted a destroy (#203). Move on to "leaving", which waits
+	// out the teardown — the same wait a reload mid-destroy resumes.
+	const handleAccepted = useCallback(() => {
+		if (state.kind !== "done") {
+			return;
+		}
+		setState({ kind: "leaving", slug: state.slug });
+	}, [state]);
 
 	// The server refused this browser's token for good (#203). Keep the page —
 	// the goopy is still running — but forget the token, so a reload does not
@@ -196,9 +220,9 @@ export default function GhostButton() {
 		return () => controller.abort();
 	}, [resumingSlug, resumingToken]);
 
-	// Finish what a destroy started before the reload: the goopy holds its slot
-	// until the teardown ends, so offer a new one only once it is gone — as the
-	// destroy button itself does (#203).
+	// Finish a destroy, whether just accepted or picked up after a reload: the
+	// goopy holds its slot until the teardown ends, so offer a new one only once
+	// it is gone, or "start over" can hit a full server (#203).
 	const leavingSlug = state.kind === "leaving" ? state.slug : null;
 
 	useEffect(() => {
@@ -207,14 +231,15 @@ export default function GhostButton() {
 		}
 		const controller = new AbortController();
 		waitUntilGone(leavingSlug, { intervalMs: POLL_INTERVAL_MS, signal: controller.signal })
-			.then(handleReset)
+			.then(handleDestroyed)
 			.catch(() => {
 				// Aborted: this effect is being torn down, nothing to update.
 			});
 		return () => controller.abort();
-	}, [leavingSlug, handleReset]);
+	}, [leavingSlug, handleDestroyed]);
 
 	async function handleGhostNow() {
+		setJustDestroyed(false);
 		setState({ kind: "spawning" });
 
 		try {
@@ -231,103 +256,114 @@ export default function GhostButton() {
 		}
 	}
 
-	switch (state.kind) {
-		case "idle":
-			// The wrapper is not cosmetic: it is the positioning context the
-			// capacity readout hangs off, which is what keeps the button still
-			// when /capacity finally answers.
-			return (
-				<div className="cta-idle">
-					<button
-						className={`go-button ${isFull ? "disabled" : "idle"}`}
-						onClick={handleGhostNow}
-						disabled={isFull}
-					>
-						Ghost now!
-					</button>
-					<CapacityIndicator capacity={capacity} />
-				</div>
-			);
+	// The goopy and the CTA under it read the same state, so they live in one
+	// island; the switch below only picks what goes under the goopy.
+	function renderCta() {
+		switch (state.kind) {
+			case "idle":
+				// The wrapper is not cosmetic: it is the positioning context the
+				// capacity readout hangs off, which is what keeps the button still
+				// when /capacity finally answers.
+				return (
+					<div className="cta-idle">
+						<button
+							className={`go-button ${isFull ? "disabled" : "idle"}`}
+							onClick={handleGhostNow}
+							disabled={isFull}
+						>
+							Ghost now!
+						</button>
+						<CapacityIndicator capacity={capacity} />
+					</div>
+				);
 
-		case "resuming":
-			return (
-				<>
-					<Spinner />
-					<p className="spawning-message">Checking…</p>
-				</>
-			);
+			case "resuming":
+				return (
+					<>
+						<Spinner />
+						<p className="spawning-message">Checking…</p>
+					</>
+				);
 
-		case "spawning":
-			return (
-				<>
-					<Spinner />
-					<p className="spawning-message">Spawning…</p>
-				</>
-			);
+			case "spawning":
+				return (
+					<>
+						<Spinner />
+						<p className="spawning-message">Spawning…</p>
+					</>
+				);
 
-		case "leaving":
-			return (
-				<>
-					<Spinner />
-					<p className="spawning-message">Destroying…</p>
-				</>
-			);
+			case "leaving":
+				return (
+					<>
+						<Spinner />
+						<p className="spawning-message">Destroying…</p>
+					</>
+				);
 
-		case "done": {
-			const availableUntil = formatExpiry(state.expiresAt, new Date());
-			// Link the admin dashboard rather than the site: claiming the admin
-			// account is the first thing anyone has to do with a fresh Ghost.
-			const admin = adminUrl(state.url);
-			return (
-				<div className="go-button-done-message">
-					<p>Your Ghost is ready at:</p>
-					<a className="go-button-url" href={admin}>
-						{admin}
-					</a>
-					{availableUntil !== null && (
-						<p className="expiry-message">Available until {availableUntil}</p>
-					)}
-					{/* Only with a token: without one, the server would refuse. */}
-					{state.token !== null && (
-						<DestroyButton
-							slug={state.slug}
-							token={state.token}
-							onDestroyed={handleReset}
-							onTokenRejected={handleTokenRejected}
-						/>
-					)}
-				</div>
-			);
+			case "done": {
+				const availableUntil = formatExpiry(state.expiresAt, new Date());
+				// Link the admin dashboard rather than the site: claiming the admin
+				// account is the first thing anyone has to do with a fresh Ghost.
+				const admin = adminUrl(state.url);
+				return (
+					<div className="go-button-done-message">
+						<p>Your Ghost is ready at:</p>
+						<a className="go-button-url" href={admin}>
+							{admin}
+						</a>
+						{availableUntil !== null && (
+							<p className="expiry-message">Available until {availableUntil}</p>
+						)}
+						{/* Only with a token: without one, the server would refuse. */}
+						{state.token !== null && (
+							<DestroyButton
+								slug={state.slug}
+								token={state.token}
+								onAccepted={handleAccepted}
+								onTokenRejected={handleTokenRejected}
+							/>
+						)}
+					</div>
+				);
+			}
+
+			case "expired":
+				return (
+					<div className="go-button-done-message">
+						<p className="state-message">This goopy has expired.</p>
+						<button className="go-button idle" onClick={handleReset}>
+							Spawn a new one
+						</button>
+					</div>
+				);
+
+			case "failed":
+				return (
+					<div className="go-button-done-message">
+						<p className="state-message">Goops! Spawning failed.</p>
+						<button className="go-button idle" onClick={handleReset}>
+							Try again!
+						</button>
+						<IssueLink prompt="Still stuck?" />
+					</div>
+				);
+
+			case "error":
+				return (
+					<ErrorMessage
+						message={state.message}
+						code={state.code}
+						onReset={handleReset}
+					/>
+				);
 		}
-
-		case "expired":
-			return (
-				<div className="go-button-done-message">
-					<p className="state-message">This goopy has expired.</p>
-					<button className="go-button idle" onClick={handleReset}>
-						Spawn a new one
-					</button>
-				</div>
-			);
-
-		case "failed":
-			return (
-				<div className="go-button-done-message">
-					<p className="state-message">Goops! Spawning failed.</p>
-					<button className="go-button idle" onClick={handleReset}>
-						Try again!
-					</button>
-					<IssueLink prompt="Still stuck?" />
-				</div>
-			);
-
-		case "error":
-			return (
-				<ErrorMessage
-					message={state.message}
-					code={state.code}
-					onReset={handleReset}
-				/>
-			);
 	}
+
+	return (
+		<>
+			<Goopy mood={moodFor(state, justDestroyed)} />
+			<div className="cta-area">{renderCta()}</div>
+		</>
+	);
 }

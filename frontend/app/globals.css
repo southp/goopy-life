@@ -56,12 +56,606 @@ body {
 	padding-bottom: 2rem;
 }
 
-.hero-emoji {
-	font-size: 8rem;
+/* ── Hero goopy ─────────────────────────────────────────────────────────── */
+
+/*
+ * Motion goes on .goopy-body, colour on .goopy-glyph only: a filter applies to
+ * an element's children too, so anything hung off the glyph would be tinted
+ * along with it.
+ */
+/*
+ * The two colours the goopy is handed between: the explosion starts from the
+ * brewing red and lands on the calm blue, so its keyframes read these rather
+ * than copies that could drift. app/icon.svg repeats the calm one by hand: it
+ * is a separate document, out of reach of these.
+ */
+.goopy {
+	--goopy-filter-calm: hue-rotate(180deg) brightness(1.5);
+	--goopy-filter-brewing: hue-rotate(330deg) brightness(1.1) saturate(2.5);
+	position: relative;
 	line-height: 1;
-	filter: hue-rotate(180deg) brightness(1.5);
+}
+
+.goopy-body {
+	position: relative;
+}
+
+.goopy-glyph {
+	display: block;
+	font-size: 8rem;
+	filter: var(--goopy-filter-calm);
 	opacity: 0.85;
 	text-shadow: 0 0 20px rgba(255, 255, 255, 0.8);
+	transition:
+		filter 1.2s ease,
+		text-shadow 1.2s ease;
+}
+
+/*
+ * Spawning: a pudding on a plate. Both layers pivot on the bottom edge, so the
+ * goopy stays put at its base and everything above it does the moving. Three
+ * loops on periods that never line up, so the wobble does not visibly repeat:
+ *   - the body bounces, squashing as it lands and stretching as it leaves
+ *   - the body shakes side to side
+ *   - the glyph circles its "waist" — a lean that sweeps round, top over base
+ * The bounce and shake run on one element by animating the separate translate,
+ * scale and rotate properties rather than one shared transform.
+ */
+.goopy[data-mood="wobbling"] .goopy-body {
+	transform-origin: 50% 100%;
+	animation:
+		goopy-bounce 0.9s ease-in-out infinite,
+		goopy-shake 1.3s ease-in-out infinite;
+}
+
+.goopy[data-mood="wobbling"] .goopy-glyph {
+	transform-origin: 50% 100%;
+	animation: goopy-hula 1.1s linear infinite;
+}
+
+@keyframes goopy-bounce {
+	0%,
+	100% {
+		translate: 0 0;
+		scale: 1.12 0.88;
+	}
+	20% {
+		translate: 0 -0.25rem;
+		scale: 0.92 1.1;
+	}
+	50% {
+		translate: 0 -1.25rem;
+		scale: 1 1;
+	}
+	80% {
+		translate: 0 -0.25rem;
+		scale: 0.95 1.06;
+	}
+}
+
+@keyframes goopy-shake {
+	0%,
+	100% {
+		rotate: -5deg;
+	}
+	50% {
+		rotate: 5deg;
+	}
+}
+
+@keyframes goopy-hula {
+	0%,
+	100% {
+		transform: translateX(0.4rem) skewX(0);
+	}
+	25% {
+		transform: translateX(0) skewX(-9deg);
+	}
+	50% {
+		transform: translateX(-0.4rem) skewX(0);
+	}
+	75% {
+		transform: translateX(0) skewX(9deg);
+	}
+}
+
+/*
+ * Ready: the goopy shows off. A brighter, wider glow; a rainbow sheen sweeping
+ * across it; sparkles twinkling around it.
+ *
+ * The sheen is a rainbow band laid over the whole body box and blended with
+ * `overlay`. Overlay cannot lighten black, so the band only shows where it
+ * crosses the goopy — a glyph-shaped shine without having to know the glyph's
+ * shape, which differs per emoji font. That relies on nothing between the band
+ * and the page background forming a stacking context, which is why this mood
+ * moves nothing on .goopy-body.
+ */
+.goopy[data-mood="proud"] .goopy-glyph {
+	opacity: 1;
+	text-shadow:
+		0 0 24px rgba(255, 255, 255, 0.95),
+		0 0 56px rgba(140, 200, 255, 0.75);
+}
+
+.goopy-shine {
+	position: absolute;
+	inset: 0;
+	overflow: hidden;
+	pointer-events: none;
+	mix-blend-mode: overlay;
+	/*
+	 * Overlay does lighten the glow, which is bright, so feather the band out
+	 * towards the edges of the box: otherwise its corners show in the halo.
+	 */
+	mask-image: radial-gradient(closest-side, #000 60%, transparent);
+}
+
+/*
+ * The band itself, on a strip four times the box's width that slides across
+ * it. Moving it with translate rather than background-position keeps the
+ * sweep on the compositor, instead of repainting every frame for as long as
+ * the page is open. The overflow clip above keeps the strip from widening the
+ * page.
+ */
+.goopy-shine::before {
+	content: "";
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	left: 0;
+	width: 400%;
+	background: linear-gradient(
+		115deg,
+		transparent 40%,
+		#ff5f6d 43%,
+		#ffc371 46%,
+		#fff275 49%,
+		#6dff9c 52%,
+		#5ee7ff 55%,
+		#a78bfa 58%,
+		transparent 61%
+	);
+	animation: goopy-shine 2.8s ease-in-out infinite;
+}
+
+/*
+ * One sweep, left to right, then a rest before the next. The band sits past
+ * either edge of the box at both ends, so the rest shows nothing.
+ */
+@keyframes goopy-shine {
+	0% {
+		translate: -75% 0;
+	}
+	60%,
+	100% {
+		translate: 0 0;
+	}
+}
+
+/* Spans the body box, so each sparkle is placed relative to the goopy. */
+.goopy-sparkles {
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+}
+
+/* A four-pointed star, cut from a square so it does not depend on any font. */
+.goopy-sparkle {
+	position: absolute;
+	width: 1.1rem;
+	height: 1.1rem;
+	pointer-events: none;
+	background-color: #fff;
+	clip-path: polygon(50% 0, 62% 38%, 100% 50%, 62% 62%, 50% 100%, 38% 62%, 0 50%, 38% 38%);
+	animation: goopy-twinkle 1.6s ease-in-out infinite;
+}
+
+.goopy-sparkle:nth-child(1) {
+	top: 4%;
+	left: -4%;
+	background-color: #fde68a;
+}
+
+.goopy-sparkle:nth-child(2) {
+	top: -8%;
+	left: 62%;
+	width: 0.8rem;
+	height: 0.8rem;
+	animation-delay: -0.4s;
+}
+
+.goopy-sparkle:nth-child(3) {
+	top: 14%;
+	right: -10%;
+	width: 1.4rem;
+	height: 1.4rem;
+	background-color: #a5f3fc;
+	animation-delay: -0.9s;
+}
+
+.goopy-sparkle:nth-child(4) {
+	top: 66%;
+	right: -14%;
+	width: 0.9rem;
+	height: 0.9rem;
+	background-color: #f9a8d4;
+	animation-delay: -1.2s;
+}
+
+.goopy-sparkle:nth-child(5) {
+	top: 60%;
+	left: -14%;
+	animation-delay: -0.6s;
+}
+
+@keyframes goopy-twinkle {
+	0%,
+	100% {
+		scale: 0.2;
+		rotate: 0deg;
+		opacity: 0;
+	}
+	50% {
+		scale: 1;
+		rotate: 90deg;
+		opacity: 1;
+	}
+}
+
+/*
+ * Error: the goopy droops, dims and sniffles, with a tear rolling down from
+ * each eye. A real fault ("hurt") also gets a bandaid on its head; a refusal by
+ * design ("sad") does not, since nothing is broken.
+ *
+ * The tears start at percentages of the glyph box, so they land near the eyes
+ * rather than exactly on them: every emoji font draws its own goopy.
+ */
+.goopy[data-mood="hurt"] .goopy-body,
+.goopy[data-mood="sad"] .goopy-body {
+	transform-origin: 50% 100%;
+	rotate: -4deg;
+	animation: goopy-sniffle 2.4s ease-in-out infinite;
+}
+
+.goopy[data-mood="hurt"] .goopy-glyph,
+.goopy[data-mood="sad"] .goopy-glyph {
+	filter: hue-rotate(180deg) brightness(1.25) saturate(0.8);
+	text-shadow: 0 0 12px rgba(255, 255, 255, 0.45);
+}
+
+@keyframes goopy-sniffle {
+	0%,
+	70%,
+	100% {
+		scale: 1 1;
+	}
+	80% {
+		scale: 1.03 0.96;
+	}
+	90% {
+		scale: 0.99 1.02;
+	}
+}
+
+/* A drop with its point up: a square with one sharp corner, turned 45°. */
+.goopy-tear {
+	position: absolute;
+	top: 57%;
+	left: 30%;
+	width: 0.75rem;
+	height: 0.75rem;
+	pointer-events: none;
+	border-radius: 0 50% 50% 50%;
+	background: radial-gradient(circle at 60% 60%, #e0f2fe, #7dd3fc 45%, #38bdf8);
+	transform: rotate(45deg);
+	animation: goopy-tear 1.8s ease-in infinite;
+}
+
+.goopy-tear + .goopy-tear {
+	left: 64%;
+	animation-delay: -0.9s;
+}
+
+@keyframes goopy-tear {
+	0% {
+		translate: 0 0;
+		scale: 0.3;
+		opacity: 0;
+	}
+	20% {
+		translate: 0 0;
+		scale: 1;
+		opacity: 1;
+	}
+	75% {
+		opacity: 1;
+	}
+	100% {
+		translate: 0 2.5rem;
+		scale: 0.8;
+		opacity: 0;
+	}
+}
+
+.goopy-bandaid {
+	position: absolute;
+	top: 14%;
+	right: 16%;
+	width: 2.4rem;
+	height: 2.4rem;
+	pointer-events: none;
+	rotate: 12deg;
+}
+
+/*
+ * Being destroyed: the goopy heats up — it flushes red over the glyph's colour
+ * transition, rumbles, and swells with each puff of steam it pumps out of its
+ * top, as if something were brewing inside.
+ *
+ * The red is reached by turning the hue further (180° → 330°), not back, so
+ * the flush passes through purple and magenta rather than green and yellow.
+ */
+.goopy[data-mood="brewing"] .goopy-body {
+	transform-origin: 50% 100%;
+	animation:
+		goopy-rumble 0.16s linear infinite,
+		goopy-pump 1.5s ease-in-out infinite;
+}
+
+.goopy[data-mood="brewing"] .goopy-glyph {
+	opacity: 1;
+	filter: var(--goopy-filter-brewing);
+	/* Orange going in: the filter turns the shadow too, and lands it on red. */
+	text-shadow: 0 0 28px rgba(255, 150, 60, 0.9);
+}
+
+@keyframes goopy-rumble {
+	0%,
+	100% {
+		translate: 0 0;
+	}
+	25% {
+		translate: -1.5px 0.5px;
+	}
+	75% {
+		translate: 1.5px -0.5px;
+	}
+}
+
+/* Swells as the pressure builds, and gives as each puff escapes. */
+@keyframes goopy-pump {
+	0%,
+	100% {
+		scale: 1 1;
+	}
+	70% {
+		scale: 1.05 1.07;
+	}
+	85% {
+		scale: 0.98 0.96;
+	}
+}
+
+/* A strip along the top of the goopy that the puffs rise out of. */
+.goopy-steam {
+	position: absolute;
+	top: 0;
+	left: 25%;
+	right: 25%;
+	height: 1px;
+	pointer-events: none;
+}
+
+.goopy-puff {
+	position: absolute;
+	top: 0;
+	left: 50%;
+	width: 2.5rem;
+	height: 2.5rem;
+	margin-left: -1.25rem;
+	border-radius: 50%;
+	background: radial-gradient(circle, #fff 15%, rgba(255, 255, 255, 0) 70%);
+	opacity: 0.5;
+	animation: goopy-puff 1.5s ease-out infinite;
+}
+
+.goopy-puff:nth-child(1) {
+	left: 15%;
+	--drift: -1rem;
+	animation-delay: -0.5s;
+}
+
+.goopy-puff:nth-child(3) {
+	left: 85%;
+	--drift: 1rem;
+	animation-delay: -1s;
+}
+
+@keyframes goopy-puff {
+	0% {
+		translate: 0 0.75rem;
+		scale: 0.3;
+		opacity: 0;
+	}
+	20% {
+		opacity: 1;
+	}
+	100% {
+		translate: var(--drift, 0) -3.5rem;
+		scale: 1.8;
+		opacity: 0;
+	}
+}
+
+/*
+ * Destroyed: the goopy explodes and comes back small. One run of 1.6s, whose
+ * last frame is the calm look, so the mood can hold there until the visitor
+ * moves on (the spent goo and ring stay at zero opacity):
+ *   0–22%   it squashes, swells and pops, still red from brewing
+ *   22–45%  goo flies out and a shock ring spreads; nothing is left
+ *   45–62%  a tiny goopy appears and wiggles
+ *   62–100% it inflates back to full size, overshooting a little
+ */
+.goopy[data-mood="reborn"] .goopy-body {
+	transform-origin: 50% 60%;
+	animation: goopy-reborn 1.6s both;
+}
+
+.goopy[data-mood="reborn"] .goopy-glyph {
+	animation: goopy-reborn-glyph 1.6s both;
+	/*
+	 * Entering this mood changes the glyph's base filter (brewing → calm), which
+	 * would start the 1.2s colour transition too. Transitions outrank
+	 * animations in the cascade, and WebKit lets this one win: the flash is
+	 * lost to a plain red-to-blue fade. The keyframes already make that trip,
+	 * so only the glow keeps its transition.
+	 */
+	transition-property: text-shadow;
+}
+
+@keyframes goopy-reborn {
+	0% {
+		scale: 1;
+		opacity: 1;
+	}
+	10% {
+		scale: 1.15 0.85;
+	}
+	20% {
+		scale: 1.45;
+		opacity: 1;
+	}
+	23% {
+		scale: 1.7;
+		opacity: 0;
+	}
+	44% {
+		scale: 0.12;
+		opacity: 0;
+	}
+	48% {
+		scale: 0.2;
+		opacity: 1;
+	}
+	54% {
+		scale: 0.24 0.17;
+	}
+	58% {
+		scale: 0.18 0.23;
+	}
+	62% {
+		scale: 0.2;
+		animation-timing-function: cubic-bezier(0.34, 1.56, 0.64, 1);
+	}
+	100% {
+		scale: 1;
+		opacity: 1;
+	}
+}
+
+/*
+ * Holds the brewing red up to the pop, flashes white-hot as it goes, and is
+ * back to the calm colour by the time the tiny one shows.
+ */
+@keyframes goopy-reborn-glyph {
+	0% {
+		filter: var(--goopy-filter-brewing);
+	}
+	20% {
+		filter: hue-rotate(330deg) brightness(2.5) saturate(1.5);
+	}
+	40%,
+	100% {
+		filter: var(--goopy-filter-calm);
+	}
+}
+
+.goopy-burst {
+	position: absolute;
+	top: 50%;
+	left: 50%;
+	width: 8rem;
+	height: 8rem;
+	margin: -4rem 0 0 -4rem;
+	border: 3px solid rgba(255, 200, 180, 0.9);
+	border-radius: 50%;
+	pointer-events: none;
+	animation: goopy-burst 1.6s ease-out both;
+}
+
+@keyframes goopy-burst {
+	0%,
+	20% {
+		scale: 0.3;
+		opacity: 0;
+	}
+	23% {
+		opacity: 1;
+	}
+	45%,
+	100% {
+		scale: 1.8;
+		opacity: 0;
+	}
+}
+
+/* A point at the goopy's middle that the drops fly out from. */
+.goopy-drops {
+	position: absolute;
+	top: 55%;
+	left: 50%;
+	pointer-events: none;
+}
+
+.goopy-drop {
+	position: absolute;
+	width: 0.8rem;
+	height: 0.8rem;
+	margin: -0.4rem 0 0 -0.4rem;
+	border-radius: 50%;
+	background: radial-gradient(circle at 35% 35%, #ffb4a8, #ff4d3d 60%, #c81e1e);
+	animation: goopy-drop 1.6s cubic-bezier(0.2, 0.7, 0.4, 1) both;
+}
+
+@keyframes goopy-drop {
+	0%,
+	21% {
+		transform: rotate(var(--angle)) translateY(0) scale(0.5);
+		opacity: 0;
+	}
+	22% {
+		opacity: 1;
+	}
+	40% {
+		opacity: 1;
+	}
+	55%,
+	100% {
+		transform: rotate(var(--angle)) translateY(calc(-1 * var(--reach))) scale(1);
+		opacity: 0;
+	}
+}
+
+/*
+ * Without motion, the moods keep only what they show standing still: a colour,
+ * a decoration. The spinner and the copy under the goopy still carry the state.
+ * Kept last in this section: it wins over the mood rules above it by order, at
+ * the same specificity.
+ */
+@media (prefers-reduced-motion: reduce) {
+	.goopy[data-mood] .goopy-body,
+	.goopy[data-mood] .goopy-glyph,
+	.goopy-sparkle,
+	.goopy-tear,
+	.goopy-puff {
+		animation: none;
+	}
+
+	.goopy-shine,
+	.goopy-burst,
+	.goopy-drops {
+		display: none;
+	}
 }
 
 .cta-area {
