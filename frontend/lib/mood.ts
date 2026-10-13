@@ -35,6 +35,12 @@ export function moodFor(state: AppState, justDestroyed = false): Mood {
 	switch (state.kind) {
 		case "idle":
 			return justDestroyed ? "reborn" : "calm";
+		// A quick "Checking…", not a spawn: wobbling would promise one.
+		case "resuming":
+			return "calm";
+		// The plan working as intended, not a fault.
+		case "expired":
+			return "calm";
 		case "spawning":
 			return "wobbling";
 		case "done":
@@ -46,7 +52,10 @@ export function moodFor(state: AppState, justDestroyed = false): Mood {
 			return "hurt";
 		case "error":
 			return isExpectedError(state.code) ? "sad" : "hurt";
-		default:
-			return "calm";
+		default: {
+			// A new AppState kind stops compiling here until it is given a mood.
+			const unhandled: never = state;
+			return unhandled;
+		}
 	}
 }
