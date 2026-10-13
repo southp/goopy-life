@@ -484,6 +484,14 @@ body {
 
 .goopy[data-mood="reborn"] .goopy-glyph {
 	animation: goopy-reborn-glyph 1.6s both;
+	/*
+	 * Entering this mood changes the glyph's base filter (brewing → calm), which
+	 * would start the 1.2s colour transition too. Transitions outrank
+	 * animations in the cascade, and WebKit lets this one win: the flash is
+	 * lost to a plain red-to-blue fade. The keyframes already make that trip,
+	 * so only the glow keeps its transition.
+	 */
+	transition-property: text-shadow;
 }
 
 @keyframes goopy-reborn {
