@@ -1,5 +1,8 @@
 import type { Mood } from "@/lib/mood";
 
+// Placed and timed per index in globals.css.
+const SPARKLES = [0, 1, 2, 3, 4];
+
 interface GoopyProps {
 	mood: Mood;
 }
@@ -20,6 +23,16 @@ export default function Goopy({ mood }: GoopyProps) {
 		<div className="goopy" data-mood={mood} aria-hidden="true">
 			<div className="goopy-body">
 				<span className="goopy-glyph">💩</span>
+				{mood === "proud" && (
+					<>
+						<span className="goopy-shine" />
+						<span className="goopy-sparkles">
+							{SPARKLES.map((i) => (
+								<span key={i} className="goopy-sparkle" />
+							))}
+						</span>
+					</>
+				)}
 			</div>
 		</div>
 	);

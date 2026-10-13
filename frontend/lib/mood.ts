@@ -13,12 +13,16 @@ export type Mood =
 	// Nothing in flight: today's look.
 	| "calm"
 	// A goopy is booting: it wobbles like a pudding.
-	| "wobbling";
+	| "wobbling"
+	// The goopy is ready: rainbow shine, sparkles, a stronger glow.
+	| "proud";
 
 export function moodFor(state: AppState): Mood {
 	switch (state.kind) {
 		case "spawning":
 			return "wobbling";
+		case "done":
+			return "proud";
 		default:
 			return "calm";
 	}

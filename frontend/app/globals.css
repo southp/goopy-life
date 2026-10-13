@@ -149,6 +149,131 @@ body {
 }
 
 /*
+ * Ready: the goopy shows off. A brighter, wider glow; a rainbow sheen sweeping
+ * across it; sparkles twinkling around it.
+ *
+ * The sheen is a rainbow band laid over the whole body box and blended with
+ * `overlay`. Overlay cannot lighten black, so the band only shows where it
+ * crosses the goopy — a glyph-shaped shine without having to know the glyph's
+ * shape, which differs per emoji font. That relies on nothing between the band
+ * and the page background forming a stacking context, which is why this mood
+ * moves nothing on .goopy-body.
+ */
+.goopy[data-mood="proud"] .goopy-glyph {
+	opacity: 1;
+	text-shadow:
+		0 0 24px rgba(255, 255, 255, 0.95),
+		0 0 56px rgba(140, 200, 255, 0.75);
+}
+
+.goopy-shine {
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+	mix-blend-mode: overlay;
+	background: linear-gradient(
+		115deg,
+		transparent 40%,
+		#ff5f6d 43%,
+		#ffc371 46%,
+		#fff275 49%,
+		#6dff9c 52%,
+		#5ee7ff 55%,
+		#a78bfa 58%,
+		transparent 61%
+	);
+	background-size: 400% 100%;
+	background-position: 100% 0;
+	/*
+	 * Overlay does lighten the glow, which is bright, so feather the band out
+	 * towards the edges of the box: otherwise its corners show in the halo.
+	 */
+	mask-image: radial-gradient(closest-side, #000 60%, transparent);
+	animation: goopy-shine 2.8s ease-in-out infinite;
+}
+
+/* One sweep, left to right, then a rest before the next. */
+@keyframes goopy-shine {
+	0% {
+		background-position: 100% 0;
+	}
+	60%,
+	100% {
+		background-position: 0% 0;
+	}
+}
+
+/* Spans the body box, so each sparkle is placed relative to the goopy. */
+.goopy-sparkles {
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+}
+
+/* A four-pointed star, cut from a square so it does not depend on any font. */
+.goopy-sparkle {
+	position: absolute;
+	width: 1.1rem;
+	height: 1.1rem;
+	pointer-events: none;
+	background-color: #fff;
+	clip-path: polygon(50% 0, 62% 38%, 100% 50%, 62% 62%, 50% 100%, 38% 62%, 0 50%, 38% 38%);
+	animation: goopy-twinkle 1.6s ease-in-out infinite;
+}
+
+.goopy-sparkle:nth-child(1) {
+	top: 4%;
+	left: -4%;
+	background-color: #fde68a;
+}
+
+.goopy-sparkle:nth-child(2) {
+	top: -8%;
+	left: 62%;
+	width: 0.8rem;
+	height: 0.8rem;
+	animation-delay: -0.4s;
+}
+
+.goopy-sparkle:nth-child(3) {
+	top: 14%;
+	right: -10%;
+	width: 1.4rem;
+	height: 1.4rem;
+	background-color: #a5f3fc;
+	animation-delay: -0.9s;
+}
+
+.goopy-sparkle:nth-child(4) {
+	top: 66%;
+	right: -14%;
+	width: 0.9rem;
+	height: 0.9rem;
+	background-color: #f9a8d4;
+	animation-delay: -1.2s;
+}
+
+.goopy-sparkle:nth-child(5) {
+	top: 60%;
+	left: -14%;
+	animation-delay: -0.6s;
+}
+
+@keyframes goopy-twinkle {
+	0%,
+	100% {
+		scale: 0.2;
+		rotate: 0deg;
+		opacity: 0;
+	}
+	50% {
+		scale: 1;
+		rotate: 90deg;
+		opacity: 1;
+	}
+}
+
+/*
  * Without motion, the moods keep only what they show standing still: a colour,
  * a decoration. The spinner and the copy under the goopy still carry the state.
  * Kept last in this section: it wins over the mood rules above it by order, at
@@ -156,8 +281,13 @@ body {
  */
 @media (prefers-reduced-motion: reduce) {
 	.goopy[data-mood] .goopy-body,
-	.goopy[data-mood] .goopy-glyph {
+	.goopy[data-mood] .goopy-glyph,
+	.goopy-sparkle {
 		animation: none;
+	}
+
+	.goopy-shine {
+		display: none;
 	}
 }
 

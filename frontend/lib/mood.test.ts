@@ -20,3 +20,10 @@ test("an expired goopy stays calm", () => {
 test("a spawning goopy wobbles", () => {
 	assert.equal(moodFor({ kind: "spawning" }), "wobbling");
 });
+
+test("a ready goopy is proud", () => {
+	assert.equal(
+		moodFor({ kind: "done", slug: "a-b-c", url: "", expiresAt: "", token: null }),
+		"proud",
+	);
+});
