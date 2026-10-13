@@ -462,6 +462,146 @@ body {
 }
 
 /*
+ * Destroyed: the goopy explodes and comes back small. One run of 1.6s, whose
+ * end the component listens for:
+ *   0–22%   it squashes, swells and pops, still red from brewing
+ *   22–45%  goo flies out and a shock ring spreads; nothing is left
+ *   45–62%  a tiny goopy appears and wiggles
+ *   62–100% it inflates back to full size, overshooting a little
+ */
+.goopy[data-mood="reborn"] .goopy-body {
+	transform-origin: 50% 60%;
+	animation: goopy-reborn 1.6s both;
+}
+
+.goopy[data-mood="reborn"] .goopy-glyph {
+	animation: goopy-reborn-glyph 1.6s both;
+}
+
+@keyframes goopy-reborn {
+	0% {
+		scale: 1;
+		opacity: 1;
+	}
+	10% {
+		scale: 1.15 0.85;
+	}
+	20% {
+		scale: 1.45;
+		opacity: 1;
+	}
+	23% {
+		scale: 1.7;
+		opacity: 0;
+	}
+	44% {
+		scale: 0.12;
+		opacity: 0;
+	}
+	48% {
+		scale: 0.2;
+		opacity: 1;
+	}
+	54% {
+		scale: 0.24 0.17;
+	}
+	58% {
+		scale: 0.18 0.23;
+	}
+	62% {
+		scale: 0.2;
+		animation-timing-function: cubic-bezier(0.34, 1.56, 0.64, 1);
+	}
+	100% {
+		scale: 1;
+		opacity: 1;
+	}
+}
+
+/*
+ * Holds the brewing red up to the pop, flashes white-hot as it goes, and is
+ * back to the calm colour by the time the tiny one shows.
+ */
+@keyframes goopy-reborn-glyph {
+	0% {
+		filter: hue-rotate(330deg) brightness(1.1) saturate(2.5);
+	}
+	20% {
+		filter: hue-rotate(330deg) brightness(2.5) saturate(1.5);
+	}
+	40%,
+	100% {
+		filter: hue-rotate(180deg) brightness(1.5) saturate(1);
+	}
+}
+
+.goopy-burst {
+	position: absolute;
+	top: 50%;
+	left: 50%;
+	width: 8rem;
+	height: 8rem;
+	margin: -4rem 0 0 -4rem;
+	border: 3px solid rgba(255, 200, 180, 0.9);
+	border-radius: 50%;
+	pointer-events: none;
+	animation: goopy-burst 1.6s ease-out both;
+}
+
+@keyframes goopy-burst {
+	0%,
+	20% {
+		scale: 0.3;
+		opacity: 0;
+	}
+	23% {
+		opacity: 1;
+	}
+	45%,
+	100% {
+		scale: 1.8;
+		opacity: 0;
+	}
+}
+
+/* A point at the goopy's middle that the drops fly out from. */
+.goopy-drops {
+	position: absolute;
+	top: 55%;
+	left: 50%;
+	pointer-events: none;
+}
+
+.goopy-drop {
+	position: absolute;
+	width: 0.8rem;
+	height: 0.8rem;
+	margin: -0.4rem 0 0 -0.4rem;
+	border-radius: 50%;
+	background: radial-gradient(circle at 35% 35%, #ffb4a8, #ff4d3d 60%, #c81e1e);
+	animation: goopy-drop 1.6s cubic-bezier(0.2, 0.7, 0.4, 1) both;
+}
+
+@keyframes goopy-drop {
+	0%,
+	21% {
+		transform: rotate(var(--angle)) translateY(0) scale(0.5);
+		opacity: 0;
+	}
+	22% {
+		opacity: 1;
+	}
+	40% {
+		opacity: 1;
+	}
+	55%,
+	100% {
+		transform: rotate(var(--angle)) translateY(calc(-1 * var(--reach))) scale(1);
+		opacity: 0;
+	}
+}
+
+/*
  * Without motion, the moods keep only what they show standing still: a colour,
  * a decoration. The spinner and the copy under the goopy still carry the state.
  * Kept last in this section: it wins over the mood rules above it by order, at
@@ -476,8 +616,18 @@ body {
 		animation: none;
 	}
 
-	.goopy-shine {
+	.goopy-shine,
+	.goopy-burst,
+	.goopy-drops {
 		display: none;
+	}
+
+	/*
+	 * No explosion, but the component still waits for its end to settle back
+	 * to calm: a run too short to see keeps that event coming.
+	 */
+	.goopy[data-mood="reborn"] .goopy-body {
+		animation: goopy-reborn 1ms both;
 	}
 }
 

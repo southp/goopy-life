@@ -1,11 +1,21 @@
+import type { AnimationEvent, CSSProperties } from "react";
 import type { Mood } from "@/lib/mood";
 
 // Placed and timed per index in globals.css.
 const SPARKLES = [0, 1, 2, 3, 4];
 const STEAM_PUFFS = [0, 1, 2];
 
+// The goo the explosion throws out: evenly round the circle, every other drop
+// flying further, so the splat is not a perfect ring.
+const DROPS = Array.from({ length: 10 }, (_, i) => ({
+	"--angle": `${i * 36}deg`,
+	"--reach": i % 2 === 0 ? "5.5rem" : "4rem",
+}) as CSSProperties);
+
 interface GoopyProps {
 	mood: Mood;
+	/** Called when the explosion has played out. */
+	onRebornEnd: () => void;
 }
 
 /**
@@ -19,10 +29,29 @@ interface GoopyProps {
  * body moves with the goopy without picking up its filter. Each mood is styled
  * off `data-mood` in globals.css.
  */
-export default function Goopy({ mood }: GoopyProps) {
+export default function Goopy({ mood, onRebornEnd }: GoopyProps) {
+	// The decorations' animations bubble up here too; only the body's own
+	// rebirth marks the end.
+	function handleAnimationEnd(e: AnimationEvent) {
+		if (e.animationName === "goopy-reborn") {
+			onRebornEnd();
+		}
+	}
+
 	return (
 		<div className="goopy" data-mood={mood} aria-hidden="true">
-			<div className="goopy-body">
+			{/* Outside the body, which shrinks to nothing as these fly out. */}
+			{mood === "reborn" && (
+				<>
+					<span className="goopy-burst" />
+					<span className="goopy-drops">
+						{DROPS.map((style, i) => (
+							<span key={i} className="goopy-drop" style={style} />
+						))}
+					</span>
+				</>
+			)}
+			<div className="goopy-body" onAnimationEnd={handleAnimationEnd}>
 				<span className="goopy-glyph">💩</span>
 				{mood === "proud" && (
 					<>

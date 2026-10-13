@@ -50,3 +50,13 @@ test("a fault hurts", () => {
 test("an expected refusal is only sad", () => {
 	assert.equal(moodFor({ kind: "error", message: "full", code: "server_full" }), "sad");
 });
+
+test("a goopy that was just destroyed is reborn", () => {
+	assert.equal(moodFor({ kind: "idle" }, false, true), "reborn");
+});
+
+// The flag only means something on the way back to idle: anything else the
+// visitor does next takes over at once.
+test("a new spawn interrupts the rebirth", () => {
+	assert.equal(moodFor({ kind: "spawning" }, false, true), "wobbling");
+});

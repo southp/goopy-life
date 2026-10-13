@@ -49,6 +49,9 @@ export default function GhostButton() {
 	// The destroy button has a destroy in flight. Its own state, since only the
 	// goopy above it needs to know.
 	const [destroying, setDestroying] = useState(false);
+	// A destroy just finished: the goopy plays its explosion once, then says
+	// so through onRebornEnd.
+	const [justDestroyed, setJustDestroyed] = useState(false);
 
 	// Only poll capacity while the button is actually offered. In every other
 	// state the number is not on screen, and a spawning or finished visitor has
@@ -129,9 +132,19 @@ export default function GhostButton() {
 	const handleReset = useCallback(() => {
 		setPolling(null);
 		setDestroying(false);
+		setJustDestroyed(false);
 		localStorage.removeItem(LOCALSTORAGE_KEY);
 		setState({ kind: "idle" });
 	}, []);
+
+	// A reset that the goopy celebrates: kept apart from handleReset, which
+	// "Try again" also uses.
+	const handleDestroyed = useCallback(() => {
+		handleReset();
+		setJustDestroyed(true);
+	}, [handleReset]);
+
+	const handleRebornEnd = useCallback(() => setJustDestroyed(false), []);
 
 	// The server refused this browser's token for good (#203). Keep the page —
 	// the goopy is still running — but forget the token, so a reload does not
@@ -214,14 +227,15 @@ export default function GhostButton() {
 		}
 		const controller = new AbortController();
 		waitUntilGone(leavingSlug, { intervalMs: POLL_INTERVAL_MS, signal: controller.signal })
-			.then(handleReset)
+			.then(handleDestroyed)
 			.catch(() => {
 				// Aborted: this effect is being torn down, nothing to update.
 			});
 		return () => controller.abort();
-	}, [leavingSlug, handleReset]);
+	}, [leavingSlug, handleDestroyed]);
 
 	async function handleGhostNow() {
+		setJustDestroyed(false);
 		setState({ kind: "spawning" });
 
 		try {
@@ -302,7 +316,7 @@ export default function GhostButton() {
 							<DestroyButton
 								slug={state.slug}
 								token={state.token}
-								onDestroyed={handleReset}
+								onDestroyed={handleDestroyed}
 								onTokenRejected={handleTokenRejected}
 							onDestroyingChange={setDestroying}
 							/>
@@ -345,7 +359,10 @@ export default function GhostButton() {
 
 	return (
 		<>
-			<Goopy mood={moodFor(state, destroying)} />
+			<Goopy
+				mood={moodFor(state, destroying, justDestroyed)}
+				onRebornEnd={handleRebornEnd}
+			/>
 			<div className="cta-area">{renderCta()}</div>
 		</>
 	);

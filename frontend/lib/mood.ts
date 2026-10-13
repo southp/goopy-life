@@ -23,12 +23,19 @@ export type Mood =
 	// bandaid — nothing is broken.
 	| "sad"
 	// The goopy is being destroyed: it turns red and steams.
-	| "brewing";
+	| "brewing"
+	// The destroy finished: the goopy explodes, leaving a tiny one of itself
+	// that inflates back to normal. Plays once, then back to calm.
+	| "reborn";
 
-// `destroying`: the destroy button on the done page has a destroy in flight.
-// That lives in the button rather than in AppState, so it is passed alongside.
-export function moodFor(state: AppState, destroying = false): Mood {
+// Two flags live outside AppState, so they are passed alongside it:
+// - `destroying`: the destroy button on the done page has a destroy in flight
+// - `justDestroyed`: a destroy has just finished, and the explosion has not
+//   played out yet
+export function moodFor(state: AppState, destroying = false, justDestroyed = false): Mood {
 	switch (state.kind) {
+		case "idle":
+			return justDestroyed ? "reborn" : "calm";
 		case "spawning":
 			return "wobbling";
 		case "done":
