@@ -180,8 +180,30 @@ body {
 .goopy-shine {
 	position: absolute;
 	inset: 0;
+	overflow: hidden;
 	pointer-events: none;
 	mix-blend-mode: overlay;
+	/*
+	 * Overlay does lighten the glow, which is bright, so feather the band out
+	 * towards the edges of the box: otherwise its corners show in the halo.
+	 */
+	mask-image: radial-gradient(closest-side, #000 60%, transparent);
+}
+
+/*
+ * The band itself, on a strip four times the box's width that slides across
+ * it. Moving it with translate rather than background-position keeps the
+ * sweep on the compositor, instead of repainting every frame for as long as
+ * the page is open. The overflow clip above keeps the strip from widening the
+ * page.
+ */
+.goopy-shine::before {
+	content: "";
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	left: 0;
+	width: 400%;
 	background: linear-gradient(
 		115deg,
 		transparent 40%,
@@ -193,24 +215,20 @@ body {
 		#a78bfa 58%,
 		transparent 61%
 	);
-	background-size: 400% 100%;
-	background-position: 100% 0;
-	/*
-	 * Overlay does lighten the glow, which is bright, so feather the band out
-	 * towards the edges of the box: otherwise its corners show in the halo.
-	 */
-	mask-image: radial-gradient(closest-side, #000 60%, transparent);
 	animation: goopy-shine 2.8s ease-in-out infinite;
 }
 
-/* One sweep, left to right, then a rest before the next. */
+/*
+ * One sweep, left to right, then a rest before the next. The band sits past
+ * either edge of the box at both ends, so the rest shows nothing.
+ */
 @keyframes goopy-shine {
 	0% {
-		background-position: 100% 0;
+		translate: -75% 0;
 	}
 	60%,
 	100% {
-		background-position: 0% 0;
+		translate: 0 0;
 	}
 }
 
