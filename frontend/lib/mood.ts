@@ -21,14 +21,21 @@ export type Mood =
 	| "hurt"
 	// The service said no by design (full, rate limited): tears, but no
 	// bandaid — nothing is broken.
-	| "sad";
+	| "sad"
+	// The goopy is being destroyed: it turns red and steams.
+	| "brewing";
 
-export function moodFor(state: AppState): Mood {
+// `destroying`: the destroy button on the done page has a destroy in flight.
+// That lives in the button rather than in AppState, so it is passed alongside.
+export function moodFor(state: AppState, destroying = false): Mood {
 	switch (state.kind) {
 		case "spawning":
 			return "wobbling";
 		case "done":
-			return "proud";
+			return destroying ? "brewing" : "proud";
+		// A destroy picked up after a reload.
+		case "leaving":
+			return "brewing";
 		case "failed":
 			return "hurt";
 		case "error":

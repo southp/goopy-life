@@ -2,6 +2,7 @@ import type { Mood } from "@/lib/mood";
 
 // Placed and timed per index in globals.css.
 const SPARKLES = [0, 1, 2, 3, 4];
+const STEAM_PUFFS = [0, 1, 2];
 
 interface GoopyProps {
 	mood: Mood;
@@ -40,6 +41,13 @@ export default function Goopy({ mood }: GoopyProps) {
 					</>
 				)}
 				{mood === "hurt" && <Bandaid />}
+				{mood === "brewing" && (
+					<span className="goopy-steam">
+						{STEAM_PUFFS.map((i) => (
+							<span key={i} className="goopy-puff" />
+						))}
+					</span>
+				)}
 			</div>
 		</div>
 	);

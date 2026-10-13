@@ -12,6 +12,8 @@ interface DestroyButtonProps {
 	onDestroyed: () => void;
 	/** Called when the server refuses this token for good, so it can be forgotten. */
 	onTokenRejected: () => void;
+	/** Called as a destroy starts, and again if it stops short of done. */
+	onDestroyingChange: (destroying: boolean) => void;
 }
 
 // `refused` is terminal: the server said no in a way retrying cannot change.
@@ -26,6 +28,7 @@ export default function DestroyButton({
 	token,
 	onDestroyed,
 	onTokenRejected,
+	onDestroyingChange,
 }: DestroyButtonProps) {
 	const [phase, setPhase] = useState<Phase>("offered");
 	const [failed, setFailed] = useState(false);
@@ -44,9 +47,11 @@ export default function DestroyButton({
 	async function handleConfirm() {
 		setPhase("destroying");
 		setFailed(false);
+		onDestroyingChange(true);
 		try {
 			await destroyGoopy(slug, token);
 		} catch (err: unknown) {
+			onDestroyingChange(false);
 			// Whatever the server said is for a log, not a visitor.
 			if (isLastWord(err)) {
 				// Offering the button again would only invite the same answer.

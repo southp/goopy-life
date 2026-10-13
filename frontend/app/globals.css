@@ -78,6 +78,9 @@ body {
 	filter: hue-rotate(180deg) brightness(1.5);
 	opacity: 0.85;
 	text-shadow: 0 0 20px rgba(255, 255, 255, 0.8);
+	transition:
+		filter 1.2s ease,
+		text-shadow 1.2s ease;
 }
 
 /*
@@ -359,6 +362,106 @@ body {
 }
 
 /*
+ * Being destroyed: the goopy heats up — it flushes red over the glyph's colour
+ * transition, rumbles, and swells with each puff of steam it pumps out of its
+ * top, as if something were brewing inside.
+ *
+ * The red is reached by turning the hue further (180° → 330°), not back, so
+ * the flush passes through purple and magenta rather than green and yellow.
+ */
+.goopy[data-mood="brewing"] .goopy-body {
+	transform-origin: 50% 100%;
+	animation:
+		goopy-rumble 0.16s linear infinite,
+		goopy-pump 1.5s ease-in-out infinite;
+}
+
+.goopy[data-mood="brewing"] .goopy-glyph {
+	opacity: 1;
+	filter: hue-rotate(330deg) brightness(1.1) saturate(2.5);
+	/* Orange going in: the filter turns the shadow too, and lands it on red. */
+	text-shadow: 0 0 28px rgba(255, 150, 60, 0.9);
+}
+
+@keyframes goopy-rumble {
+	0%,
+	100% {
+		translate: 0 0;
+	}
+	25% {
+		translate: -1.5px 0.5px;
+	}
+	75% {
+		translate: 1.5px -0.5px;
+	}
+}
+
+/* Swells as the pressure builds, and gives as each puff escapes. */
+@keyframes goopy-pump {
+	0%,
+	100% {
+		scale: 1 1;
+	}
+	70% {
+		scale: 1.05 1.07;
+	}
+	85% {
+		scale: 0.98 0.96;
+	}
+}
+
+/* A strip along the top of the goopy that the puffs rise out of. */
+.goopy-steam {
+	position: absolute;
+	top: 0;
+	left: 25%;
+	right: 25%;
+	height: 1px;
+	pointer-events: none;
+}
+
+.goopy-puff {
+	position: absolute;
+	top: 0;
+	left: 50%;
+	width: 2.5rem;
+	height: 2.5rem;
+	margin-left: -1.25rem;
+	border-radius: 50%;
+	background: radial-gradient(circle, #fff 15%, rgba(255, 255, 255, 0) 70%);
+	opacity: 0.5;
+	animation: goopy-puff 1.5s ease-out infinite;
+}
+
+.goopy-puff:nth-child(1) {
+	left: 15%;
+	--drift: -1rem;
+	animation-delay: -0.5s;
+}
+
+.goopy-puff:nth-child(3) {
+	left: 85%;
+	--drift: 1rem;
+	animation-delay: -1s;
+}
+
+@keyframes goopy-puff {
+	0% {
+		translate: 0 0.75rem;
+		scale: 0.3;
+		opacity: 0;
+	}
+	20% {
+		opacity: 1;
+	}
+	100% {
+		translate: var(--drift, 0) -3.5rem;
+		scale: 1.8;
+		opacity: 0;
+	}
+}
+
+/*
  * Without motion, the moods keep only what they show standing still: a colour,
  * a decoration. The spinner and the copy under the goopy still carry the state.
  * Kept last in this section: it wins over the mood rules above it by order, at
@@ -368,7 +471,8 @@ body {
 	.goopy[data-mood] .goopy-body,
 	.goopy[data-mood] .goopy-glyph,
 	.goopy-sparkle,
-	.goopy-tear {
+	.goopy-tear,
+	.goopy-puff {
 		animation: none;
 	}
 

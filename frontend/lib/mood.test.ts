@@ -21,11 +21,19 @@ test("a spawning goopy wobbles", () => {
 	assert.equal(moodFor({ kind: "spawning" }), "wobbling");
 });
 
+const done = { kind: "done", slug: "a-b-c", url: "", expiresAt: "", token: "t" } as const;
+
 test("a ready goopy is proud", () => {
-	assert.equal(
-		moodFor({ kind: "done", slug: "a-b-c", url: "", expiresAt: "", token: null }),
-		"proud",
-	);
+	assert.equal(moodFor(done), "proud");
+});
+
+test("a goopy being destroyed brews", () => {
+	assert.equal(moodFor(done, true), "brewing");
+});
+
+// Reloaded mid-"Destroying…": the same teardown, so the same look.
+test("a destroy resumed after a reload brews too", () => {
+	assert.equal(moodFor({ kind: "leaving", slug: "a-b-c" }), "brewing");
 });
 
 test("a failed spawn hurts", () => {

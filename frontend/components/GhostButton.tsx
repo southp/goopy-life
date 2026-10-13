@@ -46,6 +46,9 @@ export default function GhostButton() {
 	// The goopy being polled until it is ready. Carries the token so the done
 	// state can offer the destroy button without re-reading localStorage.
 	const [polling, setPolling] = useState<StoredGoopy | null>(null);
+	// The destroy button has a destroy in flight. Its own state, since only the
+	// goopy above it needs to know.
+	const [destroying, setDestroying] = useState(false);
 
 	// Only poll capacity while the button is actually offered. In every other
 	// state the number is not on screen, and a spawning or finished visitor has
@@ -125,6 +128,7 @@ export default function GhostButton() {
 
 	const handleReset = useCallback(() => {
 		setPolling(null);
+		setDestroying(false);
 		localStorage.removeItem(LOCALSTORAGE_KEY);
 		setState({ kind: "idle" });
 	}, []);
@@ -300,6 +304,7 @@ export default function GhostButton() {
 								token={state.token}
 								onDestroyed={handleReset}
 								onTokenRejected={handleTokenRejected}
+							onDestroyingChange={setDestroying}
 							/>
 						)}
 					</div>
@@ -340,7 +345,7 @@ export default function GhostButton() {
 
 	return (
 		<>
-			<Goopy mood={moodFor(state)} />
+			<Goopy mood={moodFor(state, destroying)} />
 			<div className="cta-area">{renderCta()}</div>
 		</>
 	);
