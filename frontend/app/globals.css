@@ -489,7 +489,8 @@ body {
 
 /*
  * Destroyed: the goopy explodes and comes back small. One run of 1.6s, whose
- * end the component listens for:
+ * last frame is the calm look, so the mood can hold there until the visitor
+ * moves on (the spent goo and ring stay at zero opacity):
  *   0–22%   it squashes, swells and pops, still red from brewing
  *   22–45%  goo flies out and a shock ring spreads; nothing is left
  *   45–62%  a tiny goopy appears and wiggles
@@ -654,14 +655,6 @@ body {
 	.goopy-burst,
 	.goopy-drops {
 		display: none;
-	}
-
-	/*
-	 * No explosion, but the component still waits for its end to settle back
-	 * to calm: a run too short to see keeps that event coming.
-	 */
-	.goopy[data-mood="reborn"] .goopy-body {
-		animation: goopy-reborn 1ms both;
 	}
 }
 

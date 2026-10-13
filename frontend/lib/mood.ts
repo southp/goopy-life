@@ -25,11 +25,12 @@ export type Mood =
 	// The goopy is being destroyed: it turns red and steams.
 	| "brewing"
 	// The destroy finished: the goopy explodes, leaving a tiny one of itself
-	// that inflates back to normal. Plays once, then back to calm.
+	// that inflates back to normal. Plays once, and its last frame looks calm,
+	// so it can hold until the visitor moves on.
 	| "reborn";
 
-// `justDestroyed`: a destroy has just finished, and the explosion has not
-// played out yet. It lives outside AppState, so it is passed alongside.
+// `justDestroyed`: a destroy has just finished, and the visitor has not moved
+// on yet. It lives outside AppState, so it is passed alongside.
 export function moodFor(state: AppState, justDestroyed = false): Mood {
 	switch (state.kind) {
 		case "idle":

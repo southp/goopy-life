@@ -46,8 +46,9 @@ export default function GhostButton() {
 	// The goopy being polled until it is ready. Carries the token so the done
 	// state can offer the destroy button without re-reading localStorage.
 	const [polling, setPolling] = useState<StoredGoopy | null>(null);
-	// A destroy just finished: the goopy plays its explosion once, then says
-	// so through onRebornEnd.
+	// A destroy just finished, so the goopy explodes and reinflates. Cleared by
+	// whatever the visitor does next; until then the explosion's last frame,
+	// which looks calm, simply holds.
 	const [justDestroyed, setJustDestroyed] = useState(false);
 
 	// Only poll capacity while the button is actually offered. In every other
@@ -139,8 +140,6 @@ export default function GhostButton() {
 		handleReset();
 		setJustDestroyed(true);
 	}, [handleReset]);
-
-	const handleRebornEnd = useCallback(() => setJustDestroyed(false), []);
 
 	// The server accepted a destroy (#203). Move on to "leaving", which waits
 	// out the teardown — the same wait a reload mid-destroy resumes.
@@ -363,10 +362,7 @@ export default function GhostButton() {
 
 	return (
 		<>
-			<Goopy
-				mood={moodFor(state, justDestroyed)}
-				onRebornEnd={handleRebornEnd}
-			/>
+			<Goopy mood={moodFor(state, justDestroyed)} />
 			<div className="cta-area">{renderCta()}</div>
 		</>
 	);

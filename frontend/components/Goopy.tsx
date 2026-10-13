@@ -1,4 +1,4 @@
-import type { AnimationEvent, CSSProperties } from "react";
+import type { CSSProperties } from "react";
 import type { Mood } from "@/lib/mood";
 
 // Placed and timed per index in globals.css.
@@ -14,8 +14,6 @@ const DROPS = Array.from({ length: 10 }, (_, i) => ({
 
 interface GoopyProps {
 	mood: Mood;
-	/** Called when the explosion has played out. */
-	onRebornEnd: () => void;
 }
 
 /**
@@ -29,15 +27,7 @@ interface GoopyProps {
  * body moves with the goopy without picking up its filter. Each mood is styled
  * off `data-mood` in globals.css.
  */
-export default function Goopy({ mood, onRebornEnd }: GoopyProps) {
-	// The decorations' animations bubble up here too; only the body's own
-	// rebirth marks the end.
-	function handleAnimationEnd(e: AnimationEvent) {
-		if (e.animationName === "goopy-reborn") {
-			onRebornEnd();
-		}
-	}
-
+export default function Goopy({ mood }: GoopyProps) {
 	return (
 		<div className="goopy" data-mood={mood} aria-hidden="true">
 			{/* Outside the body, which shrinks to nothing as these fly out. */}
@@ -51,7 +41,7 @@ export default function Goopy({ mood, onRebornEnd }: GoopyProps) {
 					</span>
 				</>
 			)}
-			<div className="goopy-body" onAnimationEnd={handleAnimationEnd}>
+			<div className="goopy-body">
 				<span className="goopy-glyph">💩</span>
 				{mood === "proud" && (
 					<>
