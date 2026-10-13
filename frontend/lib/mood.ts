@@ -4,9 +4,10 @@
 // goopy just acts it out. Kept separate from the component so the mapping can
 // be tested without a DOM.
 //
-// Deliberately import-free (bar types), so `node --test` can load it without
-// Next's module resolution.
+// Imports only import-free modules, by their `.ts` path, so `node --test` can
+// load it without Next's module resolution.
 
+import { isExpectedError } from "./errors.ts";
 import type { AppState } from "./types";
 
 export type Mood =
@@ -15,7 +16,12 @@ export type Mood =
 	// A goopy is booting: it wobbles like a pudding.
 	| "wobbling"
 	// The goopy is ready: rainbow shine, sparkles, a stronger glow.
-	| "proud";
+	| "proud"
+	// Something broke: tears, and a bandaid on its head.
+	| "hurt"
+	// The service said no by design (full, rate limited): tears, but no
+	// bandaid — nothing is broken.
+	| "sad";
 
 export function moodFor(state: AppState): Mood {
 	switch (state.kind) {
@@ -23,6 +29,10 @@ export function moodFor(state: AppState): Mood {
 			return "wobbling";
 		case "done":
 			return "proud";
+		case "failed":
+			return "hurt";
+		case "error":
+			return isExpectedError(state.code) ? "sad" : "hurt";
 		default:
 			return "calm";
 	}

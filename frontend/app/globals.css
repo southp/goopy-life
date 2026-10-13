@@ -274,6 +274,91 @@ body {
 }
 
 /*
+ * Error: the goopy droops, dims and sniffles, with a tear rolling down from
+ * each eye. A real fault ("hurt") also gets a bandaid on its head; a refusal by
+ * design ("sad") does not, since nothing is broken.
+ *
+ * The tears start at percentages of the glyph box, so they land near the eyes
+ * rather than exactly on them: every emoji font draws its own goopy.
+ */
+.goopy[data-mood="hurt"] .goopy-body,
+.goopy[data-mood="sad"] .goopy-body {
+	transform-origin: 50% 100%;
+	rotate: -4deg;
+	animation: goopy-sniffle 2.4s ease-in-out infinite;
+}
+
+.goopy[data-mood="hurt"] .goopy-glyph,
+.goopy[data-mood="sad"] .goopy-glyph {
+	filter: hue-rotate(180deg) brightness(1.25) saturate(0.8);
+	text-shadow: 0 0 12px rgba(255, 255, 255, 0.45);
+}
+
+@keyframes goopy-sniffle {
+	0%,
+	70%,
+	100% {
+		scale: 1 1;
+	}
+	80% {
+		scale: 1.03 0.96;
+	}
+	90% {
+		scale: 0.99 1.02;
+	}
+}
+
+/* A drop with its point up: a square with one sharp corner, turned 45°. */
+.goopy-tear {
+	position: absolute;
+	top: 57%;
+	left: 30%;
+	width: 0.75rem;
+	height: 0.75rem;
+	pointer-events: none;
+	border-radius: 0 50% 50% 50%;
+	background: radial-gradient(circle at 60% 60%, #e0f2fe, #7dd3fc 45%, #38bdf8);
+	transform: rotate(45deg);
+	animation: goopy-tear 1.8s ease-in infinite;
+}
+
+.goopy-tear + .goopy-tear {
+	left: 64%;
+	animation-delay: -0.9s;
+}
+
+@keyframes goopy-tear {
+	0% {
+		translate: 0 0;
+		scale: 0.3;
+		opacity: 0;
+	}
+	20% {
+		translate: 0 0;
+		scale: 1;
+		opacity: 1;
+	}
+	75% {
+		opacity: 1;
+	}
+	100% {
+		translate: 0 2.5rem;
+		scale: 0.8;
+		opacity: 0;
+	}
+}
+
+.goopy-bandaid {
+	position: absolute;
+	top: 14%;
+	right: 16%;
+	width: 2.4rem;
+	height: 2.4rem;
+	pointer-events: none;
+	rotate: 12deg;
+}
+
+/*
  * Without motion, the moods keep only what they show standing still: a colour,
  * a decoration. The spinner and the copy under the goopy still carry the state.
  * Kept last in this section: it wins over the mood rules above it by order, at
@@ -282,7 +367,8 @@ body {
 @media (prefers-reduced-motion: reduce) {
 	.goopy[data-mood] .goopy-body,
 	.goopy[data-mood] .goopy-glyph,
-	.goopy-sparkle {
+	.goopy-sparkle,
+	.goopy-tear {
 		animation: none;
 	}
 

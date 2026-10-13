@@ -27,3 +27,18 @@ test("a ready goopy is proud", () => {
 		"proud",
 	);
 });
+
+test("a failed spawn hurts", () => {
+	assert.equal(moodFor({ kind: "failed", slug: "a-b-c" }), "hurt");
+});
+
+test("a fault hurts", () => {
+	assert.equal(moodFor({ kind: "error", message: "boom", code: "internal" }), "hurt");
+	assert.equal(moodFor({ kind: "error", message: "HTTP 502", code: null }), "hurt");
+});
+
+// A full server is not a fault, so no bandaid — the same line ErrorMessage
+// draws when it drops the "file an issue" prompt.
+test("an expected refusal is only sad", () => {
+	assert.equal(moodFor({ kind: "error", message: "full", code: "server_full" }), "sad");
+});

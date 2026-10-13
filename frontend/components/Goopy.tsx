@@ -33,7 +33,33 @@ export default function Goopy({ mood }: GoopyProps) {
 						</span>
 					</>
 				)}
+				{(mood === "hurt" || mood === "sad") && (
+					<>
+						<span className="goopy-tear" />
+						<span className="goopy-tear" />
+					</>
+				)}
+				{mood === "hurt" && <Bandaid />}
 			</div>
 		</div>
+	);
+}
+
+// A small cross of sticking plaster, for the side of its head.
+function Bandaid() {
+	return (
+		<svg className="goopy-bandaid" viewBox="0 0 40 40">
+			<g fill="#f1c27d" stroke="#c98f4f" strokeWidth="1.5">
+				<rect x="3" y="15" width="34" height="10" rx="5" transform="rotate(45 20 20)" />
+				<rect x="3" y="15" width="34" height="10" rx="5" transform="rotate(-45 20 20)" />
+			</g>
+			<rect x="15" y="15" width="10" height="10" rx="2" fill="#e3a868" transform="rotate(45 20 20)" />
+			<g fill="#c98f4f">
+				<circle cx="9" cy="9" r="1" />
+				<circle cx="31" cy="9" r="1" />
+				<circle cx="9" cy="31" r="1" />
+				<circle cx="31" cy="31" r="1" />
+			</g>
+		</svg>
 	);
 }
