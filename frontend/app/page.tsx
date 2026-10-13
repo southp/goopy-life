@@ -7,8 +7,8 @@ import VersionFooter from '@/components/VersionFooter';
 import { fetchConfig } from '@/lib/config';
 
 // Server Component. The page structure and copy are rendered server-side and present
-// in the static HTML before any interactivity; the only client island is the
-// <GhostButton /> CTA.
+// in the static HTML before any interactivity; the only client island is
+// <GhostButton />, the hero goopy and its CTA.
 export default async function Home() {
 	const config = await fetchConfig();
 
@@ -16,10 +16,7 @@ export default async function Home() {
 		<div className="page-wrapper">
 			<main className="page-main">
 				<section className="hero-block">
-					<span className="hero-emoji">💩</span>
-					<div className="cta-area">
-						<GhostButton />
-					</div>
+					<GhostButton />
 				</section>
 
 				<div className="info-sections">

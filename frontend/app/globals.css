@@ -56,9 +56,25 @@ body {
 	padding-bottom: 2rem;
 }
 
-.hero-emoji {
-	font-size: 8rem;
+/* ── Hero goopy ─────────────────────────────────────────────────────────── */
+
+/*
+ * Motion goes on .goopy-body, colour on .goopy-glyph only: a filter applies to
+ * an element's children too, so anything hung off the glyph would be tinted
+ * along with it.
+ */
+.goopy {
+	position: relative;
 	line-height: 1;
+}
+
+.goopy-body {
+	position: relative;
+}
+
+.goopy-glyph {
+	display: block;
+	font-size: 8rem;
 	filter: hue-rotate(180deg) brightness(1.5);
 	opacity: 0.85;
 	text-shadow: 0 0 20px rgba(255, 255, 255, 0.8);

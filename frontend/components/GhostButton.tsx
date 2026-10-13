@@ -12,6 +12,7 @@ import type { AppState, GoopyResponse } from '@/lib/types';
 import CapacityIndicator from '@/components/CapacityIndicator';
 import DestroyButton from '@/components/DestroyButton';
 import ErrorMessage from '@/components/ErrorMessage';
+import Goopy from '@/components/Goopy';
 import IssueLink from '@/components/IssueLink';
 import Spinner from '@/components/Spinner';
 
@@ -35,9 +36,10 @@ function doneState(data: GoopyResponse, token: string | null): AppState {
 	};
 }
 
-// The sole interactive element on the page: the "Ghost now!" CTA and its state
-// machine (spawn → poll → done/failed, plus resume-from-localStorage and the
-// expired-redirect handling). Everything else on the page is server-rendered.
+// The sole interactive element on the page: the hero goopy, the "Ghost now!"
+// CTA under it, and their state machine (spawn → poll → done/failed, plus
+// resume-from-localStorage and the expired-redirect handling). Everything else
+// on the page is server-rendered.
 export default function GhostButton() {
 	const [state, setState] = useState<AppState>({ kind: "idle" });
 	// The goopy being polled until it is ready. Carries the token so the done
@@ -231,103 +233,114 @@ export default function GhostButton() {
 		}
 	}
 
-	switch (state.kind) {
-		case "idle":
-			// The wrapper is not cosmetic: it is the positioning context the
-			// capacity readout hangs off, which is what keeps the button still
-			// when /capacity finally answers.
-			return (
-				<div className="cta-idle">
-					<button
-						className={`go-button ${isFull ? "disabled" : "idle"}`}
-						onClick={handleGhostNow}
-						disabled={isFull}
-					>
-						Ghost now!
-					</button>
-					<CapacityIndicator capacity={capacity} />
-				</div>
-			);
+	// The goopy and the CTA under it read the same state, so they live in one
+	// island; the switch below only picks what goes under the goopy.
+	function renderCta() {
+		switch (state.kind) {
+			case "idle":
+				// The wrapper is not cosmetic: it is the positioning context the
+				// capacity readout hangs off, which is what keeps the button still
+				// when /capacity finally answers.
+				return (
+					<div className="cta-idle">
+						<button
+							className={`go-button ${isFull ? "disabled" : "idle"}`}
+							onClick={handleGhostNow}
+							disabled={isFull}
+						>
+							Ghost now!
+						</button>
+						<CapacityIndicator capacity={capacity} />
+					</div>
+				);
 
-		case "resuming":
-			return (
-				<>
-					<Spinner />
-					<p className="spawning-message">Checking…</p>
-				</>
-			);
+			case "resuming":
+				return (
+					<>
+						<Spinner />
+						<p className="spawning-message">Checking…</p>
+					</>
+				);
 
-		case "spawning":
-			return (
-				<>
-					<Spinner />
-					<p className="spawning-message">Spawning…</p>
-				</>
-			);
+			case "spawning":
+				return (
+					<>
+						<Spinner />
+						<p className="spawning-message">Spawning…</p>
+					</>
+				);
 
-		case "leaving":
-			return (
-				<>
-					<Spinner />
-					<p className="spawning-message">Destroying…</p>
-				</>
-			);
+			case "leaving":
+				return (
+					<>
+						<Spinner />
+						<p className="spawning-message">Destroying…</p>
+					</>
+				);
 
-		case "done": {
-			const availableUntil = formatExpiry(state.expiresAt, new Date());
-			// Link the admin dashboard rather than the site: claiming the admin
-			// account is the first thing anyone has to do with a fresh Ghost.
-			const admin = adminUrl(state.url);
-			return (
-				<div className="go-button-done-message">
-					<p>Your Ghost is ready at:</p>
-					<a className="go-button-url" href={admin}>
-						{admin}
-					</a>
-					{availableUntil !== null && (
-						<p className="expiry-message">Available until {availableUntil}</p>
-					)}
-					{/* Only with a token: without one, the server would refuse. */}
-					{state.token !== null && (
-						<DestroyButton
-							slug={state.slug}
-							token={state.token}
-							onDestroyed={handleReset}
-							onTokenRejected={handleTokenRejected}
-						/>
-					)}
-				</div>
-			);
+			case "done": {
+				const availableUntil = formatExpiry(state.expiresAt, new Date());
+				// Link the admin dashboard rather than the site: claiming the admin
+				// account is the first thing anyone has to do with a fresh Ghost.
+				const admin = adminUrl(state.url);
+				return (
+					<div className="go-button-done-message">
+						<p>Your Ghost is ready at:</p>
+						<a className="go-button-url" href={admin}>
+							{admin}
+						</a>
+						{availableUntil !== null && (
+							<p className="expiry-message">Available until {availableUntil}</p>
+						)}
+						{/* Only with a token: without one, the server would refuse. */}
+						{state.token !== null && (
+							<DestroyButton
+								slug={state.slug}
+								token={state.token}
+								onDestroyed={handleReset}
+								onTokenRejected={handleTokenRejected}
+							/>
+						)}
+					</div>
+				);
+			}
+
+			case "expired":
+				return (
+					<div className="go-button-done-message">
+						<p className="state-message">This goopy has expired.</p>
+						<button className="go-button idle" onClick={handleReset}>
+							Spawn a new one
+						</button>
+					</div>
+				);
+
+			case "failed":
+				return (
+					<div className="go-button-done-message">
+						<p className="state-message">Goops! Spawning failed.</p>
+						<button className="go-button idle" onClick={handleReset}>
+							Try again!
+						</button>
+						<IssueLink prompt="Still stuck?" />
+					</div>
+				);
+
+			case "error":
+				return (
+					<ErrorMessage
+						message={state.message}
+						code={state.code}
+						onReset={handleReset}
+					/>
+				);
 		}
-
-		case "expired":
-			return (
-				<div className="go-button-done-message">
-					<p className="state-message">This goopy has expired.</p>
-					<button className="go-button idle" onClick={handleReset}>
-						Spawn a new one
-					</button>
-				</div>
-			);
-
-		case "failed":
-			return (
-				<div className="go-button-done-message">
-					<p className="state-message">Goops! Spawning failed.</p>
-					<button className="go-button idle" onClick={handleReset}>
-						Try again!
-					</button>
-					<IssueLink prompt="Still stuck?" />
-				</div>
-			);
-
-		case "error":
-			return (
-				<ErrorMessage
-					message={state.message}
-					code={state.code}
-					onReset={handleReset}
-				/>
-			);
 	}
+
+	return (
+		<>
+			<Goopy />
+			<div className="cta-area">{renderCta()}</div>
+		</>
+	);
 }
