@@ -4,7 +4,8 @@
 
   <!--
     The hero glyph itself: the same 💩 character as .goopy-glyph, under the same
-    hue-rotate/brightness filter and white glow (see .goopy-glyph in globals.css).
+    hue-rotate/brightness filter and white glow (see --goopy-filter-calm and
+    .goopy-glyph in globals.css).
     Rendered with the viewer's emoji font, so the artwork tracks the platform.
   -->
   <text x="32" y="30" font-size="46" text-anchor="middle" dominant-baseline="central"

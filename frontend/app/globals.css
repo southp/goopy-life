@@ -63,7 +63,15 @@ body {
  * an element's children too, so anything hung off the glyph would be tinted
  * along with it.
  */
+/*
+ * The two colours the goopy is handed between: the explosion starts from the
+ * brewing red and lands on the calm blue, so its keyframes read these rather
+ * than copies that could drift. app/icon.svg repeats the calm one by hand: it
+ * is a separate document, out of reach of these.
+ */
 .goopy {
+	--goopy-filter-calm: hue-rotate(180deg) brightness(1.5);
+	--goopy-filter-brewing: hue-rotate(330deg) brightness(1.1) saturate(2.5);
 	position: relative;
 	line-height: 1;
 }
@@ -75,7 +83,7 @@ body {
 .goopy-glyph {
 	display: block;
 	font-size: 8rem;
-	filter: hue-rotate(180deg) brightness(1.5);
+	filter: var(--goopy-filter-calm);
 	opacity: 0.85;
 	text-shadow: 0 0 20px rgba(255, 255, 255, 0.8);
 	transition:
@@ -378,7 +386,7 @@ body {
 
 .goopy[data-mood="brewing"] .goopy-glyph {
 	opacity: 1;
-	filter: hue-rotate(330deg) brightness(1.1) saturate(2.5);
+	filter: var(--goopy-filter-brewing);
 	/* Orange going in: the filter turns the shadow too, and lands it on red. */
 	text-shadow: 0 0 28px rgba(255, 150, 60, 0.9);
 }
@@ -524,14 +532,14 @@ body {
  */
 @keyframes goopy-reborn-glyph {
 	0% {
-		filter: hue-rotate(330deg) brightness(1.1) saturate(2.5);
+		filter: var(--goopy-filter-brewing);
 	}
 	20% {
 		filter: hue-rotate(330deg) brightness(2.5) saturate(1.5);
 	}
 	40%,
 	100% {
-		filter: hue-rotate(180deg) brightness(1.5) saturate(1);
+		filter: var(--goopy-filter-calm);
 	}
 }
 
