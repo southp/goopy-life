@@ -338,7 +338,7 @@ visitors rather than with deployments, and what it carries — the instance's
 public URL, the email typed at `/ghost/` setup — belongs to whoever is holding
 the sandbox.
 
-`render_ghost_config` therefore writes four keys into each instance's
+`render_ghost_config` therefore writes five keys into each instance's
 `config.production.json` whose only job is to keep that traffic from happening.
 They look like clutter, which is exactly the risk: **an empty string that
 silently disables a feature is the kind of line that gets tidied up.** Each one
@@ -349,13 +349,21 @@ carries a comment in `ghost_provisioner.rs` saying why it is there.
 | `explore.update_url: ""` | Boot-time POST of the instance URL, site UUID, theme and post counts to `explore.ghost.org` | **Yes** — `ping()` returns early on a falsy URL |
 | `updateCheck.url: ""` | Daily GET to `updates.ghost.org` | **No** — see below |
 | `privacy.useGravatar: false` | Hashing the setup email and fetching it from Gravatar | Yes |
-| `privacy.useIndexNow: false` | Announcing each published post's URL to search engines | Yes |
+| `privacy.useIndexNow: false` | Announcing each published post's URL to search engines (Ghost 6) | Yes |
+| `privacy.useRpcPing: false` | POSTing each published post's URL to `rpc.pingomatic.com` (Ghost 5) | Yes — `ping()` returns early on the flag |
+
+Every key goes to every version (#210). Ghost 6 has no RPC ping and Ghost 5 has
+no IndexNow, and each version simply never reads the other's key, so one
+rendered config covers the whole curated list with no branch on the version.
+Verified against 5.130.6, 6.63.0 and 6.71.0: Ghost 5's explore ping guards an
+empty URL and its update check fails on one exactly as 6's does (below), and
+the privacy flags above are the only ones that reach a third party.
 
 Two things deliberately left alone: `explore.testimonials_url` (a GET the admin
 UI makes, not a POST of our data) and `useStructuredData` (emits schema.org and
 OG tags, makes no outbound request — a sandbox should render like a real Ghost).
-This is also why the config names the two privacy flags individually instead of
-using `privacy.useTinfoil: true`, which would disable all three at once.
+This is also why the config names the privacy flags individually instead of
+using `privacy.useTinfoil: true`, which would also disable structured data.
 
 `tinybird` needs no entry: it defaults to `null` upstream, so Ghost's stats
 pipeline is already off.
@@ -510,8 +518,10 @@ Instances are **pinned to the version they were created with**: each one is
 stamped with a `service_version` at spawn time, and provisioned from that
 version's entry, so its symlinks name that version-stamped install directly.
 An instance created against `ghost-6.63.0` keeps pointing there whatever the
-config says afterwards. Until visitors can choose (#210), every new instance
-gets `default_version`; other entries are prepared and checked, but unused.
+config says afterwards. A spawn may ask for any entry (`POST /goopies` with
+`{"ghost_version": "…"}`, or `gl-cli spawn --ghost …`); one that names none
+gets `default_version`, and one that names a version with no entry is refused
+with `400 unknown_version` before anything is allocated.
 
 To move the default to a new version:
 
