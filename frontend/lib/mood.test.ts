@@ -21,7 +21,14 @@ test("a spawning goopy wobbles", () => {
 	assert.equal(moodFor({ kind: "spawning" }), "wobbling");
 });
 
-const done = { kind: "done", slug: "a-b-c", url: "", expiresAt: "", token: "t" } as const;
+const done = {
+	kind: "done",
+	slug: "a-b-c",
+	url: "",
+	expiresAt: "",
+	token: "t",
+	ghostVersion: null,
+} as const;
 
 test("a ready goopy is proud", () => {
 	assert.equal(moodFor(done), "proud");

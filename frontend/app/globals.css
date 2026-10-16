@@ -827,6 +827,70 @@ body {
 	word-break: normal;
 }
 
+/* ── Ghost version selector (#210) ──────────────────────────────────────── */
+
+/*
+ * Above the button, out of flow, for the reason .capacity-slot is below it:
+ * the list arrives after the first paint, and an in-flow control would push the
+ * button down under the visitor's cursor. .cta-area centres a 3rem button in
+ * 8rem, which leaves this 2.5rem to sit in without reaching the goopy.
+ */
+.version-slot {
+	position: absolute;
+	bottom: 100%;
+	left: 50%;
+	transform: translateX(-50%);
+	margin-bottom: 0.5rem;
+	animation: version-fade-in 300ms ease-out both;
+}
+
+/*
+ * Quieter than the CTA, like the destroy button: an outline, muted text. It is
+ * a setting for the click, not a second call to action.
+ */
+.version-select {
+	appearance: none;
+	border: 1px solid #3a3a3a;
+	border-radius: 64px;
+	background: var(--background)
+		url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23aaa' stroke-width='1.5'/%3E%3C/svg%3E")
+		no-repeat right 0.75rem center;
+	padding: 0.25rem 2rem 0.25rem 0.875rem;
+	color: #aaa;
+	font: inherit;
+	font-size: 0.8125rem;
+	line-height: 1.25rem;
+	cursor: pointer;
+	transition-property: color, border-color;
+	transition-duration: 150ms;
+}
+
+.version-select:hover,
+.version-select:focus-visible {
+	border-color: #777;
+	color: var(--foreground);
+}
+
+.version-select:focus-visible {
+	outline: 2px solid var(--foreground);
+	outline-offset: 2px;
+}
+
+@keyframes version-fade-in {
+	from {
+		opacity: 0;
+	}
+	to {
+		opacity: 1;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.version-slot {
+		animation: none;
+	}
+}
+
 /* ── Capacity indicator ─────────────────────────────────────────────────── */
 
 /*
