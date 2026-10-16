@@ -97,8 +97,9 @@ A thin layer over `gl-core`. Since `GoopyRegistry` is sync, the server uses `spa
 
 Planned endpoints (full API is in progress — see #6):
 
-- `POST /goopies` — create a goopy; the response carries a one-time `despawn_token`
-- `GET /goopies/:slug` — query goopy info
+- `POST /goopies` — create a goopy; the response carries a one-time `despawn_token`. An optional JSON body `{"ghost_version": "6.71.0"}` picks the Ghost; no body spawns the default, and a version not offered is `400` with code `unknown_version` (#210)
+- `GET /ghost-versions` — `{"default": "...", "versions": [{"version": "..."}]}`, what `POST /goopies` may ask for. Fetched at runtime, unlike `/config`
+- `GET /goopies/:slug` — query goopy info, including the `ghost_version` it runs
 - `DELETE /goopies/:slug` — destroy a goopy before it expires; needs `Authorization: Bearer <despawn_token>` (#203)
 - `GET /goopies/:slug/alive` — expiration check (used by nginx `auth_request`)
 - `GET /config` — public configuration for the frontend
