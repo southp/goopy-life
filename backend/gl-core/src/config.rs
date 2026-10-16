@@ -1267,6 +1267,23 @@ kind = "Hello"
         assert_eq!(provisioner.service_version(), "5.87.1");
     }
 
+    /// `build_provisioner` boxes the provisioner, and the box must forward
+    /// `versions` rather than fall back to the trait default, which would
+    /// offer only `service_version` (#210).
+    #[test]
+    fn a_built_ghost_provisioner_offers_every_configured_version() {
+        let toml = ghost_toml(
+            "default_version = \"5.87.1\"",
+            &format!(
+                "[[provisioner.versions]]\nversion = \"6.71.0\"\n\
+                 source_dir = \"/opt/goopy-life/ghost-6.71.0\"\n{ONE_INSTALL}"
+            ),
+        );
+        let cfg = write_config(&toml).expect("should parse");
+        let provisioner = cfg.build_provisioner(Arc::new(crate::RealSysRunner));
+        assert_eq!(provisioner.versions(), ["6.71.0", "5.87.1"]);
+    }
+
     /// The hazard #163 closes: a `dev_mode = false` config must build a
     /// production provisioner, whatever the caller thinks the mode is. A
     /// dev-mode despawn on a host kills a detached process and leaves the
