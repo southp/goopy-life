@@ -57,8 +57,10 @@ DOMAIN=goopy.life
 # goopy.life's DNS is at DigitalOcean today.
 DNS_PLUGIN=dns-digitalocean
 
-# Ghost 6.63.0 requires Node ^22.23.1 || ^24.20.0, and nothing checks it before
-# an instance boots (docs/GHOST_PROVISIONER.md). Pinned to what dev runs.
+# Every Ghost prod.toml offers runs on this one Node: 6.71.0 and 6.63.0 require
+# ^22.23.1 || ^24.20.0, and 5.130.6 ^18.12.1 || ^20.11.1 || ^22.13.1. Only
+# deploy/ghost-install.sh checks that before an instance boots
+# (docs/GHOST_PROVISIONER.md). Pinned to what dev runs.
 NODE_VERSION=22.23.2-1nodesource1
 NODESOURCE_KEY_URL=https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
 # Compared after download: a key served by anyone else is refused.
@@ -68,7 +70,8 @@ APP_DIR=/opt/goopy-life
 # The port of prod.toml's bind_address: gl-serv on loopback, for nginx alone.
 GL_SERV_PORT=3000
 # prod.toml's default_version, whose [[provisioner.versions]] entry names it.
-GHOST_VERSION=6.63.0
+# The others are deploy/ghost-install.sh's to prepare, after this has run.
+GHOST_VERSION=6.71.0
 
 # 4 GB of swap with zswap is what the capacity caps of 20 were measured on
 # (#113); a 2 GB host without it serves about 10, and nothing errors at 11. Two

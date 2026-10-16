@@ -154,7 +154,7 @@ kind = "Ghost"
 # The Ghost new instances get: one of the [[provisioner.versions]] below, and
 # stamped onto each instance as service_version. deploy/host-bootstrap.sh
 # prepares this one; deploy/tests/host-bootstrap.test.sh holds the two together.
-default_version = "6.63.0"
+default_version = "6.71.0"
 # The account each instance's systemd unit runs as (#187): no shell, no sudo,
 # owning nothing but each instance's content/. Never `goopy`, which holds the
 # deploy's sudo rules, so code execution inside Ghost would be root. The
@@ -180,6 +180,13 @@ ready_poll_ms = 500
 # --check-config refuses one whose install is missing. Keys after an entry's
 # header belong to that entry, so these stay last in the file.
 [[provisioner.versions]]
+# The latest, and the default (#210).
+version = "6.71.0"
+source_dir = "/opt/goopy-life/ghost-6.71.0"
+# Ghost 6.71.0 requires Node ^22.23.1 || ^24.20.0: the host's pinned 22.23.2.
+node_bin = "/usr/bin/node"
+
+[[provisioner.versions]]
 # Stamped onto every instance as service_version. Must name what source_dir
 # actually holds; nothing cross-checks them at startup.
 version = "6.63.0"
@@ -191,4 +198,13 @@ version = "6.63.0"
 source_dir = "/opt/goopy-life/ghost-6.63.0"
 # Absolute path — systemd does not search PATH for ExecStart. Ghost 6.63.0
 # requires Node ^22.23.1 || ^24.20.0; deploy/host-bootstrap.sh pins 22.23.2.
+node_bin = "/usr/bin/node"
+
+[[provisioner.versions]]
+# The last Ghost 5, for themes and sites that have not moved to 6 (#210). Its
+# sqlite3 is compiled on this Node, which is why the host carries
+# build-essential and python3-setuptools (deploy/ghost-install.remote.sh).
+version = "5.130.6"
+source_dir = "/opt/goopy-life/ghost-5.130.6"
+# Ghost 5.130.6 requires Node ^18.12.1 || ^20.11.1 || ^22.13.1: the same 22.23.2.
 node_bin = "/usr/bin/node"
