@@ -190,41 +190,45 @@ fn a_ghost_deploy_config_names_a_version_stamped_source_dir() {
             continue;
         };
 
-        // Absolute: the provisioner symlinks instances at this path as written,
-        // and each instance's working directory is somewhere else entirely.
-        assert!(
-            ghost.source_dir.is_absolute(),
-            "{}: source_dir {} must be absolute",
-            path.display(),
-            ghost.source_dir.display()
-        );
+        for install in &ghost.versions {
+            // Absolute: the provisioner symlinks instances at this path as
+            // written, and each instance's working directory is somewhere else
+            // entirely.
+            assert!(
+                install.source_dir.is_absolute(),
+                "{}: Ghost {}'s source_dir {} must be absolute",
+                path.display(),
+                install.version,
+                install.source_dir.display()
+            );
 
-        let dir_name = ghost
-            .source_dir
-            .file_name()
-            .expect("an absolute source_dir has a final component")
-            .to_string_lossy();
-        // A bare suffix match is not enough: `ghost-6.63.0` ends with `3.0`,
-        // so a truncated or otherwise mistyped version would sail through the
-        // very check meant to catch it. Require the version to start at a
-        // boundary — either the whole component, or preceded by something that
-        // could not itself be part of a version number.
-        let stamped = dir_name
-            .strip_suffix(ghost.version.as_str())
-            .is_some_and(|prefix| {
-                prefix.is_empty()
-                    || !prefix.ends_with(|c: char| c.is_ascii_alphanumeric() || c == '.')
-            });
-        assert!(
-            stamped,
-            "{}: source_dir {dir_name} is not stamped with version {} — the \
-             version must be the final component or follow a separator, so \
-             that a partial match like `ghost-6.63.0` against `3.0` does not \
-             pass. The two keys disagree, and instances would be stamped with \
-             a version the install does not hold",
-            path.display(),
-            ghost.version
-        );
+            let dir_name = install
+                .source_dir
+                .file_name()
+                .expect("an absolute source_dir has a final component")
+                .to_string_lossy();
+            // A bare suffix match is not enough: `ghost-6.63.0` ends with
+            // `3.0`, so a truncated or otherwise mistyped version would sail
+            // through the very check meant to catch it. Require the version to
+            // start at a boundary — either the whole component, or preceded by
+            // something that could not itself be part of a version number.
+            let stamped = dir_name
+                .strip_suffix(install.version.as_str())
+                .is_some_and(|prefix| {
+                    prefix.is_empty()
+                        || !prefix.ends_with(|c: char| c.is_ascii_alphanumeric() || c == '.')
+                });
+            assert!(
+                stamped,
+                "{}: source_dir {dir_name} is not stamped with version {} — the \
+                 version must be the final component or follow a separator, so \
+                 that a partial match like `ghost-6.63.0` against `3.0` does not \
+                 pass. The two keys disagree, and instances would be stamped with \
+                 a version the install does not hold",
+                path.display(),
+                install.version
+            );
+        }
     }
 }
 
