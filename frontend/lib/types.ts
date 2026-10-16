@@ -1,5 +1,7 @@
 // Core data definitions shared across the frontend.
 
+export type { GhostVersionsResponse } from "./ghostVersions";
+
 export type GoopyStatus =
 	| "Spawning"
 	| "Done"
@@ -24,6 +26,9 @@ export interface GoopyResponse {
 	created_at: string;
 	expires_at: string;
 	is_expired: boolean;
+	// The Ghost this goopy runs (#210). Optional: a backend from before #210
+	// sends none.
+	ghost_version?: string;
 }
 
 export interface ApiError {

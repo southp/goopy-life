@@ -9,6 +9,11 @@ test("capacity and rate-limit refusals are expected", () => {
 	}
 });
 
+// The chosen version was dropped by a deploy between page load and click.
+test("a version no longer offered is expected", () => {
+	assert.equal(isExpectedError("unknown_version"), true);
+});
+
 test("any other code is a fault", () => {
 	assert.equal(isExpectedError("internal"), false);
 });
