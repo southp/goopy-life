@@ -19,7 +19,7 @@ use crate::sys_utils::SysRunner;
 ///
 /// A full Ghost install is ~200 MB of `node_modules`, and installing one per
 /// instance would dominate provisioning time. Instead every instance shares a
-/// single prepared install at [`GhostConfig::source_dir`] (see
+/// single prepared install per Ghost version, [`GhostInstall::source_dir`] (see
 /// `docs/GHOST_PROVISIONER.md` for how to prepare it) and the working directory
 /// is assembled from it in two parts:
 ///
@@ -65,22 +65,22 @@ pub struct GhostProvisioner {
 /// when `kind = "Ghost"`.
 ///
 /// These values travel together from config to provisioner, so they are one
-/// type rather than a handful of constructor arguments.
+/// type rather than a handful of constructor arguments. Settings shared by
+/// every Ghost a host offers sit on the section itself; what differs per
+/// version is one [`GhostInstall`] per `[[provisioner.versions]]` entry (#210).
+///
+/// Deserialized through [`RawGhostConfig`], so that a parsed config always
+/// names at least one install, each version once, and a `default_version`
+/// that is one of them.
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(try_from = "RawGhostConfig")]
 pub struct GhostConfig {
-    /// Prepared base Ghost install that every instance soft-links to.
-    /// See `docs/GHOST_PROVISIONER.md` for how to prepare it.
-    pub source_dir: PathBuf,
-    /// Version of the base install, recorded on each instance it provisions.
-    ///
-    /// Deliberately configured rather than read from `source_dir/package.json`:
-    /// upgrading is an operator action (prepare a new install, repoint the
-    /// symlink, bump this), and pinning must not silently follow the base
-    /// install if that symlink moves under running instances.
-    pub version: String,
-    /// Node.js binary used to run Ghost. systemd requires an absolute path.
-    #[serde(default = "default_node_bin")]
-    pub node_bin: String,
+    /// The version new instances get: the [`GhostInstall::version`] of one of
+    /// [`Self::versions`], and what [`GoopyProvisioner::service_version`]
+    /// reports.
+    pub default_version: String,
+    /// Every Ghost this host offers, in config order.
+    pub versions: Vec<GhostInstall>,
     /// OS account the per-instance systemd unit runs as. Production mode only:
     /// dev mode runs Ghost as gl-serv's own user.
     ///
@@ -102,6 +102,109 @@ pub struct GhostConfig {
     /// Gap between readiness probes, in milliseconds.
     #[serde(default = "default_ready_poll_ms")]
     pub ready_poll_ms: u64,
+}
+
+/// One prepared base install: a `[[provisioner.versions]]` entry.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct GhostInstall {
+    /// The Ghost release the install holds, recorded on each instance it
+    /// provisions as `service_version`.
+    ///
+    /// Deliberately configured rather than read from `source_dir/package.json`:
+    /// adding a version is an operator action (prepare the install with
+    /// `deploy/ghost-install.sh`, then name it here), and an instance must stay
+    /// pinned to what it was created with whatever later happens on disk.
+    pub version: String,
+    /// The prepared install every instance of this version soft-links to.
+    /// See `docs/GHOST_PROVISIONER.md` for how to prepare it.
+    pub source_dir: PathBuf,
+    /// Node.js binary that runs this version. systemd requires an absolute
+    /// path. Per version, because each release names its own `engines.node`.
+    #[serde(default = "default_node_bin")]
+    pub node_bin: String,
+}
+
+impl GhostConfig {
+    /// The install for `version`, if this host offers it.
+    pub fn install(&self, version: &str) -> Option<&GhostInstall> {
+        self.versions
+            .iter()
+            .find(|install| install.version == version)
+    }
+}
+
+/// [`GhostConfig`] as written, before it is checked.
+///
+/// `version`, `source_dir` and `node_bin` are here only to recognise a config
+/// in the shape before #210, where they sat on `[provisioner]` itself, and to
+/// say what moved instead of reporting a missing `default_version`.
+#[derive(serde::Deserialize)]
+struct RawGhostConfig {
+    default_version: Option<String>,
+    #[serde(default)]
+    versions: Vec<GhostInstall>,
+    #[serde(default = "default_service_user")]
+    service_user: String,
+    #[serde(default = "default_ready_timeout_secs")]
+    ready_timeout_secs: u64,
+    #[serde(default = "default_ready_poll_ms")]
+    ready_poll_ms: u64,
+    version: Option<String>,
+    source_dir: Option<PathBuf>,
+    node_bin: Option<String>,
+}
+
+impl TryFrom<RawGhostConfig> for GhostConfig {
+    type Error = String;
+
+    fn try_from(raw: RawGhostConfig) -> Result<Self, Self::Error> {
+        if raw.version.is_some() || raw.source_dir.is_some() || raw.node_bin.is_some() {
+            return Err("provisioner.version, source_dir and node_bin now go in a \
+                 [[provisioner.versions]] entry, one per Ghost the host offers, \
+                 with provisioner.default_version naming the one new instances \
+                 get (#210)"
+                .to_string());
+        }
+        if raw.versions.is_empty() {
+            return Err(
+                "provisioner needs at least one [[provisioner.versions]] entry".to_string(),
+            );
+        }
+        for (i, install) in raw.versions.iter().enumerate() {
+            if raw.versions[..i]
+                .iter()
+                .any(|earlier| earlier.version == install.version)
+            {
+                return Err(format!(
+                    "provisioner.versions lists Ghost {} twice",
+                    install.version
+                ));
+            }
+        }
+        let Some(default_version) = raw.default_version else {
+            return Err(
+                "provisioner.default_version must name the version new instances get".to_string(),
+            );
+        };
+        if !raw.versions.iter().any(|i| i.version == default_version) {
+            return Err(format!(
+                "provisioner.default_version {default_version} is not one of \
+                 provisioner.versions ({})",
+                raw.versions
+                    .iter()
+                    .map(|i| i.version.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        Ok(GhostConfig {
+            default_version,
+            versions: raw.versions,
+            service_user: raw.service_user,
+            ready_timeout_secs: raw.ready_timeout_secs,
+            ready_poll_ms: raw.ready_poll_ms,
+        })
+    }
 }
 
 fn default_node_bin() -> String {
@@ -201,15 +304,19 @@ impl GhostProvisioner {
 
     /// Assembles the instance directory: symlinks to the shared install for the
     /// read-only parts, real empty directories for everything Ghost writes.
-    fn materialize_instance_dir(&self, working_dir: &Path) -> Result<(), Error> {
+    fn materialize_instance_dir(
+        &self,
+        install: &GhostInstall,
+        working_dir: &Path,
+    ) -> Result<(), Error> {
         info!(
             working_dir = %working_dir.display(),
-            source = %self.ghost.source_dir.display(),
+            source = %install.source_dir.display(),
             "linking instance against base Ghost install"
         );
 
         for entry in SHARED_ENTRIES {
-            Self::force_symlink(&self.ghost.source_dir.join(entry), &working_dir.join(entry))?;
+            Self::force_symlink(&install.source_dir.join(entry), &working_dir.join(entry))?;
         }
 
         let content = working_dir.join("content");
@@ -222,7 +329,7 @@ impl GhostProvisioner {
         // Ghost bundles — and which one a fresh site activates — varies by
         // release. A user-uploaded theme lands in the instance's own (real)
         // content/themes directory alongside these links.
-        let source_themes = self.ghost.source_dir.join("content").join("themes");
+        let source_themes = install.source_dir.join("content").join("themes");
         for entry in fs::read_dir(&source_themes).map_err(Error::Io)? {
             let entry = entry.map_err(Error::Io)?;
             Self::force_symlink(
@@ -512,7 +619,12 @@ impl GhostProvisioner {
     /// (#136), which *creates* ZFS mounts; an instance only uses a dataset that
     /// is already mounted, and `After=zfs-mount.service` keeps that true after
     /// a reboot.
-    fn render_service_file(&self, slug: &str, working_dir: &Path) -> String {
+    fn render_service_file(
+        &self,
+        install: &GhostInstall,
+        slug: &str,
+        working_dir: &Path,
+    ) -> String {
         format!(
             r#"[Unit]
 Description=Goopy Ghost - {slug}
@@ -570,9 +682,9 @@ WantedBy=multi-user.target
 "#,
             user = self.ghost.service_user,
             init_bin = INIT_BIN,
-            node_bin = self.ghost.node_bin,
+            node_bin = install.node_bin,
             working_dir = working_dir.display(),
-            source_dir = self.ghost.source_dir.display(),
+            source_dir = install.source_dir.display(),
             service_dir = SERVICE_DIR,
         )
     }
@@ -591,8 +703,8 @@ WantedBy=multi-user.target
 
     // ── Inner provision (post-allocate steps) ───────────────────────────
 
-    fn provision_inner(&self, goopy: &Goopy) -> Result<(), Error> {
-        self.materialize_instance_dir(&goopy.working_dir)?;
+    fn provision_inner(&self, install: &GhostInstall, goopy: &Goopy) -> Result<(), Error> {
+        self.materialize_instance_dir(install, &goopy.working_dir)?;
         self.write_ghost_config(goopy)?;
 
         if self.dev_mode {
@@ -601,7 +713,7 @@ WantedBy=multi-user.target
             dev_process::spawn(
                 self.sys.as_ref(),
                 &goopy.working_dir,
-                &self.ghost.node_bin,
+                &install.node_bin,
                 &["index.js"],
                 &[("NODE_ENV", "production")],
                 "ghost.log",
@@ -624,7 +736,7 @@ WantedBy=multi-user.target
             systemd::install_and_start(
                 self.sys.as_ref(),
                 &Self::service_name(&goopy.slug),
-                &self.render_service_file(&goopy.slug, &goopy.working_dir),
+                &self.render_service_file(install, &goopy.slug, &goopy.working_dir),
             )?;
             // Before nginx, not after: the site is the visitor-facing half, and
             // there is no point publishing a route to a Ghost that still
@@ -659,25 +771,37 @@ impl GoopyProvisioner for GhostProvisioner {
         ProvisionerKind::Ghost
     }
 
-    /// The configured version of the base install. Recorded on each instance so
-    /// it stays pinned to the Ghost it was created with, even after the operator
-    /// upgrades the base install for subsequent instances.
+    /// The configured `default_version`. Recorded on each instance so it stays
+    /// pinned to the Ghost it was created with, even after the operator moves
+    /// the default for subsequent instances.
     fn service_version(&self) -> &str {
-        &self.ghost.version
+        &self.ghost.default_version
     }
 
+    /// Provisions the instance against the install for its own
+    /// `service_version`, not the current default: the version is fixed when
+    /// the row is created, and this is what makes the pin real.
     #[instrument(skip(self), fields(slug = %goopy.slug, dev_mode = self.dev_mode))]
     fn provision(&self, goopy: &Goopy) -> Result<(), Error> {
+        // Step 0: the install, before anything is allocated that would then
+        // need releasing.
+        let install = self.ghost.install(&goopy.service_version).ok_or_else(|| {
+            Error::Config(format!(
+                "Ghost {} is not one of provisioner.versions",
+                goopy.service_version
+            ))
+        })?;
+
         // Step 1: allocate storage
         self.storage.allocate(&goopy.working_dir)?;
 
         // Step 2: all post-allocate steps; release storage on failure
-        if let Err(e) = self.provision_inner(goopy) {
+        if let Err(e) = self.provision_inner(install, goopy) {
             let _ = self.storage.release(&goopy.working_dir);
             return Err(e);
         }
 
-        info!(slug = %goopy.slug, version = %self.ghost.version, "provisioning complete");
+        info!(slug = %goopy.slug, version = %install.version, "provisioning complete");
         Ok(())
     }
 
@@ -745,6 +869,16 @@ mod tests {
         }
     }
 
+    /// The one install the test provisioner offers: `source`, as 5.87.1, the
+    /// version `test_goopy` is stamped with.
+    fn test_install(source: &TempDir) -> GhostInstall {
+        GhostInstall {
+            version: "5.87.1".to_string(),
+            source_dir: source.path().to_path_buf(),
+            node_bin: "/usr/bin/node".to_string(),
+        }
+    }
+
     fn provisioner(dev_mode: bool, source: &TempDir, sys: Arc<dyn SysRunner>) -> GhostProvisioner {
         provisioner_with_budget(dev_mode, source, sys, default_ready_timeout_secs(), 5)
     }
@@ -763,9 +897,8 @@ mod tests {
             dev_mode,
             "127.0.0.1:3000".to_string(),
             GhostConfig {
-                source_dir: source.path().to_path_buf(),
-                version: "5.87.1".to_string(),
-                node_bin: "/usr/bin/node".to_string(),
+                default_version: "5.87.1".to_string(),
+                versions: vec![test_install(source)],
                 service_user: "goopy-ghost".to_string(),
                 ready_timeout_secs,
                 ready_poll_ms,
@@ -859,6 +992,106 @@ mod tests {
             "without loggingrc.js in the instance dir, Ghost logs to stdout only \
              and content/logs stays empty"
         );
+    }
+
+    /// A provisioner offering two installs: 5.87.1 from `default` (the
+    /// default) and 6.71.0 from `other`, on a Node of its own.
+    fn two_version_provisioner(default: &TempDir, other: &TempDir) -> GhostProvisioner {
+        GhostProvisioner::new(
+            "goopy.life".to_string(),
+            true,
+            "127.0.0.1:3000".to_string(),
+            GhostConfig {
+                default_version: "5.87.1".to_string(),
+                versions: vec![
+                    test_install(default),
+                    GhostInstall {
+                        version: "6.71.0".to_string(),
+                        source_dir: other.path().to_path_buf(),
+                        node_bin: "/opt/goopy-node/22.23.2/bin/node".to_string(),
+                    },
+                ],
+                service_user: "goopy-ghost".to_string(),
+                ready_timeout_secs: default_ready_timeout_secs(),
+                ready_poll_ms: 5,
+            },
+            Arc::new(PlainDirAllocator),
+            Arc::new(MockSysRunner::new()),
+        )
+    }
+
+    /// The pin (#210): an instance is built from the install its own
+    /// `service_version` names, whatever the default is.
+    #[test]
+    fn provision_links_the_install_for_the_instances_own_version() {
+        let default = fake_ghost_source();
+        let other = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let p = two_version_provisioner(&default, &other);
+        assert_eq!(
+            p.service_version(),
+            "5.87.1",
+            "new instances get the default"
+        );
+        let mut goopy = test_goopy(&working_dir, 9876);
+        goopy.service_version = "6.71.0".to_string();
+        p.provision(&goopy).expect("dev provision should succeed");
+
+        for entry in SHARED_ENTRIES {
+            assert_eq!(
+                fs::read_link(working_dir.join(entry)).unwrap(),
+                other.path().join(entry),
+                "{entry} must link into 6.71.0's install, not the default's"
+            );
+        }
+    }
+
+    /// And its unit runs that version's Node, with that install bound in.
+    #[test]
+    fn the_unit_for_a_version_names_its_own_node_and_install() {
+        let default = fake_ghost_source();
+        let other = fake_ghost_source();
+        let p = two_version_provisioner(&default, &other);
+        let install = p.ghost.install("6.71.0").expect("6.71.0 is offered");
+
+        let unit = p.render_service_file(install, "tasty-lucky-clover", Path::new("/data/x"));
+
+        assert!(
+            unit.contains("-- /opt/goopy-node/22.23.2/bin/node \"/data/x/index.js\""),
+            "ExecStart must run 6.71.0's own Node:\n{unit}"
+        );
+        assert!(
+            unit.contains(&format!("BindReadOnlyPaths={}\n", other.path().display())),
+            "the unit must bind 6.71.0's install:\n{unit}"
+        );
+        assert!(
+            !unit.contains(&default.path().display().to_string()),
+            "the default's install has no business in this unit:\n{unit}"
+        );
+    }
+
+    /// A row stamped with a version this host does not offer (removed from
+    /// the config since) fails before any storage is allocated, so nothing
+    /// needs releasing.
+    #[test]
+    fn provision_refuses_a_version_it_does_not_offer_before_allocating() {
+        let default = fake_ghost_source();
+        let other = fake_ghost_source();
+        let base = tempdir().unwrap();
+        let working_dir = base.path().join("tasty-lucky-clover");
+
+        let p = two_version_provisioner(&default, &other);
+        let mut goopy = test_goopy(&working_dir, 9876);
+        goopy.service_version = "6.63.0".to_string();
+        let err = p.provision(&goopy).expect_err("6.63.0 is not offered");
+
+        assert!(
+            matches!(err, Error::Config(ref s) if s.contains("6.63.0")),
+            "was: {err:?}"
+        );
+        assert!(!working_dir.exists(), "nothing may have been allocated");
     }
 
     #[test]
@@ -1446,7 +1679,7 @@ mod tests {
     /// non-comment lines.
     fn prod_unit_lines(source: &TempDir, working_dir: &Path) -> Vec<String> {
         let p = provisioner(false, source, Arc::new(MockSysRunner::new()));
-        p.render_service_file("tasty-lucky-clover", working_dir)
+        p.render_service_file(&test_install(source), "tasty-lucky-clover", working_dir)
             .lines()
             .map(str::trim)
             .filter(|l| !l.is_empty() && !l.starts_with('#'))
