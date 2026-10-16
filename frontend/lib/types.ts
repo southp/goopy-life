@@ -83,7 +83,15 @@ export type AppState =
 	| { kind: "resuming"; slug: string; token: string | null }
 	| { kind: "spawning" }
 	// `expiresAt` is the API's ISO timestamp, kept raw; it is formatted for display.
-	| { kind: "done"; slug: string; url: string; expiresAt: string; token: string | null }
+	// `ghostVersion` is null when the backend did not say (before #210).
+	| {
+			kind: "done";
+			slug: string;
+			url: string;
+			expiresAt: string;
+			token: string | null;
+			ghostVersion: string | null;
+	  }
 	// A destroy is underway — just accepted from the destroy button, or picked
 	// up after a reload mid-"Destroying…"; waits for the goopy to be gone, then
 	// returns to idle.

@@ -5,10 +5,18 @@ import { adminUrl } from '@/lib/admin';
 import { ApiRequestError, getGoopy, spawnGoopy, waitUntilGone } from '@/lib/api';
 import { LOCALSTORAGE_KEY, POLL_INTERVAL_MS } from '@/lib/constants';
 import { formatExpiry } from '@/lib/expiry';
+import {
+	GHOST_VERSION_KEY,
+	offersChoice,
+	pickVersion,
+	versionLabel,
+	versionToRequest,
+} from '@/lib/ghostVersions';
 import { moodFor } from '@/lib/mood';
 import { resumeAt } from '@/lib/resume';
 import { parseStoredGoopy, serializeStoredGoopy, type StoredGoopy } from '@/lib/session';
 import { useCapacity } from '@/lib/useCapacity';
+import { useGhostVersions } from '@/lib/useGhostVersions';
 import type { AppState, GoopyResponse } from '@/lib/types';
 import CapacityIndicator from '@/components/CapacityIndicator';
 import DestroyButton from '@/components/DestroyButton';
@@ -16,6 +24,7 @@ import ErrorMessage from '@/components/ErrorMessage';
 import Goopy from '@/components/Goopy';
 import IssueLink from '@/components/IssueLink';
 import Spinner from '@/components/Spinner';
+import VersionSelect from '@/components/VersionSelect';
 
 /** Turn a thrown request failure into the error state, preserving the API code. */
 function errorState(err: unknown): AppState {
@@ -34,6 +43,7 @@ function doneState(data: GoopyResponse, token: string | null): AppState {
 		url: data.url,
 		expiresAt: data.expires_at,
 		token,
+		ghostVersion: data.ghost_version ?? null,
 	};
 }
 
@@ -58,6 +68,12 @@ export default function GhostButton() {
 	// Unknown capacity (first poll not back, or /capacity unreachable) must not
 	// disable the button: the 503 is the real guard, so we fail open.
 	const isFull = capacity?.is_full ?? false;
+	// The Ghost versions on offer, read whenever the button is (#210). Unknown
+	// means no selector and the server's default, so it fails open the same way.
+	const ghostVersions = useGhostVersions(state.kind === "idle");
+	// The version this browser last picked, if any; pickVersion decides what is
+	// preselected from it and from what is currently offered.
+	const [rememberedVersion, setRememberedVersion] = useState<string | null>(null);
 
 	// Resolve the initial state from browser-only sources (the ?expired query param and
 	// localStorage) after mount. This must run in an effect rather than a lazy useState
@@ -66,6 +82,7 @@ export default function GhostButton() {
 	// set-state-in-effect rule is therefore suppressed for these post-mount reads.
 	/* eslint-disable react-hooks/set-state-in-effect */
 	useEffect(() => {
+		setRememberedVersion(localStorage.getItem(GHOST_VERSION_KEY));
 		const params = new URLSearchParams(window.location.search);
 		if (params.has("expired")) {
 			window.history.replaceState({}, "", "/");
@@ -238,12 +255,19 @@ export default function GhostButton() {
 		return () => controller.abort();
 	}, [leavingSlug, handleDestroyed]);
 
+	function handleVersionChange(version: string) {
+		setRememberedVersion(version);
+		localStorage.setItem(GHOST_VERSION_KEY, version);
+	}
+
 	async function handleGhostNow() {
 		setJustDestroyed(false);
 		setState({ kind: "spawning" });
 
 		try {
-			const { slug, despawn_token } = await spawnGoopy();
+			const { slug, despawn_token } = await spawnGoopy(
+				versionToRequest(ghostVersions, rememberedVersion),
+			);
 			const spawned: StoredGoopy = { slug, token: despawn_token ?? null };
 			localStorage.setItem(LOCALSTORAGE_KEY, serializeStoredGoopy(spawned));
 			setPolling(spawned);
@@ -266,6 +290,13 @@ export default function GhostButton() {
 				// when /capacity finally answers.
 				return (
 					<div className="cta-idle">
+						{offersChoice(ghostVersions) && (
+							<VersionSelect
+								offered={ghostVersions}
+								value={pickVersion(ghostVersions, rememberedVersion)}
+								onChange={handleVersionChange}
+							/>
+						)}
 						<button
 							className={`go-button ${isFull ? "disabled" : "idle"}`}
 							onClick={handleGhostNow}
@@ -308,7 +339,10 @@ export default function GhostButton() {
 				const admin = adminUrl(state.url);
 				return (
 					<div className="go-button-done-message">
-						<p>Your Ghost is ready at:</p>
+						<p>
+							Your {state.ghostVersion !== null ? versionLabel(state.ghostVersion) : "Ghost"}{" "}
+							is ready at:
+						</p>
 						<a className="go-button-url" href={admin}>
 							{admin}
 						</a>
