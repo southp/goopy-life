@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
-import { ApiRequestError, destroyGoopy, isLastWord, waitUntilGone } from "./api.ts";
+import {
+	ApiRequestError,
+	destroyGoopy,
+	getGhostVersions,
+	isLastWord,
+	spawnGoopy,
+	waitUntilGone,
+} from "./api.ts";
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -131,4 +138,46 @@ test("waiting stops when aborted", async () => {
 
 	await assert.rejects(waitUntilGone("a-b-c", { intervalMs: 50, signal: controller.signal }));
 	assert.equal(calls.length, 1);
+});
+
+// With no choice to offer, the spawn is byte-for-byte what it was before #210:
+// no body and no Content-Type, so the browser sends it without a preflight.
+test("a spawn without a version sends no body", async () => {
+	const calls = stubFetch(201, { slug: "happy-tiny-goose", status: "Spawning" });
+
+	await spawnGoopy();
+
+	assert.equal(calls.length, 1);
+	assert.match(calls[0].url, /\/goopies$/);
+	assert.equal(calls[0].init?.method, "POST");
+	assert.equal(calls[0].init?.body, undefined);
+	assert.equal(calls[0].init?.headers, undefined);
+});
+
+test("a spawn with a version asks for it as JSON", async () => {
+	const calls = stubFetch(201, { slug: "happy-tiny-goose", status: "Spawning" });
+
+	await spawnGoopy("5.130.6");
+
+	assert.equal(calls[0].init?.method, "POST");
+	assert.deepEqual(calls[0].init?.headers, { "Content-Type": "application/json" });
+	assert.deepEqual(JSON.parse(String(calls[0].init?.body)), { ghost_version: "5.130.6" });
+});
+
+test("a refused version surfaces its code", async () => {
+	stubFetch(400, { error: "Ghost 4.48.0 is not offered on this host", code: "unknown_version" });
+
+	await assert.rejects(spawnGoopy("4.48.0"), (err: unknown) => {
+		assert.ok(err instanceof ApiRequestError);
+		assert.equal(err.code, "unknown_version");
+		return true;
+	});
+});
+
+test("the version list is read from /ghost-versions", async () => {
+	const offered = { default: "6.71.0", versions: [{ version: "6.71.0" }, { version: "5.130.6" }] };
+	const calls = stubFetch(200, offered);
+
+	assert.deepEqual(await getGhostVersions(), offered);
+	assert.match(calls[0].url, /\/ghost-versions$/);
 });
