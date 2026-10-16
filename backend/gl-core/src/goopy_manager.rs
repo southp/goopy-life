@@ -97,6 +97,16 @@ pub struct Spawned {
     pub despawn_token: DespawnToken,
 }
 
+/// The versions a spawn may ask for (#210), as [`GoopyManager::versions`]
+/// reports them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfferedVersions {
+    /// What a spawn that names no version gets.
+    pub default: String,
+    /// Every version offered, in order. `default` is one of them.
+    pub versions: Vec<String>,
+}
+
 pub struct GoopyManager<
     Registry: GoopyRegistry + Send + Sync + 'static,
     Provisioner: GoopyProvisioner + Send + Sync + 'static,
@@ -136,11 +146,36 @@ where
         }
     }
 
+    /// The versions a spawn may ask for, and the default.
+    pub fn versions(&self) -> OfferedVersions {
+        OfferedVersions {
+            default: self.provisioner.service_version().to_string(),
+            versions: self
+                .provisioner
+                .versions()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        }
+    }
+
+    /// Spawns an instance of `version`, or of the provisioner's default when
+    /// it is `None`.
+    ///
+    /// A version the provisioner does not offer is refused with
+    /// [`Error::UnknownVersion`] before anything is allocated: no slug, no
+    /// port, no row.
     #[tracing::instrument(skip(self))]
-    pub fn spawn(&self) -> Result<Spawned, Error> {
+    pub fn spawn(&self, version: Option<&str>) -> Result<Spawned, Error> {
         if self.goopy_life_in_hours <= 0 {
             return Err(Error::Invalid);
         }
+
+        let service_version = match version {
+            None => self.provisioner.service_version().to_string(),
+            Some(asked) if self.provisioner.versions().contains(&asked) => asked.to_string(),
+            Some(asked) => return Err(Error::UnknownVersion(asked.to_string())),
+        };
 
         let despawn_token = DespawnToken::issue();
         let despawn_token_hash = despawn_token.hash();
@@ -168,7 +203,7 @@ where
                 port,
                 status: Status::Spawning,
                 provisioner_kind: self.provisioner.kind(),
-                service_version: self.provisioner.service_version().to_string(),
+                service_version: service_version.clone(),
                 build_sha: Some(crate::build_info::GIT_SHA.to_string()),
                 despawn_token_hash: Some(despawn_token_hash.clone()),
             };
@@ -876,6 +911,10 @@ mod tests {
         fn service_version(&self) -> &str {
             "9.9.9-mock"
         }
+        /// Two, so a spawn has something other than the default to ask for.
+        fn versions(&self) -> Vec<&str> {
+            vec!["9.9.9-mock", "8.8.8-mock"]
+        }
     }
 
     fn make_test_manager(
@@ -931,7 +970,7 @@ mod tests {
                 SqliteRegistry::new(Path::new(":memory:")).unwrap(),
                 NoopProvisioner,
             );
-            let err = gm.spawn().unwrap_err();
+            let err = gm.spawn(None).unwrap_err();
             assert!(
                 matches!(err, Error::Invalid),
                 "expected Invalid for life_in_hours={bad}"
@@ -962,7 +1001,7 @@ mod tests {
         );
 
         // First save returns AlreadyExists; spawn must retry and succeed on the second attempt.
-        let result = gm.spawn();
+        let result = gm.spawn(None);
         assert!(
             result.is_ok(),
             "spawn should succeed after retrying a slug collision"
@@ -1300,7 +1339,7 @@ mod tests {
     #[test]
     fn spawn_returns_slug_and_port() {
         let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
-        let Spawned { slug, port, .. } = gm.spawn().expect("spawn should succeed");
+        let Spawned { slug, port, .. } = gm.spawn(None).expect("spawn should succeed");
         assert!(!slug.is_empty(), "slug should be non-empty");
         assert!(
             (9000..9100).contains(&port),
@@ -1311,7 +1350,7 @@ mod tests {
     #[test]
     fn get_finds_goopy_after_spawn() {
         let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
-        let slug = gm.spawn().unwrap().slug;
+        let slug = gm.spawn(None).unwrap().slug;
         let g = gm.get(&slug).unwrap().expect("should find goopy");
         // NoopProvisioner completes synchronously, so status may be Done already.
         assert!(
@@ -1330,7 +1369,7 @@ mod tests {
     #[test]
     fn spawn_records_the_build_sha_of_the_provisioning_binary() {
         let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
-        let slug = gm.spawn().unwrap().slug;
+        let slug = gm.spawn(None).unwrap().slug;
         let g = gm.get(&slug).unwrap().expect("should find goopy");
         // Recorded as-is, `unknown` included: a test build is unstamped, and
         // that is a fact about the binary rather than a missing value.
@@ -1342,12 +1381,62 @@ mod tests {
         );
     }
 
+    /// A spawn that names no version gets the provisioner's default.
+    #[test]
+    fn spawn_without_a_version_stamps_the_default() {
+        let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
+        let slug = gm.spawn(None).unwrap().slug;
+        let g = gm.get(&slug).unwrap().expect("should find goopy");
+        assert_eq!(g.service_version, "9.9.9-mock");
+    }
+
+    /// One that names an offered version is stamped with it, and that is what
+    /// the provisioner later builds it from (#210).
+    #[test]
+    fn spawn_with_an_offered_version_stamps_that_version() {
+        let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
+        let slug = gm.spawn(Some("8.8.8-mock")).unwrap().slug;
+        let g = gm.get(&slug).unwrap().expect("should find goopy");
+        assert_eq!(g.service_version, "8.8.8-mock");
+    }
+
+    /// An unknown version is refused before a slug, a port or a row exists:
+    /// nothing to release, and nothing counted against the caps.
+    #[test]
+    fn spawn_refuses_a_version_it_does_not_offer_before_taking_anything() {
+        let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
+        let err = gm.spawn(Some("7.7.7-mock")).unwrap_err();
+        assert!(
+            matches!(err, Error::UnknownVersion(ref v) if v == "7.7.7-mock"),
+            "was: {err:?}"
+        );
+        assert_eq!(gm.capacity().unwrap().provisioned, 0, "no row may exist");
+        // Every port is still free: a spawn takes the first one again.
+        let first = gm.spawn(None).unwrap();
+        assert_eq!(
+            first.port, 9000,
+            "the refused spawn must not have held a port"
+        );
+    }
+
+    #[test]
+    fn versions_reports_the_default_and_every_offered_version_in_order() {
+        let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
+        assert_eq!(
+            gm.versions(),
+            OfferedVersions {
+                default: "9.9.9-mock".to_string(),
+                versions: vec!["9.9.9-mock".to_string(), "8.8.8-mock".to_string()],
+            }
+        );
+    }
+
     /// The registry must hold what verifies the token, never the token: a copy
     /// of the database is not a key to every instance in it (#203).
     #[test]
     fn spawn_stores_only_the_hash_of_the_token_it_returns() {
         let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
-        let spawned = gm.spawn().unwrap();
+        let spawned = gm.spawn(None).unwrap();
         let stored = gm
             .get(&spawned.slug)
             .unwrap()
@@ -1365,8 +1454,8 @@ mod tests {
     #[test]
     fn every_spawn_gets_its_own_token() {
         let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
-        let a = gm.spawn().unwrap();
-        let b = gm.spawn().unwrap();
+        let a = gm.spawn(None).unwrap();
+        let b = gm.spawn(None).unwrap();
         assert_ne!(a.despawn_token.as_str(), b.despawn_token.as_str());
     }
 
@@ -1379,8 +1468,8 @@ mod tests {
     #[test]
     fn list_returns_spawned_instances() {
         let gm = make_test_manager(SqliteRegistry::new(Path::new(":memory:")).unwrap());
-        let slug1 = gm.spawn().unwrap().slug;
-        let slug2 = gm.spawn().unwrap().slug;
+        let slug1 = gm.spawn(None).unwrap().slug;
+        let slug2 = gm.spawn(None).unwrap().slug;
         let goopies = gm.list().unwrap();
         let slugs: Vec<&str> = goopies.iter().map(|g| g.slug.as_str()).collect();
         assert!(slugs.contains(&slug1.as_str()), "should contain slug1");
@@ -1393,7 +1482,7 @@ mod tests {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         let gm = make_test_manager(registry);
 
-        let slug = gm.spawn().unwrap().slug;
+        let slug = gm.spawn(None).unwrap().slug;
 
         // Wait for the spawn background thread to finish by polling registry status.
         // NoopProvisioner is instant so this usually completes on the first check.
@@ -1896,7 +1985,7 @@ mod tests {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         let gm = manager_with_provisioner(registry, UnprovisionableProvisioner);
 
-        let slug = gm.spawn().unwrap().slug;
+        let slug = gm.spawn(None).unwrap().slug;
         wait_for_spawn_to_settle(&gm, &slug);
 
         assert_eq!(gm.get(&slug).unwrap().unwrap().status, Status::Failed);
@@ -2405,7 +2494,7 @@ mod tests {
             100,
         );
 
-        let slug = gm.spawn().unwrap().slug;
+        let slug = gm.spawn(None).unwrap().slug;
 
         // The row never leaves Spawning here — that is the failure being
         // simulated — so wait on the event rather than on the status.
@@ -2484,7 +2573,7 @@ mod tests {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         let gm = manager_with_provisioner(registry, UnprovisionableProvisioner);
 
-        let slug = gm.spawn().unwrap().slug;
+        let slug = gm.spawn(None).unwrap().slug;
         wait_for_spawn_to_settle(&gm, &slug);
         assert_eq!(gm.get(&slug).unwrap().unwrap().status, Status::Failed);
 
@@ -2533,7 +2622,7 @@ mod tests {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         let gm = manager_with_provisioner(registry, NoopProvisioner);
 
-        let slug = gm.spawn().unwrap().slug;
+        let slug = gm.spawn(None).unwrap().slug;
         wait_for_spawn_to_settle(&gm, &slug);
 
         assert_eq!(gm.get(&slug).unwrap().unwrap().status, Status::Done);
@@ -2550,7 +2639,7 @@ mod tests {
         registry.break_usage_writes();
         let gm = manager_with_provisioner(registry, NoopProvisioner);
 
-        let slug = gm.spawn().unwrap().slug;
+        let slug = gm.spawn(None).unwrap().slug;
         wait_for_spawn_to_settle(&gm, &slug);
 
         assert_eq!(gm.get(&slug).unwrap().unwrap().status, Status::Done);
@@ -2563,7 +2652,7 @@ mod tests {
         let registry = SqliteRegistry::new(Path::new(":memory:")).unwrap();
         let gm = manager_with_provisioner(registry, UnprovisionableProvisioner);
 
-        let slug = gm.spawn().unwrap().slug;
+        let slug = gm.spawn(None).unwrap().slug;
         wait_for_spawn_to_settle(&gm, &slug);
 
         assert_eq!(gm.get(&slug).unwrap().unwrap().status, Status::Failed);
@@ -2583,7 +2672,7 @@ mod tests {
                 deprovision_calls: Arc::new(Mutex::new(0)),
             },
         );
-        let slug = gm.spawn().unwrap().slug;
+        let slug = gm.spawn(None).unwrap().slug;
         wait_for_spawn_to_settle(&gm, &slug);
         let before = gm.usage_stats().unwrap();
         assert_eq!(before.all_time, UsageCounts::new(1, 0, 0));
@@ -2786,7 +2875,7 @@ mod tests {
         // Generous active cap so only the provisioned cap can trip.
         let gm = manager_with_caps(registry, 100, 1);
 
-        let err = gm.spawn().unwrap_err();
+        let err = gm.spawn(None).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -2805,7 +2894,7 @@ mod tests {
         seed_row(&registry, "done-one", 9020, Status::Done);
         let gm = manager_with_caps(registry, 1, 100);
 
-        let err = gm.spawn().unwrap_err();
+        let err = gm.spawn(None).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -2833,7 +2922,7 @@ mod tests {
         let gm = manager_with_caps(registry, 1, 1);
 
         // First spawn succeeds and (via NoopProvisioner) reaches Done.
-        let slug = gm.spawn().expect("first spawn should succeed").slug;
+        let slug = gm.spawn(None).expect("first spawn should succeed").slug;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             let g = gm.get(&slug).unwrap().unwrap();
@@ -2845,7 +2934,7 @@ mod tests {
         }
 
         // Second spawn must be refused — both caps are full.
-        let err = gm.spawn().unwrap_err();
+        let err = gm.spawn(None).unwrap_err();
         assert!(
             matches!(err, Error::CapacityFull { .. }),
             "expected CapacityFull, got {err:?}"
@@ -2860,7 +2949,7 @@ mod tests {
         }
 
         // Now spawning succeeds again.
-        gm.spawn()
+        gm.spawn(None)
             .expect("spawn should succeed after freeing a slot");
     }
 
@@ -2891,7 +2980,7 @@ mod tests {
                     let barrier = Arc::clone(&barrier);
                     std::thread::spawn(move || {
                         barrier.wait();
-                        gm.spawn()
+                        gm.spawn(None)
                     })
                 })
                 .collect();

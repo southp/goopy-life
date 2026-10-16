@@ -62,6 +62,10 @@ enum Cmd {
         /// Number of instances to spawn
         #[arg(default_value = "1")]
         count: u32,
+        /// Ghost version to spawn, one of the config's
+        /// [[provisioner.versions]]; the default_version when omitted
+        #[arg(long)]
+        ghost: Option<String>,
     },
     /// Despawn one or more goopies
     Despawn {
@@ -241,13 +245,13 @@ fn main() {
             let mut pending_slugs: Vec<String> = vec![];
 
             match cmd {
-                Cmd::Spawn { count } => {
+                Cmd::Spawn { count, ghost } => {
                     for _ in 0..count {
                         let spinner = mp.add(ProgressBar::new_spinner());
                         spinner.set_message("Spawning ...".to_string());
                         spinner.enable_steady_tick(Duration::from_millis(100));
 
-                        match gm.spawn() {
+                        match gm.spawn(ghost.as_deref()) {
                             // The despawn token is for a visitor's browser; an
                             // operator despawns by slug, so it is dropped here.
                             Ok(Spawned { slug, port, .. }) => {

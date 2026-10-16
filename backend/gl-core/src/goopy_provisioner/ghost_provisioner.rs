@@ -451,7 +451,6 @@ impl GhostProvisioner {
             //                  NODE_ENV=production, so it is live here. This
             //                  one leaks the sandbox URL the same way the
             //                  explore ping does.
-            //
             // Named individually rather than with `useTinfoil: true`. Tinfoil
             // is the broader hammer and would also switch off
             // `useStructuredData`, which emits schema.org and OG tags in
@@ -776,6 +775,15 @@ impl GoopyProvisioner for GhostProvisioner {
     /// the default for subsequent instances.
     fn service_version(&self) -> &str {
         &self.ghost.default_version
+    }
+
+    /// Every `[[provisioner.versions]]` entry, in config order.
+    fn versions(&self) -> Vec<&str> {
+        self.ghost
+            .versions
+            .iter()
+            .map(|install| install.version.as_str())
+            .collect()
     }
 
     /// Provisions the instance against the install for its own
