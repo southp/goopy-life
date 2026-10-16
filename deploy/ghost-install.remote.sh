@@ -30,7 +30,8 @@
 # Idempotent: what is already there is checked, not rebuilt, and reported
 # `unchanged`. The check is the same one a fresh build ends with: the release
 # is the version named, the Node satisfies its engines.node, the layout is the
-# one the provisioner links against, and sqlite3 loads.
+# one the provisioner links against, its SQLite driver loads, and root owns
+# every file in it and is the only one who can write any of them.
 #
 # ROOT prefixes every host path. It is empty on a host; the tests set it to a
 # scratch directory, and source this with GOOPY_GHOST_INSTALL_SOURCED=1 so that
@@ -49,6 +50,11 @@ NODE_DIR=/opt/goopy-node
 # install runs the dependencies' own build scripts, third-party code with no
 # business running as root.
 GHOST_USER=goopy-ghost
+# Who owns every install, and the only account that may write to one: an
+# instance that could write the code every other instance runs would reach all
+# of them (#187).
+INSTALL_OWNER=root
+INSTALL_GROUP=root
 
 NODE_DIST=https://nodejs.org/dist
 # Every key that has signed a Node release, retired ones included, so that an
@@ -146,6 +152,20 @@ check_free_space() {
     fi
 }
 
+# Fails unless everything in the install at $1 is INSTALL_OWNER's and writable
+# by no one else. A re-run calls an install `unchanged` only after this: one
+# built by hand as the deploy account (or left group-writable by a stray chmod)
+# passes every other check and is still writable by something that is not root.
+# Group write is fine when the group is INSTALL_GROUP: node-gyp leaves its
+# build directories 775, and only root is in root's group.
+check_locked_down() {
+    local dir=$1 loose
+    loose=$(find "$dir" ! -type l \( ! -user "$INSTALL_OWNER" -o \( -perm -020 ! -group "$INSTALL_GROUP" \) -o -perm -002 \) -print -quit)
+    if [[ -n $loose ]]; then
+        die "${loose#"$ROOT"} is not $INSTALL_OWNER's alone (owner $(stat -c %U "$loose" 2>/dev/null || stat -f %Su "$loose"), mode $(stat -c %a "$loose" 2>/dev/null || stat -f %Lp "$loose")). Every instance runs this code: fix it with chown -R $INSTALL_OWNER:$INSTALL_OWNER and chmod -R go-w, or remove ${dir#"$ROOT"} and re-run"
+    fi
+}
+
 # Runs a command as GHOST_USER, in the build's own HOME, with $1's directory
 # first on PATH so that npm, corepack and the build scripts all run the Node
 # the instances will.
@@ -171,6 +191,7 @@ ensure_node() {
         if [[ $have != "v$version" ]]; then
             die "$dir/bin/node reports $have, not v$version. Remove $dir and re-run"
         fi
+        check_locked_down "$real"
         say unchanged "$dir"
         return
     fi
@@ -206,6 +227,7 @@ ensure_node() {
     rm -rf "$dl"
     chown -R root:root "$partial"
     chmod -R a+rX,go-w "$partial"
+    check_locked_down "$partial"
     mv "$partial" "$real"
     say created "$dir"
 }
@@ -303,6 +325,7 @@ ensure_ghost() {
     step "Ghost $version"
     if [[ -e $real ]]; then
         verify_ghost "$real" "$version" "$node"
+        check_locked_down "$real"
         say unchanged "$dir"
         return
     fi
@@ -351,7 +374,8 @@ ensure_ghost() {
     # Root-owned so no instance can write here and change the code every other
     # instance runs (#187), the same as host-bootstrap.sh's install_ghost.
     chown -R root:root "$partial"
-    chmod -R a+rX "$partial"
+    chmod -R a+rX,go-w "$partial"
+    check_locked_down "$partial"
     mv "$partial" "$real"
     say created "$dir"
 }
