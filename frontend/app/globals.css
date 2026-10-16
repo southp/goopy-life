@@ -827,70 +827,6 @@ body {
 	word-break: normal;
 }
 
-/* ── Ghost version selector (#210) ──────────────────────────────────────── */
-
-/*
- * Above the button, out of flow, for the reason .capacity-slot is below it:
- * the list arrives after the first paint, and an in-flow control would push the
- * button down under the visitor's cursor. .cta-area centres a 3rem button in
- * 8rem, which leaves this 2.5rem to sit in without reaching the goopy.
- */
-.version-slot {
-	position: absolute;
-	bottom: 100%;
-	left: 50%;
-	transform: translateX(-50%);
-	margin-bottom: 0.5rem;
-	animation: version-fade-in 300ms ease-out both;
-}
-
-/*
- * Quieter than the CTA, like the destroy button: an outline, muted text. It is
- * a setting for the click, not a second call to action.
- */
-.version-select {
-	appearance: none;
-	border: 1px solid #3a3a3a;
-	border-radius: 64px;
-	background: var(--background)
-		url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23aaa' stroke-width='1.5'/%3E%3C/svg%3E")
-		no-repeat right 0.75rem center;
-	padding: 0.25rem 2rem 0.25rem 0.875rem;
-	color: #aaa;
-	font: inherit;
-	font-size: 0.8125rem;
-	line-height: 1.25rem;
-	cursor: pointer;
-	transition-property: color, border-color;
-	transition-duration: 150ms;
-}
-
-.version-select:hover,
-.version-select:focus-visible {
-	border-color: #777;
-	color: var(--foreground);
-}
-
-.version-select:focus-visible {
-	outline: 2px solid var(--foreground);
-	outline-offset: 2px;
-}
-
-@keyframes version-fade-in {
-	from {
-		opacity: 0;
-	}
-	to {
-		opacity: 1;
-	}
-}
-
-@media (prefers-reduced-motion: reduce) {
-	.version-slot {
-		animation: none;
-	}
-}
-
 /* ── Capacity indicator ─────────────────────────────────────────────────── */
 
 /*
@@ -967,6 +903,107 @@ body {
 	.capacity-block {
 		animation: none;
 	}
+}
+
+/*
+ * The version picker and the slot readout, side by side (#210).
+ */
+.cta-readout-line {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 0.625rem;
+}
+
+/*
+ * With the picker, a little room either side: .capacity-slot is only as wide
+ * as its content and clips there, which would shave the sides of the picker's
+ * focus ring (above and below, the block's own margin and gap already leave
+ * room). Only with it, so that a host offering one version renders the
+ * readout exactly where it always was.
+ */
+.cta-readout-line:has(.version-select) {
+	padding: 0 0.25rem;
+}
+
+/*
+ * The two halves come from two endpoints and can land a beat apart. The block
+ * slides out with whichever is first; the other fades in beside it rather than
+ * popping.
+ */
+.cta-readout-line > * {
+	animation: readout-fade-in 240ms ease-out both;
+}
+
+@keyframes readout-fade-in {
+	from {
+		opacity: 0;
+	}
+	to {
+		opacity: 1;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.cta-readout-line > * {
+		animation: none;
+	}
+}
+
+/*
+ * The one thing on the line to act on, so the brightest thing on it: full-white
+ * text in an outline pill, against the line's grey fine print. Still an
+ * outline, so it never competes with the filled button above.
+ */
+.version-select {
+	appearance: none;
+	border: 1px solid #555;
+	border-radius: 64px;
+	background: transparent
+		url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23ededed' stroke-width='1.5'/%3E%3C/svg%3E")
+		no-repeat right 0.625rem center;
+	padding: 0.125rem 1.75rem 0.125rem 0.75rem;
+	color: var(--foreground);
+	font: inherit;
+	font-size: 0.8125rem;
+	line-height: 1.25rem;
+	cursor: pointer;
+	transition-property: border-color;
+	transition-duration: 150ms;
+}
+
+.version-select:hover {
+	border-color: #999;
+}
+
+.version-select:focus-visible {
+	outline: 2px solid var(--foreground);
+	outline-offset: 1px;
+}
+
+/* The native dropdown's own colours, so the open list matches the page. */
+.version-select option {
+	background-color: var(--background);
+	color: var(--foreground);
+}
+
+/* Waiting on the list: looks the same, it just cannot open yet. */
+.version-select.pending {
+	cursor: default;
+}
+
+.version-select.pending:hover {
+	border-color: #555;
+}
+
+/* No slot to spend a choice on: it steps back to the line's grey. */
+.version-select:disabled:not(.pending),
+.version-select:disabled:not(.pending):hover {
+	border-color: #3a3a3a;
+	color: #777;
+	background-image: none;
+	padding-right: 0.75rem;
+	cursor: default;
 }
 
 .capacity-indicator {

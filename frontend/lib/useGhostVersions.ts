@@ -13,10 +13,11 @@ import type { GhostVersionsResponse } from "@/lib/types";
  * which the spawn refuses with `unknown_version` and "Try again" brings them
  * back from.
  *
- * Returns `null` until the first successful read, and callers treat that as
- * "no choice to offer": the selector stays hidden and a spawn takes the
- * server's default. An unreachable `/ghost-versions` therefore costs the choice,
- * never the button. A failed re-read keeps the previous list.
+ * Returns `null` until the first successful read. Callers treat that as "the
+ * list is unknown": no choice to offer, so the CTA is a plain button — or,
+ * for a browser that chose before, one holding its remembered version
+ * (`versionSegment`). An unreachable `/ghost-versions` therefore costs the
+ * choice, never the button. A failed re-read keeps the previous list.
  */
 export function useGhostVersions(enabled: boolean): GhostVersionsResponse | null {
 	const [offered, setOffered] = useState<GhostVersionsResponse | null>(null);

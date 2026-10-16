@@ -5,26 +5,19 @@ import { adminUrl } from '@/lib/admin';
 import { ApiRequestError, getGoopy, spawnGoopy, waitUntilGone } from '@/lib/api';
 import { LOCALSTORAGE_KEY, POLL_INTERVAL_MS } from '@/lib/constants';
 import { formatExpiry } from '@/lib/expiry';
-import {
-	GHOST_VERSION_KEY,
-	offersChoice,
-	pickVersion,
-	versionLabel,
-	versionToRequest,
-} from '@/lib/ghostVersions';
+import { GHOST_VERSION_KEY, versionLabel, versionSegment } from '@/lib/ghostVersions';
 import { moodFor } from '@/lib/mood';
 import { resumeAt } from '@/lib/resume';
 import { parseStoredGoopy, serializeStoredGoopy, type StoredGoopy } from '@/lib/session';
 import { useCapacity } from '@/lib/useCapacity';
 import { useGhostVersions } from '@/lib/useGhostVersions';
 import type { AppState, GoopyResponse } from '@/lib/types';
-import CapacityIndicator from '@/components/CapacityIndicator';
+import CtaReadout from '@/components/CtaReadout';
 import DestroyButton from '@/components/DestroyButton';
 import ErrorMessage from '@/components/ErrorMessage';
 import Goopy from '@/components/Goopy';
 import IssueLink from '@/components/IssueLink';
 import Spinner from '@/components/Spinner';
-import VersionSelect from '@/components/VersionSelect';
 
 /** Turn a thrown request failure into the error state, preserving the API code. */
 function errorState(err: unknown): AppState {
@@ -71,9 +64,10 @@ export default function GhostButton() {
 	// The Ghost versions on offer, read whenever the button is (#210). Unknown
 	// means no selector and the server's default, so it fails open the same way.
 	const ghostVersions = useGhostVersions(state.kind === "idle");
-	// The version this browser last picked, if any; pickVersion decides what is
-	// preselected from it and from what is currently offered.
+	// The version this browser last picked, if any. With what is on offer it
+	// decides the CTA's version segment, and so what a click asks for.
 	const [rememberedVersion, setRememberedVersion] = useState<string | null>(null);
+	const segment = versionSegment(ghostVersions, rememberedVersion);
 
 	// Resolve the initial state from browser-only sources (the ?expired query param and
 	// localStorage) after mount. This must run in an effect rather than a lazy useState
@@ -265,9 +259,8 @@ export default function GhostButton() {
 		setState({ kind: "spawning" });
 
 		try {
-			const { slug, despawn_token } = await spawnGoopy(
-				versionToRequest(ghostVersions, rememberedVersion),
-			);
+			// What the segment shows is what is asked for; no segment, no version.
+			const { slug, despawn_token } = await spawnGoopy(segment?.value ?? null);
 			const spawned: StoredGoopy = { slug, token: despawn_token ?? null };
 			localStorage.setItem(LOCALSTORAGE_KEY, serializeStoredGoopy(spawned));
 			setPolling(spawned);
@@ -286,17 +279,11 @@ export default function GhostButton() {
 		switch (state.kind) {
 			case "idle":
 				// The wrapper is not cosmetic: it is the positioning context the
-				// capacity readout hangs off, which is what keeps the button still
-				// when /capacity finally answers.
+				// readout line (version picker and capacity) hangs off, which is
+				// what keeps the button still when /capacity and /ghost-versions
+				// finally answer.
 				return (
 					<div className="cta-idle">
-						{offersChoice(ghostVersions) && (
-							<VersionSelect
-								offered={ghostVersions}
-								value={pickVersion(ghostVersions, rememberedVersion)}
-								onChange={handleVersionChange}
-							/>
-						)}
 						<button
 							className={`go-button ${isFull ? "disabled" : "idle"}`}
 							onClick={handleGhostNow}
@@ -304,7 +291,11 @@ export default function GhostButton() {
 						>
 							Ghost now!
 						</button>
-						<CapacityIndicator capacity={capacity} />
+						<CtaReadout
+							capacity={capacity}
+							segment={segment}
+							onVersionChange={handleVersionChange}
+						/>
 					</div>
 				);
 

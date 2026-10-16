@@ -6,7 +6,7 @@ import {
 	offersChoice,
 	pickVersion,
 	versionLabel,
-	versionToRequest,
+	versionSegment,
 } from "./ghostVersions.ts";
 
 const THREE: GhostVersionsResponse = {
@@ -39,16 +39,33 @@ test("a remembered version the server dropped falls back to the default", () => 
 	assert.equal(pickVersion(THREE, "6.67.0"), "6.71.0");
 });
 
-// One version means the request stays what it was before there was a choice:
-// no body, so no CORS preflight.
-test("nothing is requested when there is no choice", () => {
-	assert.equal(versionToRequest(ONE, "6.63.0"), null);
-	assert.equal(versionToRequest(null, "5.130.6"), null);
+// One version means a plain button, and the request stays what it was before
+// there was a choice: no body, so no CORS preflight.
+test("one version on offer means no segment", () => {
+	assert.equal(versionSegment(ONE, "6.63.0"), null);
 });
 
-test("with a choice, the preselected version is requested", () => {
-	assert.equal(versionToRequest(THREE, "5.130.6"), "5.130.6");
-	assert.equal(versionToRequest(THREE, null), "6.71.0");
+test("an unknown list and no history means no segment", () => {
+	assert.equal(versionSegment(null, null), null);
+});
+
+test("with a choice, the segment lists every version and shows the pick", () => {
+	assert.deepEqual(versionSegment(THREE, "5.130.6"), {
+		options: ["6.71.0", "6.63.0", "5.130.6"],
+		value: "5.130.6",
+		pending: false,
+	});
+	assert.equal(versionSegment(THREE, null)?.value, "6.71.0");
+});
+
+// A returning visitor who clicks before the list lands asks for what the
+// segment shows, not silently for the default.
+test("before the list arrives, a remembered version holds the segment", () => {
+	assert.deepEqual(versionSegment(null, "5.130.6"), {
+		options: ["5.130.6"],
+		value: "5.130.6",
+		pending: true,
+	});
 });
 
 test("a version is labelled by name, nothing more", () => {

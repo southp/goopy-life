@@ -39,18 +39,45 @@ export function pickVersion(offered: GhostVersionsResponse, remembered: string |
 	return offered.default;
 }
 
+/** What the version segment of the CTA shows, when it shows at all. */
+export interface VersionSegment {
+	// The versions to list, in order.
+	options: string[];
+	// The one shown, and the one a click asks for.
+	value: string;
+	// True while the list is still unknown and the segment stands in for it
+	// with the remembered version alone.
+	pending: boolean;
+}
+
 /**
- * The version to ask `POST /goopies` for, or null to ask for none.
+ * The version segment of the split CTA, or null for a plain button.
  *
- * None unless there was a choice to make: with one version the request stays
- * exactly what it was before #210 — no body, no Content-Type, and so no CORS
- * preflight in front of it.
+ * With a choice on offer, every version, preselecting per `pickVersion`. While
+ * the list is still unknown, a browser that chose before gets its remembered
+ * version straight away, so that a click before the list lands still asks for
+ * what the segment shows rather than silently for the default. Without either,
+ * a plain button: one version on offer, or no history to go on.
+ *
+ * What a click asks `POST /goopies` for is this segment's `value`, or nothing
+ * when there is no segment — in which case the request stays exactly what it
+ * was before #210: no body, no Content-Type, and so no CORS preflight.
  */
-export function versionToRequest(offered: GhostVersionsResponse | null, remembered: string | null): string | null {
-	if (!offersChoice(offered)) {
-		return null;
+export function versionSegment(
+	offered: GhostVersionsResponse | null,
+	remembered: string | null,
+): VersionSegment | null {
+	if (offersChoice(offered)) {
+		return {
+			options: offered.versions.map((v) => v.version),
+			value: pickVersion(offered, remembered),
+			pending: false,
+		};
 	}
-	return pickVersion(offered, remembered);
+	if (offered === null && remembered !== null) {
+		return { options: [remembered], value: remembered, pending: true };
+	}
+	return null;
 }
 
 export function versionLabel(version: string): string {
