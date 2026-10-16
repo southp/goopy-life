@@ -64,8 +64,14 @@ For each Ghost version it produces two root-owned directories:
 | `/opt/goopy-node/<node-version>/` | The official Node release | `SHASUMS256.txt` must be signed by a Node release key (the keyring is pinned to a commit of `nodejs/release-keys`, and the keyring's checksum is pinned too), and the tarball must match it |
 | `/opt/goopy-life/ghost-<version>/` | The shared install instances link to | The release's `engines.node` must accept that Node, the layout must be the one the provisioner links against, and the release's SQLite driver must load |
 
+Both must also be root's alone: owned by root, and writable by nobody else
+(group write is allowed only for root's own group, which node-gyp's build
+directories need). Every instance runs that code, so anything else that could
+write it could reach all of them (#187).
+
 It is idempotent. A version that is already there is checked the same way and
-reported `unchanged`, so a re-run doubles as a health check. A failed build
+reported `unchanged`, so a re-run doubles as a health check. An install built
+by hand as `goopy` is refused, not passed. A failed build
 leaves a `.partial` directory, which the next run clears.
 
 **Install before you configure.** `gl-serv --check-config` refuses a deploy

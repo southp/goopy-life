@@ -22,6 +22,9 @@ REMOTE_HALF="$DEPLOY_DIR/ghost-install.remote.sh"
 FAILURES=0
 CASES=0
 REAL_NODE=$(command -v node || true)
+# Who owns what the tests build: the host half's INSTALL_OWNER is root, which
+# nothing in a scratch directory is.
+ME=$(whoami)
 
 pass() {
     CASES=$((CASES + 1))
@@ -351,6 +354,9 @@ host() {
         export PATH="$root/bin:$PATH" ROOT="$root"
         GOOPY_GHOST_INSTALL_SOURCED=1 source "$REMOTE_HALF"
         NODE_KEYRING_SHA256=$(sha256_of "$root/served/pubring.kbx")
+        INSTALL_OWNER=${OWNER:-$ME}
+        # A gid no scratch file has, so group write is never excused here.
+        INSTALL_GROUP=${GROUP_OK:-4242424}
         "$@"
     )
     STATUS=$?
@@ -380,6 +386,15 @@ if [[ $STATUS -eq 0 && $OUT == *unchanged* && $(calls "$root" curl) -eq 0 ]]; th
     pass leaves_an_installed_node_alone
 else
     fail leaves_an_installed_node_alone "exit $STATUS" "$OUT" "$(cat "$root/calls")"
+fi
+
+# Kept only while nobody but its owner can write it.
+chmod o+w "$root$NODE_HOME/bin/node"
+host "$root" ensure_node "$NODE_VERSION"
+if [[ $STATUS -ne 0 && $OUT == *"bin/node is not $ME's alone"* ]]; then
+    pass refuses_an_installed_node_others_can_write
+else
+    fail refuses_an_installed_node_others_can_write "exit $STATUS" "$OUT"
 fi
 rm -rf "$root"
 
@@ -568,6 +583,36 @@ else
         pass leaves_an_installed_release_alone
     else
         fail leaves_an_installed_release_alone "exit $STATUS" "$OUT" "$(cat "$root/calls")"
+    fi
+
+    # The install dev was found with (#212): built by hand as the deploy
+    # account, group-writable. Every other check passes; this one must not.
+    chmod g+w "$root$GHOST_671/package.json"
+    host "$root" main 6.71.0 "$GHOST_671" "$NODE_HOME/bin/node"
+    if [[ $STATUS -ne 0 && $OUT == *"package.json is not $ME's alone"* && $OUT == *"chmod -R go-w"* ]]; then
+        pass refuses_an_installed_release_its_group_can_write
+    else
+        fail refuses_an_installed_release_its_group_can_write "exit $STATUS" "$OUT"
+    fi
+
+    # ...unless the group is the owner's own: node-gyp leaves its build
+    # directories 775, and on a host that group is root's.
+    file_group=$(stat -c %G "$root$GHOST_671/package.json" 2>/dev/null || stat -f %Sg "$root$GHOST_671/package.json")
+    GROUP_OK=$file_group host "$root" main 6.71.0 "$GHOST_671" "$NODE_HOME/bin/node"
+    if [[ $STATUS -eq 0 && $OUT == *"unchanged  $GHOST_671"* ]]; then
+        pass allows_group_write_by_the_owners_own_group
+    else
+        fail allows_group_write_by_the_owners_own_group "exit $STATUS" "$OUT"
+    fi
+    chmod g-w "$root$GHOST_671/package.json"
+
+    # Owned by anyone but INSTALL_OWNER is refused the same way. The Ghost
+    # step alone: through main, the Node it shares would be refused first.
+    OWNER=nobody host "$root" ensure_ghost 6.71.0 "$NODE_HOME/bin/node"
+    if [[ $STATUS -ne 0 && $OUT == *"$GHOST_671"*" is not nobody's alone (owner $ME"* ]]; then
+        pass refuses_an_installed_release_someone_else_owns
+    else
+        fail refuses_an_installed_release_someone_else_owns "exit $STATUS" "$OUT"
     fi
 
     # An install whose driver went missing since, or was built for another
