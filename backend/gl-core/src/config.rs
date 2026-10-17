@@ -45,9 +45,10 @@ impl AllocatorConfig {
 /// Unlike [`AllocatorConfig`], which stays a flat struct because its extra
 /// fields are simply ignored under the other kind, a provisioner's settings are
 /// strictly kind-specific: Ghost needs values that are meaningless to Hello, and
-/// two of them are mandatory. Making this a tagged enum lets serde enforce that
-/// at parse time — a `Ghost` section missing `source_dir` fails to load — rather
-/// than needing a block of hand-written validation in [`Config::from_file`].
+/// some of them are mandatory. Making this a tagged enum lets serde enforce that
+/// at parse time — a `Ghost` section with no `[[provisioner.versions]]` entry,
+/// or an entry missing its `source_dir`, fails to load — rather than needing a
+/// block of hand-written validation in [`Config::from_file`].
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "kind")]
 pub enum ProvisionerConfig {
@@ -577,6 +578,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::goopy_provisioner::ghost_provisioner::GhostInstall;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -1034,41 +1036,143 @@ path = "/tmp/goopy.db"
 kind = "PlainDir"
 "#;
 
+    /// One install, the shape every committed config has before a second
+    /// version is offered.
+    const ONE_INSTALL: &str = r#"
+[[provisioner.versions]]
+version = "5.87.1"
+source_dir = "/opt/goopy-life/ghost-5.87.1"
+"#;
+
+    /// A Ghost `[provisioner]` section: `shared` on the section itself, then
+    /// `entries`, its `[[provisioner.versions]]`.
+    fn ghost_toml(shared: &str, entries: &str) -> String {
+        format!("{GHOST_BASE}\n[provisioner]\nkind = \"Ghost\"\n{shared}\n{entries}")
+    }
+
+    fn config_error(toml: &str) -> String {
+        match write_config(toml).unwrap_err() {
+            Error::Config(s) => s,
+            other => panic!("expected a config error, got {other:?}"),
+        }
+    }
+
     #[test]
     fn provisioner_section_ghost_kind_parses_with_defaults() {
-        let toml = format!(
-            r#"{}
-[provisioner]
-kind = "Ghost"
-source_dir = "/opt/goopy-life/ghost"
-version = "5.87.1"
-"#,
-            GHOST_BASE
-        );
-        let cfg = write_config(&toml).expect("should parse");
+        let cfg = write_config(&ghost_toml("default_version = \"5.87.1\"", ONE_INSTALL))
+            .expect("should parse");
         let ProvisionerConfig::Ghost(ghost) = &cfg.provisioner else {
             panic!("expected a Ghost provisioner config");
         };
-        assert_eq!(ghost.source_dir, PathBuf::from("/opt/goopy-life/ghost"));
-        assert_eq!(ghost.version, "5.87.1");
-        assert_eq!(ghost.node_bin, "/usr/bin/node");
+        assert_eq!(ghost.default_version, "5.87.1");
+        assert_eq!(
+            ghost.versions,
+            vec![GhostInstall {
+                version: "5.87.1".to_string(),
+                source_dir: PathBuf::from("/opt/goopy-life/ghost-5.87.1"),
+                node_bin: "/usr/bin/node".to_string(),
+            }]
+        );
         assert_eq!(ghost.service_user, "goopy");
         assert_eq!(ghost.ready_timeout_secs, 120);
         assert_eq!(ghost.ready_poll_ms, 500);
     }
 
+    /// Each Ghost a host offers is its own entry, in config order, with its
+    /// own Node: each release names its own `engines.node`.
+    #[test]
+    fn ghost_versions_parse_in_order_each_with_its_own_node() {
+        let toml = ghost_toml(
+            "default_version = \"6.71.0\"",
+            r#"
+[[provisioner.versions]]
+version = "6.71.0"
+source_dir = "/opt/goopy-life/ghost-6.71.0"
+node_bin = "/opt/goopy-node/22.23.2/bin/node"
+
+[[provisioner.versions]]
+version = "5.130.6"
+source_dir = "/opt/goopy-life/ghost-5.130.6"
+"#,
+        );
+        let cfg = write_config(&toml).expect("should parse");
+        let ProvisionerConfig::Ghost(ghost) = &cfg.provisioner else {
+            panic!("expected a Ghost provisioner config");
+        };
+        let versions: Vec<(&str, &str)> = ghost
+            .versions
+            .iter()
+            .map(|i| (i.version.as_str(), i.node_bin.as_str()))
+            .collect();
+        assert_eq!(
+            versions,
+            [
+                ("6.71.0", "/opt/goopy-node/22.23.2/bin/node"),
+                ("5.130.6", "/usr/bin/node"),
+            ]
+        );
+        assert_eq!(
+            ghost.install("5.130.6").map(|i| i.source_dir.clone()),
+            Some(PathBuf::from("/opt/goopy-life/ghost-5.130.6"))
+        );
+        assert!(ghost.install("6.63.0").is_none());
+    }
+
+    /// A config from before #210 is told what moved, not that
+    /// `default_version` is missing.
+    #[test]
+    fn ghost_config_in_the_old_shape_says_what_moved() {
+        let err = config_error(&format!(
+            "{GHOST_BASE}\n[provisioner]\nkind = \"Ghost\"\n\
+             source_dir = \"/opt/goopy-life/ghost-5.87.1\"\nversion = \"5.87.1\"\n"
+        ));
+        assert!(err.contains("[[provisioner.versions]]"), "was: {err}");
+        assert!(err.contains("default_version"), "was: {err}");
+    }
+
+    #[test]
+    fn ghost_without_versions_rejected() {
+        let err = config_error(&ghost_toml("default_version = \"5.87.1\"", ""));
+        assert!(err.contains("[[provisioner.versions]]"), "was: {err}");
+    }
+
+    #[test]
+    fn ghost_without_default_version_rejected() {
+        let err = config_error(&ghost_toml("", ONE_INSTALL));
+        assert!(err.contains("default_version"), "was: {err}");
+    }
+
+    /// The default is what every spawn is stamped with, so it has to be an
+    /// install the host actually has.
+    #[test]
+    fn ghost_default_version_must_be_one_of_the_versions() {
+        let err = config_error(&ghost_toml("default_version = \"6.71.0\"", ONE_INSTALL));
+        assert!(
+            err.contains("6.71.0") && err.contains("5.87.1"),
+            "should name the default and what is listed, was: {err}"
+        );
+    }
+
+    /// Two entries for one version would leave which install it means to the
+    /// order of the file.
+    #[test]
+    fn ghost_version_listed_twice_rejected() {
+        let toml = ghost_toml(
+            "default_version = \"5.87.1\"",
+            &format!(
+                "{ONE_INSTALL}\n[[provisioner.versions]]\nversion = \"5.87.1\"\n\
+                 source_dir = \"/opt/goopy-life/ghost-5.87.1-again\"\n"
+            ),
+        );
+        let err = config_error(&toml);
+        assert!(err.contains("5.87.1 twice"), "was: {err}");
+    }
+
     #[test]
     fn ghost_readiness_budget_is_tunable() {
-        let toml = format!(
-            r#"{}
-[provisioner]
-kind = "Ghost"
-source_dir = "/opt/goopy-life/ghost"
-version = "5.87.1"
-ready_timeout_secs = 300
-ready_poll_ms = 250
-"#,
-            GHOST_BASE
+        let toml = ghost_toml(
+            "default_version = \"5.87.1\"\nready_timeout_secs = 300\nready_poll_ms = 250",
+            ONE_INSTALL,
         );
         let cfg = write_config(&toml).expect("should parse");
         let ProvisionerConfig::Ghost(ghost) = &cfg.provisioner else {
@@ -1082,62 +1186,38 @@ ready_poll_ms = 250
     /// bug the wait exists to fix.
     #[test]
     fn ghost_zero_ready_timeout_rejected() {
-        let toml = format!(
-            r#"{}
-[provisioner]
-kind = "Ghost"
-source_dir = "/opt/goopy-life/ghost"
-version = "5.87.1"
-ready_timeout_secs = 0
-"#,
-            GHOST_BASE
-        );
-        let err = write_config(&toml).unwrap_err();
-        assert!(matches!(err, Error::Config(ref s) if s.contains("ready_timeout_secs")));
+        let err = config_error(&ghost_toml(
+            "default_version = \"5.87.1\"\nready_timeout_secs = 0",
+            ONE_INSTALL,
+        ));
+        assert!(err.contains("ready_timeout_secs"), "was: {err}");
     }
 
     #[test]
     fn ghost_zero_ready_poll_rejected() {
-        let toml = format!(
-            r#"{}
-[provisioner]
-kind = "Ghost"
-source_dir = "/opt/goopy-life/ghost"
-version = "5.87.1"
-ready_poll_ms = 0
-"#,
-            GHOST_BASE
-        );
-        let err = write_config(&toml).unwrap_err();
-        assert!(matches!(err, Error::Config(ref s) if s.contains("ready_poll_ms")));
+        let err = config_error(&ghost_toml(
+            "default_version = \"5.87.1\"\nready_poll_ms = 0",
+            ONE_INSTALL,
+        ));
+        assert!(err.contains("ready_poll_ms"), "was: {err}");
     }
 
     #[test]
     fn ghost_missing_source_dir_rejected() {
-        let toml = format!(
-            r#"{}
-[provisioner]
-kind = "Ghost"
-version = "5.87.1"
-"#,
-            GHOST_BASE
-        );
-        let err = write_config(&toml).unwrap_err();
-        assert!(matches!(err, Error::Config(ref s) if s.contains("source_dir")));
+        let err = config_error(&ghost_toml(
+            "default_version = \"5.87.1\"",
+            "[[provisioner.versions]]\nversion = \"5.87.1\"\n",
+        ));
+        assert!(err.contains("source_dir"), "was: {err}");
     }
 
     #[test]
     fn ghost_missing_version_rejected() {
-        let toml = format!(
-            r#"{}
-[provisioner]
-kind = "Ghost"
-source_dir = "/opt/goopy-life/ghost"
-"#,
-            GHOST_BASE
-        );
-        let err = write_config(&toml).unwrap_err();
-        assert!(matches!(err, Error::Config(ref s) if s.contains("version")));
+        let err = config_error(&ghost_toml(
+            "default_version = \"5.87.1\"",
+            "[[provisioner.versions]]\nsource_dir = \"/opt/goopy-life/ghost-5.87.1\"\n",
+        ));
+        assert!(err.contains("version"), "was: {err}");
     }
 
     #[test]
@@ -1157,14 +1237,10 @@ kind = "Hello"
 
     #[test]
     fn build_provisioner_returns_the_configured_kind() {
-        for (kind, extra) in [
-            ("Hello", ""),
-            (
-                "Ghost",
-                "source_dir = \"/opt/goopy-life/ghost\"\nversion = \"5.87.1\"",
-            ),
-        ] {
-            let toml = format!("{GHOST_BASE}\n[provisioner]\nkind = \"{kind}\"\n{extra}\n");
+        for (kind, extra) in [("Hello", ""), ("Ghost", "default_version = \"5.87.1\"\n")] {
+            let entries = if kind == "Ghost" { ONE_INSTALL } else { "" };
+            let toml =
+                format!("{GHOST_BASE}\n[provisioner]\nkind = \"{kind}\"\n{extra}\n{entries}");
             let cfg = write_config(&toml).expect("should parse");
             let provisioner = cfg.build_provisioner(Arc::new(crate::RealSysRunner));
             assert_eq!(
@@ -1175,16 +1251,16 @@ kind = "Hello"
         }
     }
 
+    /// New instances are stamped with the default, not with whichever entry
+    /// happens to come first.
     #[test]
-    fn ghost_provisioner_stamps_the_configured_version() {
-        let toml = format!(
-            r#"{}
-[provisioner]
-kind = "Ghost"
-source_dir = "/opt/goopy-life/ghost"
-version = "5.87.1"
-"#,
-            GHOST_BASE
+    fn ghost_provisioner_stamps_the_default_version() {
+        let toml = ghost_toml(
+            "default_version = \"5.87.1\"",
+            &format!(
+                "[[provisioner.versions]]\nversion = \"6.71.0\"\n\
+                 source_dir = \"/opt/goopy-life/ghost-6.71.0\"\n{ONE_INSTALL}"
+            ),
         );
         let cfg = write_config(&toml).expect("should parse");
         let provisioner = cfg.build_provisioner(Arc::new(crate::RealSysRunner));

@@ -95,17 +95,28 @@ sudo chmod -R a+rX "${INSTALL_DIR}"
 > Follow the `packageManager` field in the release's `package.json` rather than
 > this paragraph if you move to a version that changes it again.
 
-Then point that host's `deploy/config/<env>.toml` at it — **both** keys, so they
-never disagree — and deploy:
+Then name it in that host's `deploy/config/<env>.toml`, as a
+`[[provisioner.versions]]` entry, and deploy. Settings shared by every version
+sit on `[provisioner]` itself, ahead of the entries: in TOML, keys after an
+entry's header belong to that entry.
 
 ```toml
 [provisioner]
 kind = "Ghost"
-source_dir = "/opt/goopy-life/ghost-6.63.0"
-version = "6.63.0"
-node_bin = "/usr/bin/node"
+default_version = "6.63.0"     # what new instances get; must be an entry below
 service_user = "goopy-ghost"
+
+[[provisioner.versions]]       # one per Ghost the host offers (#210)
+version = "6.63.0"             # both keys name the same release, so they never disagree
+source_dir = "/opt/goopy-life/ghost-6.63.0"
+node_bin = "/usr/bin/node"     # per version: each release names its own engines.node
 ```
+
+The parser refuses a config with no entry, a version listed twice, or a
+`default_version` that is not one of the entries. A config in the shape from
+before #210 (`version`, `source_dir` and `node_bin` on `[provisioner]`) is
+refused with a message saying where they moved. `--check-config` checks
+**every** entry's install on the host, not just the default's.
 
 ```bash
 ./deploy/deploy.sh goopy@<host> <env>
@@ -495,23 +506,35 @@ that Ghost is broken.
 
 ## Upgrading Ghost
 
-Instances are **pinned to the version they were created with**, because their
-symlinks name the version-stamped install directory directly: an instance
-created against `ghost-6.63.0` keeps pointing there no matter what is prepared
-afterwards. `version` is recorded alongside on every instance as
-`service_version` at spawn time. Beta runs a single Ghost version at a time;
-supporting several coexisting versions is a follow-up.
+Instances are **pinned to the version they were created with**: each one is
+stamped with a `service_version` at spawn time, and provisioned from that
+version's entry, so its symlinks name that version-stamped install directly.
+An instance created against `ghost-6.63.0` keeps pointing there whatever the
+config says afterwards. Until visitors can choose (#210), every new instance
+gets `default_version`; other entries are prepared and checked, but unused.
 
-To upgrade:
+To move the default to a new version:
 
-1. Prepare the new version in its own directory, following the steps above with
-   a new `GHOST_VERSION` (e.g. `/opt/goopy-life/ghost-6.64.0`).
-2. Point the config at it — **both** keys, so they never disagree:
+1. Prepare it on the host, in its own directory, before any config names it
+   (see [Preparing the base install](#preparing-the-base-install)).
+2. Add its entry, and point `default_version` at it:
    ```toml
    [provisioner]
-   source_dir = "/opt/goopy-life/ghost-6.64.0"
+   default_version = "6.64.0"
+
+   [[provisioner.versions]]
    version = "6.64.0"
+   source_dir = "/opt/goopy-life/ghost-6.64.0"
+   node_bin = "/usr/bin/node"
+
+   [[provisioner.versions]]
+   version = "6.63.0"
+   source_dir = "/opt/goopy-life/ghost-6.63.0"
+   node_bin = "/usr/bin/node"
    ```
+   Keeping the old entry is optional: deprovisioning never reads the config's
+   installs, so an instance whose version has left the config still tears
+   down cleanly.
 3. Deploy, which installs the edited config and restarts `gl-serv`.
 4. Instances spawned from now on use the new version. Existing instances keep
    running against the old one.
@@ -526,13 +549,14 @@ To upgrade:
 > `source_dir` at it. The provisioner links each instance at
 > `{source_dir}/index.js` and friends as written, so repointing such a symlink
 > would redirect **every existing instance** the next time its Ghost process
-> restarts — including when #96 suspends and resumes it. Editing `source_dir` is
-> one line, and it is the line that makes pinning real.
+> restarts — including when #96 suspends and resumes it. Adding an entry is a
+> few lines, and the version-stamped path in it is what makes pinning real.
 
 ### Retiring the old install
 
-Instances created before the switch hold links into the **old** directory. Do
-not delete it until every instance that references it is gone:
+Instances created before the switch hold links into the **old** directory. Take
+its entry out of the config whenever you like, but do not delete the directory
+until every instance that references it is gone:
 
 ```bash
 # Which versions are still in use?

@@ -67,7 +67,7 @@ NODESOURCE_KEY_FPR=6F71F525282841EEDAF851B42F59B5F99B1BE0B4
 APP_DIR=/opt/goopy-life
 # The port of prod.toml's bind_address: gl-serv on loopback, for nginx alone.
 GL_SERV_PORT=3000
-# prod.toml's [provisioner] version and source_dir name the same release.
+# prod.toml's default_version, whose [[provisioner.versions]] entry names it.
 GHOST_VERSION=6.63.0
 
 # 4 GB of swap with zswap is what the capacity caps of 20 were measured on

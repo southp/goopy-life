@@ -137,7 +137,8 @@ fn check_config_exits_non_zero_when_a_host_path_is_missing() {
     // the config parses cleanly and is rejected only on a host fact.
     let f = write_config(&VALID_CONFIG.replace(
         "[provisioner]\nkind = \"Hello\"",
-        "[provisioner]\nkind = \"Ghost\"\nversion = \"6.63.0\"\n\
+        "[provisioner]\nkind = \"Ghost\"\ndefault_version = \"6.63.0\"\n\
+         [[provisioner.versions]]\nversion = \"6.63.0\"\n\
          source_dir = \"/nonexistent/goopy-life/ghost-6.63.0\"\n\
          node_bin = \"/nonexistent/goopy-life/node\"",
     ));
