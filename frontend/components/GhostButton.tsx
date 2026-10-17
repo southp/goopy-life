@@ -5,12 +5,14 @@ import { adminUrl } from '@/lib/admin';
 import { ApiRequestError, getGoopy, spawnGoopy, waitUntilGone } from '@/lib/api';
 import { LOCALSTORAGE_KEY, POLL_INTERVAL_MS } from '@/lib/constants';
 import { formatExpiry } from '@/lib/expiry';
+import { GHOST_VERSION_KEY, versionLabel, versionSegment } from '@/lib/ghostVersions';
 import { moodFor } from '@/lib/mood';
 import { resumeAt } from '@/lib/resume';
 import { parseStoredGoopy, serializeStoredGoopy, type StoredGoopy } from '@/lib/session';
 import { useCapacity } from '@/lib/useCapacity';
+import { useGhostVersions } from '@/lib/useGhostVersions';
 import type { AppState, GoopyResponse } from '@/lib/types';
-import CapacityIndicator from '@/components/CapacityIndicator';
+import CtaReadout from '@/components/CtaReadout';
 import DestroyButton from '@/components/DestroyButton';
 import ErrorMessage from '@/components/ErrorMessage';
 import Goopy from '@/components/Goopy';
@@ -34,6 +36,7 @@ function doneState(data: GoopyResponse, token: string | null): AppState {
 		url: data.url,
 		expiresAt: data.expires_at,
 		token,
+		ghostVersion: data.ghost_version ?? null,
 	};
 }
 
@@ -58,6 +61,13 @@ export default function GhostButton() {
 	// Unknown capacity (first poll not back, or /capacity unreachable) must not
 	// disable the button: the 503 is the real guard, so we fail open.
 	const isFull = capacity?.is_full ?? false;
+	// The Ghost versions on offer, read whenever the button is (#210). Unknown
+	// means no selector and the server's default, so it fails open the same way.
+	const ghostVersions = useGhostVersions(state.kind === "idle");
+	// The version this browser last picked, if any. With what is on offer it
+	// decides the CTA's version segment, and so what a click asks for.
+	const [rememberedVersion, setRememberedVersion] = useState<string | null>(null);
+	const segment = versionSegment(ghostVersions, rememberedVersion);
 
 	// Resolve the initial state from browser-only sources (the ?expired query param and
 	// localStorage) after mount. This must run in an effect rather than a lazy useState
@@ -66,6 +76,7 @@ export default function GhostButton() {
 	// set-state-in-effect rule is therefore suppressed for these post-mount reads.
 	/* eslint-disable react-hooks/set-state-in-effect */
 	useEffect(() => {
+		setRememberedVersion(localStorage.getItem(GHOST_VERSION_KEY));
 		const params = new URLSearchParams(window.location.search);
 		if (params.has("expired")) {
 			window.history.replaceState({}, "", "/");
@@ -238,12 +249,18 @@ export default function GhostButton() {
 		return () => controller.abort();
 	}, [leavingSlug, handleDestroyed]);
 
+	function handleVersionChange(version: string) {
+		setRememberedVersion(version);
+		localStorage.setItem(GHOST_VERSION_KEY, version);
+	}
+
 	async function handleGhostNow() {
 		setJustDestroyed(false);
 		setState({ kind: "spawning" });
 
 		try {
-			const { slug, despawn_token } = await spawnGoopy();
+			// What the segment shows is what is asked for; no segment, no version.
+			const { slug, despawn_token } = await spawnGoopy(segment?.value ?? null);
 			const spawned: StoredGoopy = { slug, token: despawn_token ?? null };
 			localStorage.setItem(LOCALSTORAGE_KEY, serializeStoredGoopy(spawned));
 			setPolling(spawned);
@@ -262,8 +279,9 @@ export default function GhostButton() {
 		switch (state.kind) {
 			case "idle":
 				// The wrapper is not cosmetic: it is the positioning context the
-				// capacity readout hangs off, which is what keeps the button still
-				// when /capacity finally answers.
+				// readout line (version picker and capacity) hangs off, which is
+				// what keeps the button still when /capacity and /ghost-versions
+				// finally answer.
 				return (
 					<div className="cta-idle">
 						<button
@@ -273,7 +291,11 @@ export default function GhostButton() {
 						>
 							Ghost now!
 						</button>
-						<CapacityIndicator capacity={capacity} />
+						<CtaReadout
+							capacity={capacity}
+							segment={segment}
+							onVersionChange={handleVersionChange}
+						/>
 					</div>
 				);
 
@@ -308,7 +330,10 @@ export default function GhostButton() {
 				const admin = adminUrl(state.url);
 				return (
 					<div className="go-button-done-message">
-						<p>Your Ghost is ready at:</p>
+						<p>
+							Your {state.ghostVersion !== null ? versionLabel(state.ghostVersion) : "Ghost"}{" "}
+							is ready at:
+						</p>
 						<a className="go-button-url" href={admin}>
 							{admin}
 						</a>

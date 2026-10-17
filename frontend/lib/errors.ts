@@ -8,7 +8,14 @@
 // Deliberately import-free, so `node --test` can load it without Next's module
 // resolution.
 
-export const EXPECTED_ERROR_CODES = ["server_full", "server_busy", "too_many_requests"] as const;
+export const EXPECTED_ERROR_CODES = [
+	"server_full",
+	"server_busy",
+	"too_many_requests",
+	// The chosen Ghost version left the list between loading the page and the
+	// click: a deploy, not a fault (#210).
+	"unknown_version",
+] as const;
 
 export type ExpectedErrorCode = (typeof EXPECTED_ERROR_CODES)[number];
 

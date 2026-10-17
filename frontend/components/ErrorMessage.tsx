@@ -25,6 +25,7 @@ const EXPECTED_ERRORS: Record<ExpectedErrorCode, string> = {
 	server_full: NO_FREE_SLOT_MESSAGE,
 	server_busy: NO_FREE_SLOT_MESSAGE,
 	too_many_requests: "That was a lot of tries at once. Wait a moment, then try again.",
+	unknown_version: "That Ghost version is no longer offered. Try again to pick another.",
 };
 
 export default function ErrorMessage({
