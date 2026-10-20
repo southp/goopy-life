@@ -277,17 +277,28 @@ fi
 
 # --- Ghost against prod.toml --------------------------------------------------
 
-# The provisioner links every instance against source_dir; a bootstrap that
-# installs a different release leaves it pointing at nothing.
-source_dir=$(sed -nE 's/^source_dir[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' "$toml")
-version=$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' "$toml")
-node_bin=$(sed -nE 's/^node_bin[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' "$toml")
-if [[ $source_dir == "$APP_DIR/ghost-$GHOST_VERSION" && $version == "$GHOST_VERSION" && $node_bin == /usr/bin/node ]]; then
-    pass ghost_install_is_the_one_prod_toml_names
+# The bootstrap prepares the one Ghost a new host needs to serve its first
+# spawn: prod.toml's default_version. The provisioner links that version's
+# instances against its entry's source_dir, so a bootstrap that installs a
+# different release, or somewhere else, leaves them pointing at nothing. Other
+# versions are deploy/ghost-install.sh's to prepare (#210).
+default_version=$(sed -nE 's/^default_version[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' "$toml")
+read -r version source_dir node_bin < <(awk -v want="$default_version" '
+    function value(line) { match(line, /"[^"]*"/); return substr(line, RSTART + 1, RLENGTH - 2) }
+    function flush() { if (v == want) { print v, d, (n == "" ? "/usr/bin/node" : n) } v = d = n = "" }
+    /^\[/ { flush(); in_entry = ($0 ~ /^\[\[provisioner\.versions\]\]/); next }
+    in_entry && /^version[[:space:]]*=/ { v = value($0) }
+    in_entry && /^source_dir[[:space:]]*=/ { d = value($0) }
+    in_entry && /^node_bin[[:space:]]*=/ { n = value($0) }
+    END { flush() }
+' "$toml")
+if [[ $default_version == "$GHOST_VERSION" && $version == "$GHOST_VERSION" \
+    && $source_dir == "$APP_DIR/ghost-$GHOST_VERSION" && $node_bin == /usr/bin/node ]]; then
+    pass ghost_install_is_prod_tomls_default_version
 else
-    fail ghost_install_is_the_one_prod_toml_names \
-        "prod.toml: source_dir=$source_dir version=$version node_bin=$node_bin" \
-        "bootstrap: $APP_DIR/ghost-$GHOST_VERSION, node from apt at /usr/bin/node"
+    fail ghost_install_is_prod_tomls_default_version \
+        "prod.toml: default_version=$default_version, its entry: version=${version:-none} source_dir=$source_dir node_bin=$node_bin" \
+        "bootstrap: $GHOST_VERSION at $APP_DIR/ghost-$GHOST_VERSION, node from apt at /usr/bin/node"
 fi
 
 # The firewall keeps Ghost off gl-serv's loopback port; a port moved in

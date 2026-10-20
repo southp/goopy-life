@@ -77,10 +77,23 @@ fn check_config(path: &std::path::Path) -> Result<(gl_core::Config, String), gl_
     let provisioner = match &cfg.provisioner {
         ProvisionerConfig::Hello => "Hello".to_string(),
         ProvisionerConfig::Ghost(ghost) => format!(
-            "Ghost {} (source_dir {}, node_bin {})",
-            ghost.version,
-            ghost.source_dir.display(),
-            ghost.node_bin,
+            "Ghost {}",
+            ghost
+                .versions
+                .iter()
+                .map(|install| format!(
+                    "{}{} (source_dir {}, node_bin {})",
+                    install.version,
+                    if install.version == ghost.default_version {
+                        ", the default"
+                    } else {
+                        ""
+                    },
+                    install.source_dir.display(),
+                    install.node_bin,
+                ))
+                .collect::<Vec<_>>()
+                .join("; "),
         ),
     };
 
@@ -169,32 +182,37 @@ fn check_host_paths(
     // prepared install wants both problems in one deploy attempt.
     let mut problems: Vec<String> = Vec::new();
 
-    if !ghost.source_dir.is_dir() {
-        problems.push(format!(
-            "provisioner.source_dir {} is not a directory",
-            ghost.source_dir.display()
-        ));
-    } else {
-        let missing: Vec<&str> = gl_core::goopy_provisioner::ghost_provisioner::SHARED_ENTRIES
-            .iter()
-            .copied()
-            .filter(|entry| !ghost.source_dir.join(entry).exists())
-            .collect();
-        if !missing.is_empty() {
+    // Every version, not just the default: any of them can be asked for once
+    // visitors choose (#210), and a missing one would fail only those spawns.
+    for install in &ghost.versions {
+        let version = &install.version;
+        if !install.source_dir.is_dir() {
             problems.push(format!(
-                "provisioner.source_dir {} is missing {} — it is not a prepared \
-                 Ghost install",
-                ghost.source_dir.display(),
-                missing.join(", "),
+                "Ghost {version}: source_dir {} is not a directory",
+                install.source_dir.display()
+            ));
+        } else {
+            let missing: Vec<&str> = gl_core::goopy_provisioner::ghost_provisioner::SHARED_ENTRIES
+                .iter()
+                .copied()
+                .filter(|entry| !install.source_dir.join(entry).exists())
+                .collect();
+            if !missing.is_empty() {
+                problems.push(format!(
+                    "Ghost {version}: source_dir {} is missing {} — it is not a \
+                     prepared Ghost install",
+                    install.source_dir.display(),
+                    missing.join(", "),
+                ));
+            }
+        }
+
+        if !is_executable(std::path::Path::new(&install.node_bin)) {
+            problems.push(format!(
+                "Ghost {version}: node_bin {} is not an executable file",
+                install.node_bin
             ));
         }
-    }
-
-    if !is_executable(std::path::Path::new(&ghost.node_bin)) {
-        problems.push(format!(
-            "provisioner.node_bin {} is not an executable file",
-            ghost.node_bin
-        ));
     }
 
     if !cfg.dev_mode && !account_exists(&ghost.service_user) {
@@ -3607,7 +3625,8 @@ kind = "Hello"
         let toml = VALID_CONFIG.replace(
             "[provisioner]\nkind = \"Hello\"",
             &format!(
-                "[provisioner]\nkind = \"Ghost\"\nversion = \"6.63.0\"\n\
+                "[provisioner]\nkind = \"Ghost\"\ndefault_version = \"6.63.0\"\n\
+                 [[provisioner.versions]]\nversion = \"6.63.0\"\n\
                  source_dir = {:?}\nnode_bin = {:?}",
                 source_dir, node_bin,
             ),
@@ -3681,6 +3700,68 @@ kind = "Hello"
         assert!(err.to_string().contains("node_bin"), "was: {err}");
     }
 
+    /// A Ghost config offering 6.71.0 (the default) from `default_dir` and
+    /// 5.130.6 from `other_dir`, both on `node_bin`.
+    fn two_version_config(
+        default_dir: &std::path::Path,
+        other_dir: &std::path::Path,
+        node_bin: &std::path::Path,
+    ) -> (gl_core::Config, String) {
+        let toml = VALID_CONFIG.replace(
+            "[provisioner]\nkind = \"Hello\"",
+            &format!(
+                "[provisioner]\nkind = \"Ghost\"\ndefault_version = \"6.71.0\"\n\
+                 [[provisioner.versions]]\nversion = \"6.71.0\"\n\
+                 source_dir = {default_dir:?}\nnode_bin = {node_bin:?}\n\
+                 [[provisioner.versions]]\nversion = \"5.130.6\"\n\
+                 source_dir = {other_dir:?}\nnode_bin = {node_bin:?}",
+            ),
+        );
+        let f = write_config(&toml);
+        check_config(f.path()).expect("a two-version Ghost config parses")
+    }
+
+    /// Every version is checked, not just the default: once visitors choose
+    /// (#210), a missing one fails exactly the spawns that ask for it.
+    #[test]
+    fn check_host_paths_rejects_a_missing_install_that_is_not_the_default() {
+        let (dir, source_dir) = prepared_ghost_install();
+        let (cfg, _) = two_version_config(
+            &source_dir,
+            &dir.path().join("ghost-5.130.6"),
+            &dir.path().join("node"),
+        );
+
+        let err = check_host_paths(&cfg, NEW_ENOUGH_SYSTEMD, &dir.path().join("node"))
+            .expect_err("a missing 5.130.6 install must fail");
+        let err = err.to_string();
+        assert!(
+            err.contains("Ghost 5.130.6") && err.contains("source_dir"),
+            "should name the version whose install is missing, was: {err}"
+        );
+        assert!(!err.contains("Ghost 6.71.0"), "6.71.0 is fine, was: {err}");
+    }
+
+    /// The summary names every version and which one is the default, with
+    /// the paths each will use.
+    #[test]
+    fn summary_lists_every_ghost_version_and_marks_the_default() {
+        let (_, summary) = two_version_config(
+            std::path::Path::new("/opt/goopy-life/ghost-6.71.0"),
+            std::path::Path::new("/opt/goopy-life/ghost-5.130.6"),
+            std::path::Path::new("/opt/goopy-node/22.23.2/bin/node"),
+        );
+        for expected in [
+            "6.71.0, the default (source_dir /opt/goopy-life/ghost-6.71.0, node_bin /opt/goopy-node/22.23.2/bin/node)",
+            "5.130.6 (source_dir /opt/goopy-life/ghost-5.130.6, node_bin /opt/goopy-node/22.23.2/bin/node)",
+        ] {
+            assert!(
+                summary.contains(expected),
+                "missing {expected:?} in: {summary}"
+            );
+        }
+    }
+
     /// A Ghost config as [`ghost_config`], whose instances run as
     /// `service_user`, in production or dev mode.
     fn ghost_config_running_as(
@@ -3694,9 +3775,11 @@ kind = "Hello"
             .replace(
                 "[provisioner]\nkind = \"Hello\"",
                 &format!(
-                    "[provisioner]\nkind = \"Ghost\"\nversion = \"6.63.0\"\n\
-                     source_dir = {:?}\nnode_bin = {:?}\nservice_user = {:?}",
-                    source_dir, node_bin, service_user,
+                    "[provisioner]\nkind = \"Ghost\"\ndefault_version = \"6.63.0\"\n\
+                     service_user = {:?}\n\
+                     [[provisioner.versions]]\nversion = \"6.63.0\"\n\
+                     source_dir = {:?}\nnode_bin = {:?}",
+                    service_user, source_dir, node_bin,
                 ),
             );
         let f = write_config(&toml);

@@ -78,9 +78,8 @@ kind = "Hello"
 
 # To drive real Ghost instances locally, switch to:
 #   kind = "Ghost"
-#   source_dir   = "/path/to/base-ghost-install"
-#   version      = "6.63.0"
-#   node_bin     = "/opt/homebrew/bin/node"   # output of `which node`
+#   default_version = "6.63.0"
+# and uncomment the [[provisioner.versions]] entry at the end of this file.
 
 # Readiness wait (Ghost only, #151). A spawn is not Done until the instance
 # answers `GET /` with a 200: Ghost binds its port immediately and then serves
@@ -88,3 +87,10 @@ kind = "Hello"
 # is handed over ~13s before it renders anything. Defaults are 120 / 500.
 #   ready_timeout_secs = 120   # hard ceiling; the instance then goes Failed
 #   ready_poll_ms      = 500   # gap between probes
+
+# One entry per Ghost to offer (#210), last in the file: keys after an entry's
+# header belong to it.
+#   [[provisioner.versions]]
+#   version    = "6.63.0"
+#   source_dir = "/path/to/base-ghost-install"
+#   node_bin   = "/opt/homebrew/bin/node"   # output of `which node`
