@@ -741,12 +741,20 @@ host, network or key needed:
 ./deploy/tests/check-host.test.sh
 ./deploy/tests/admin-apply.test.sh
 ./deploy/tests/host-bootstrap.test.sh
+./deploy/tests/ghost-install.test.sh
 ```
 
 `host-bootstrap.test.sh` sources the script without running it and checks its
 helpers and the files it renders, plus that the ZFS pool and the Ghost install
 agree with `prod.toml`. What only a real host can answer (apt, the ZFS module,
 sshd, nftables) is tested by a first boot; rehearse one on a throwaway host.
+
+`ghost-install.test.sh` runs the host half of `ghost-install.sh` against a
+scratch directory, with stub downloads serving fixture releases, so every check
+it makes (signatures, checksums, `engines.node`, layout, the SQLite driver,
+the yarn lockfile) is exercised without a network. Its Ghost cases need a
+`node` on `PATH` and are skipped without one. Whether a real release builds
+is answered by running the script for real, on dev first.
 
 `check-host.test.sh` also covers the drift comparison both scripts share
 (`deploy/host-artifacts.sh`), by running it against a scratch directory that

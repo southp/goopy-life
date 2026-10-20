@@ -96,6 +96,10 @@ BASE_PACKAGES=(
     nodejs
     # PID 1 of every instance unit, in front of Node (#195): gl-core's INIT_BIN.
     tini
+    # For deploy/ghost-install.sh (#210): xz unpacks the Node releases, and
+    # Ghost 5 compiles its sqlite3 on Node 22 with a node-gyp that needs
+    # distutils (check_build_toolchain in ghost-install.remote.sh says why).
+    xz-utils build-essential python3-setuptools
     zfs-dkms zfsutils-linux linux-headers-amd64
     snapd
 )
