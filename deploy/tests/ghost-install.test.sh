@@ -398,6 +398,20 @@ else
 fi
 rm -rf "$root"
 
+# Checked before it is run: a re-run runs it as root, so one that answers with
+# the right version is refused without being run at all.
+root=$(make_host)
+host "$root" ensure_node "$NODE_VERSION"
+printf '#!/bin/sh\n: >"%s/ran-node"\necho v%s\n' "$root" "$NODE_VERSION" >"$root$NODE_HOME/bin/node"
+chmod o+w "$root$NODE_HOME/bin/node"
+host "$root" ensure_node "$NODE_VERSION"
+if [[ $STATUS -ne 0 && $OUT == *"bin/node is not $ME's alone"* && ! -e $root/ran-node ]]; then
+    pass checks_an_installed_node_before_running_it
+else
+    fail checks_an_installed_node_before_running_it "exit $STATUS" "$OUT" "ran: $([[ -e $root/ran-node ]] && echo yes || echo no)"
+fi
+rm -rf "$root"
+
 # A directory of that name with some other Node in it is not silently kept.
 root=$(make_host)
 mkdir -p "$root$NODE_HOME/bin"

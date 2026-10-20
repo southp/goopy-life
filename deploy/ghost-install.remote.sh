@@ -184,6 +184,9 @@ ensure_node() {
     local real=$ROOT$dir partial=$ROOT$dir.partial
     step "Node $version"
     if [[ -e $real ]]; then
+        # Asking it its version runs it as root, so it has to be root's alone
+        # first.
+        check_locked_down "$real"
         local have
         if ! have=$("$real/bin/node" --version 2>/dev/null); then
             have="nothing it can run"
@@ -191,7 +194,6 @@ ensure_node() {
         if [[ $have != "v$version" ]]; then
             die "$dir/bin/node reports $have, not v$version. Remove $dir and re-run"
         fi
-        check_locked_down "$real"
         say unchanged "$dir"
         return
     fi
