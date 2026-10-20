@@ -88,6 +88,15 @@ config_versions() {
     ' "$1"
 }
 
+# Prints the [[provisioner.versions]] entry that offers the install named by
+# `<version> <source_dir> <node_bin>`, ready to paste into a config.
+config_entry() {
+    echo "[[provisioner.versions]]"
+    echo "version = \"$1\""
+    echo "source_dir = \"$2\""
+    echo "node_bin = \"$3\""
+}
+
 is_release() {
     [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
@@ -169,10 +178,10 @@ main() {
 
     if [[ "${DRY_RUN:-0}" != "1" && -z $environment ]]; then
         echo
-        echo "ghost-install.sh: done. To offer Ghost ${triples[0]}, add to deploy/config/<env>.toml:"
-        echo "  version = \"${triples[0]}\""
-        echo "  source_dir = \"${triples[1]}\""
-        echo "  node_bin = \"${triples[2]}\""
+        echo "ghost-install.sh: done. To offer Ghost ${triples[0]}, add this entry to deploy/config/<env>.toml,"
+        echo "after the [provisioner] keys (point default_version at it to make it the default):"
+        echo
+        config_entry "${triples[@]}"
     fi
 }
 

@@ -79,8 +79,8 @@ whose config names an install the host does not have, and dev deploys on every
 merge to trunk. So for a new version the order is:
 
 1. `./deploy/ghost-install.sh southp@<dev-host> <ghost-version> <node-version>`.
-   It prints the three keys to add.
-2. Add them to `deploy/config/dev.toml`, and merge.
+   It prints the `[[provisioner.versions]]` entry to add.
+2. Add it to `deploy/config/dev.toml`, and merge.
 3. Verify on dev (see [Upgrading Ghost](#upgrading-ghost)), then repeat for
    production.
 

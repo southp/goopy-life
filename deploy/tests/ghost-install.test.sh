@@ -77,7 +77,8 @@ set +e
 
 FIXTURES=$(mktemp -d)
 
-# The shape every config has today: one Ghost, in [provisioner] itself.
+# The shape from before #210: one Ghost, in [provisioner] itself. gl-serv now
+# refuses it, but the reader still finds its Ghost.
 cat >"$FIXTURES/flat.toml" <<'EOF'
 domain = "example.test"
 version = "not-this-one"
@@ -134,6 +135,28 @@ if [[ $got == "$want" ]]; then
     pass config_versions_reads_every_versions_entry_in_order
 else
     fail config_versions_reads_every_versions_entry_in_order "got:" "$got"
+fi
+
+# What the run prints for a new version has to paste in as an entry of its own.
+# Flat keys would land on [provisioner], in the shape gl-serv refuses.
+entry=$(config_entry 6.71.0 /opt/goopy-life/ghost-6.71.0 /opt/goopy-node/22.23.2/bin/node)
+cat >"$FIXTURES/pasted.toml" <<EOF
+[provisioner]
+kind = "Ghost"
+default_version = "6.63.0"
+
+[[provisioner.versions]]
+version = "6.63.0"
+source_dir = "/opt/goopy-life/ghost-6.63.0"
+
+$entry
+EOF
+got=$(config_versions "$FIXTURES/pasted.toml" | tail -n 1)
+if [[ ${entry%%$'\n'*} == "[[provisioner.versions]]" &&
+    $got == "6.71.0 /opt/goopy-life/ghost-6.71.0 /opt/goopy-node/22.23.2/bin/node" ]]; then
+    pass config_entry_pastes_in_as_a_versions_entry
+else
+    fail config_entry_pastes_in_as_a_versions_entry "entry:" "$entry" "read back: $got"
 fi
 
 # config.local.toml runs Hello and carries the Ghost keys commented out, as a
