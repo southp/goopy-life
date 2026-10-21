@@ -24,6 +24,9 @@ export interface GoopyResponse {
 	created_at: string;
 	expires_at: string;
 	is_expired: boolean;
+	// The Ghost this goopy runs (#210). Optional: a backend from before #210
+	// sends none.
+	ghost_version?: string;
 }
 
 export interface ApiError {
@@ -59,6 +62,15 @@ export interface CapacityResponse {
 	max_provisioned: number;
 }
 
+// The Ghost versions a spawn may ask for, served by gl-serv at
+// `GET /ghost-versions` (#210).
+export interface GhostVersionsResponse {
+	// What a spawn that names no version gets. One of `versions`.
+	default: string;
+	// In the order to offer them.
+	versions: { version: string }[];
+}
+
 // The commit gl-serv was built from, served at `GET /version`.
 // Fetched from the browser, never through the build-time config fetch: the
 // frontend does not rebuild on a backend-only deploy, so a sha frozen into the
@@ -78,7 +90,15 @@ export type AppState =
 	| { kind: "resuming"; slug: string; token: string | null }
 	| { kind: "spawning" }
 	// `expiresAt` is the API's ISO timestamp, kept raw; it is formatted for display.
-	| { kind: "done"; slug: string; url: string; expiresAt: string; token: string | null }
+	// `ghostVersion` is null when the backend did not say (before #210).
+	| {
+			kind: "done";
+			slug: string;
+			url: string;
+			expiresAt: string;
+			token: string | null;
+			ghostVersion: string | null;
+	  }
 	// A destroy is underway — just accepted from the destroy button, or picked
 	// up after a reload mid-"Destroying…"; waits for the goopy to be gone, then
 	// returns to idle.

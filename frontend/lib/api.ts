@@ -10,6 +10,7 @@
 import type {
 	ApiError,
 	CapacityResponse,
+	GhostVersionsResponse,
 	GoopyResponse,
 	SpawnResponse,
 	VersionResponse,
@@ -47,8 +48,23 @@ export async function toApiError(res: Response): Promise<ApiRequestError> {
 	}
 }
 
-export async function spawnGoopy(): Promise<SpawnResponse> {
-	const res = await fetch(`${apiBase()}/goopies`, { method: "POST" });
+/**
+ * Spawn a goopy of `ghostVersion`, or of the server's default when it is null.
+ *
+ * Null sends exactly what every spawn sent before #210 — no body, no
+ * Content-Type — so a page with no choice to offer does not make the browser
+ * preflight its spawn.
+ */
+export async function spawnGoopy(ghostVersion: string | null = null): Promise<SpawnResponse> {
+	const init: RequestInit =
+		ghostVersion === null
+			? { method: "POST" }
+			: {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ ghost_version: ghostVersion }),
+				};
+	const res = await fetch(`${apiBase()}/goopies`, init);
 	if (!res.ok) {
 		throw await toApiError(res);
 	}
@@ -173,6 +189,17 @@ export async function getCapacity(
 	signal?: AbortSignal,
 ): Promise<CapacityResponse> {
 	const res = await fetch(`${apiBase()}/capacity`, { signal });
+	if (!res.ok) {
+		throw await toApiError(res);
+	}
+	return res.json();
+}
+
+// The Ghost versions a spawn may ask for (#210). Runtime, from the browser, for
+// the same reason as getCapacity: the list changes with a backend deploy, which
+// the build-time config fetch never sees.
+export async function getGhostVersions(signal?: AbortSignal): Promise<GhostVersionsResponse> {
+	const res = await fetch(`${apiBase()}/ghost-versions`, { signal });
 	if (!res.ok) {
 		throw await toApiError(res);
 	}

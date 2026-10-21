@@ -744,19 +744,27 @@ body {
 	gap: 0.5rem;
 }
 
-.destroy-button {
-	height: 2.25rem;
-	padding: 0 1rem;
+/*
+ * The outline pill the quiet controls share — Destroy, and the version picker
+ * under the CTA — so neither competes with a filled button.
+ */
+.destroy-button,
+.version-select {
 	border: 1px solid #555;
 	border-radius: 64px;
 	background-color: transparent;
-	color: #aaa;
 	font: inherit;
-	font-size: 0.875rem;
 	cursor: pointer;
-	transition-property: color, background-color, border-color;
 	transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
 	transition-duration: 150ms;
+}
+
+.destroy-button {
+	height: 2.25rem;
+	padding: 0 1rem;
+	color: #aaa;
+	font-size: 0.875rem;
+	transition-property: color, background-color, border-color;
 }
 
 .destroy-button:hover {
@@ -827,10 +835,10 @@ body {
 	word-break: normal;
 }
 
-/* ── Capacity indicator ─────────────────────────────────────────────────── */
+/* ── CTA readout: version picker and capacity ───────────────────────────── */
 
 /*
- * The idle CTA: the button, with the capacity readout hung off its bottom edge
+ * The idle CTA: the button, with the readout line hung off its bottom edge
  * rather than stacked under it. Exists to be that readout's containing block.
  */
 .cta-idle {
@@ -903,6 +911,99 @@ body {
 	.capacity-block {
 		animation: none;
 	}
+}
+
+/*
+ * The version picker and the slot readout, side by side (#210).
+ */
+.cta-readout-line {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 0.625rem;
+}
+
+/*
+ * With the picker, a little room either side: .capacity-slot is only as wide
+ * as its content and clips there, which would shave the sides of the picker's
+ * focus ring (above and below, the block's own margin and gap already leave
+ * room). Only with it, so that a host offering one version renders the
+ * readout exactly where it always was.
+ */
+.cta-readout-line:has(.version-select) {
+	padding: 0 0.25rem;
+}
+
+/*
+ * The two halves come from two endpoints and can land a beat apart. The block
+ * slides out with whichever is first; the other fades in beside it rather than
+ * popping.
+ */
+.cta-readout-line > * {
+	animation: readout-fade-in 240ms ease-out both;
+}
+
+@keyframes readout-fade-in {
+	from {
+		opacity: 0;
+	}
+	to {
+		opacity: 1;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.cta-readout-line > * {
+		animation: none;
+	}
+}
+
+/*
+ * The one thing on the line to act on, so the brightest thing on it: full-white
+ * text in an outline pill, against the line's grey fine print. Still an
+ * outline, so it never competes with the filled button above.
+ */
+.version-select {
+	appearance: none;
+	background: transparent
+		url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23ededed' stroke-width='1.5'/%3E%3C/svg%3E")
+		no-repeat right 0.625rem center;
+	padding: 0.125rem 1.75rem 0.125rem 0.75rem;
+	color: var(--foreground);
+	font-size: 0.8125rem;
+	line-height: 1.25rem;
+	transition-property: border-color;
+}
+
+.version-select:enabled:hover {
+	border-color: #999;
+}
+
+.version-select:focus-visible {
+	outline: 2px solid var(--foreground);
+	outline-offset: 1px;
+}
+
+/* The native dropdown's own colours, so the open list matches the page. */
+.version-select option {
+	background-color: var(--background);
+	color: var(--foreground);
+}
+
+/*
+ * Disabled for one of two reasons. Waiting on the list (`pending`), it looks
+ * the same and just cannot open yet. With no slot to spend a choice on, it
+ * steps back to the line's grey.
+ */
+.version-select:disabled {
+	cursor: default;
+}
+
+.version-select:disabled:not(.pending) {
+	border-color: #3a3a3a;
+	color: #777;
+	background-image: none;
+	padding-right: 0.75rem;
 }
 
 .capacity-indicator {
