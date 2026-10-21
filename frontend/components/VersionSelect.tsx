@@ -19,8 +19,10 @@ interface VersionSelectProps {
  * which one is newest is the visitor's to read off the number, and anything
  * more would be a claim the server never made.
  *
- * Disabled while `pending`: it then holds the remembered version alone, which
- * is still what a click asks for, and becomes choosable when the list arrives.
+ * Disabled while `pending` (the first read of the list still in flight): it
+ * then holds the remembered version alone, which is still what a click asks
+ * for, and becomes choosable when the list arrives — or gives way to a plain
+ * button if the read fails.
  * It keeps its look meanwhile — only "no free slot" greys it out — so that a
  * list arriving a beat late does not flick it from grey to white.
  */

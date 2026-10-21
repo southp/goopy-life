@@ -61,8 +61,9 @@ export default function GhostButton() {
 	// Unknown capacity (first poll not back, or /capacity unreachable) must not
 	// disable the button: the 503 is the real guard, so we fail open.
 	const isFull = capacity?.is_full ?? false;
-	// The Ghost versions on offer, read whenever the button is (#210). Unknown
-	// means no selector and the server's default, so it fails open the same way.
+	// The Ghost versions on offer, read whenever the button is (#210). A list
+	// that cannot be read means no selector and the server's default, so it
+	// fails open the same way.
 	const ghostVersions = useGhostVersions(state.kind === "idle");
 	// The version this browser last picked, if any. With what is on offer it
 	// decides the CTA's version segment, and so what a click asks for.

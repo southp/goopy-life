@@ -21,6 +21,10 @@ test("an unknown list offers no choice", () => {
 	assert.equal(offersChoice(null), false);
 });
 
+test("a list still loading offers no choice", () => {
+	assert.equal(offersChoice("loading"), false);
+});
+
 test("the remembered version is preselected while it is still offered", () => {
 	assert.equal(pickVersion(THREE, "5.130.6"), "5.130.6");
 });
@@ -42,6 +46,7 @@ test("one version on offer means no segment", () => {
 
 test("an unknown list and no history means no segment", () => {
 	assert.equal(versionSegment(null, null), null);
+	assert.equal(versionSegment("loading", null), null);
 });
 
 test("with a choice, the segment lists every version and shows the pick", () => {
@@ -56,11 +61,17 @@ test("with a choice, the segment lists every version and shows the pick", () => 
 // A returning visitor who clicks before the list lands asks for what the
 // segment shows, not silently for the default.
 test("before the list arrives, a remembered version holds the segment", () => {
-	assert.deepEqual(versionSegment(null, "5.130.6"), {
+	assert.deepEqual(versionSegment("loading", "5.130.6"), {
 		options: ["5.130.6"],
 		value: "5.130.6",
 		pending: true,
 	});
+});
+
+// A read that failed is not one still coming: holding the remembered version
+// would leave a picker that never opens, and every spawn sending a body.
+test("a failed read with a remembered version means no segment", () => {
+	assert.equal(versionSegment(null, "5.130.6"), null);
 });
 
 test("a version is labelled by name, nothing more", () => {
