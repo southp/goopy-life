@@ -48,7 +48,7 @@ export default function CtaReadout({ capacity, segment, onVersionChange }: CtaRe
 					)}
 					{capacity && (
 						<p
-							className={`capacity-indicator${capacity.is_full ? " full" : ""}`}
+							className={`capacity-indicator${isFull ? " full" : ""}`}
 							// Chatty enough to be noise if announced on every poll, so it is
 							// exposed as a labelled status a screen reader can query instead.
 							aria-label={`${capacity.used} of ${capacity.total} slots in use`}
