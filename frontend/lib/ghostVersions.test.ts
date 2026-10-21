@@ -1,13 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import {
-	type GhostVersionsResponse,
-	offersChoice,
-	pickVersion,
-	versionLabel,
-	versionSegment,
-} from "./ghostVersions.ts";
+import { offersChoice, pickVersion, versionLabel, versionSegment } from "./ghostVersions.ts";
+import type { GhostVersionsResponse } from "./types.ts";
 
 const THREE: GhostVersionsResponse = {
 	default: "6.71.0",

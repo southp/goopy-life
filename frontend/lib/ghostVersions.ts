@@ -1,17 +1,10 @@
 // Which Ghost to spawn, out of what gl-serv offers at `GET /ghost-versions`
 // (#210).
 //
-// Deliberately import-free, so `node --test` can load it without Next's module
-// resolution.
+// Deliberately import-free (bar types), so `node --test` can load it without
+// Next's module resolution.
 
-// What `GET /ghost-versions` answers. Kept here rather than in ./types so that
-// this module stays import-free; ./types re-exports it.
-export interface GhostVersionsResponse {
-	// What a spawn that names no version gets. One of `versions`.
-	default: string;
-	// In the order to offer them.
-	versions: { version: string }[];
-}
+import type { GhostVersionsResponse } from "./types";
 
 // Where this browser remembers the version it last spawned, so the next visit
 // starts on it. A per-viewer convenience: losing it costs one click.

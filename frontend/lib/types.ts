@@ -1,7 +1,5 @@
 // Core data definitions shared across the frontend.
 
-export type { GhostVersionsResponse } from "./ghostVersions";
-
 export type GoopyStatus =
 	| "Spawning"
 	| "Done"
@@ -62,6 +60,15 @@ export interface CapacityResponse {
 	max_active: number;
 	provisioned: number;
 	max_provisioned: number;
+}
+
+// The Ghost versions a spawn may ask for, served by gl-serv at
+// `GET /ghost-versions` (#210).
+export interface GhostVersionsResponse {
+	// What a spawn that names no version gets. One of `versions`.
+	default: string;
+	// In the order to offer them.
+	versions: { version: string }[];
 }
 
 // The commit gl-serv was built from, served at `GET /version`.
