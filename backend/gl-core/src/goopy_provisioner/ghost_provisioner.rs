@@ -436,7 +436,7 @@ impl GhostProvisioner {
             },
             // `privacy` defaults to `false` in Ghost's defaults.json, which
             // makes `isPrivacyDisabled(flag)` return false for everything, so
-            // every privacy-gated feature is on. Two of them reach third
+            // every privacy-gated feature is on. Three of them reach third
             // parties with data that belongs to whoever is holding the
             // sandbox:
             //
@@ -451,6 +451,14 @@ impl GhostProvisioner {
             //                  NODE_ENV=production, so it is live here. This
             //                  one leaks the sandbox URL the same way the
             //                  explore ping does.
+            //   useRpcPing   — Ghost 5's services/xmlrpc.js POSTs each
+            //                  published post's URL to rpc.pingomatic.com: the
+            //                  same leak, in the version before IndexNow (#210).
+            //
+            // Every key goes to every version. Ghost 6 has no RPC ping and
+            // Ghost 5 no IndexNow, and each simply never reads the other's
+            // key, so one config covers both without a branch on the version
+            // to keep in step with the curated list.
             //
             // Named individually rather than with `useTinfoil: true`. Tinfoil
             // is the broader hammer and would also switch off
@@ -459,12 +467,14 @@ impl GhostProvisioner {
             // would quietly change what a sandbox renders — the goal here is
             // to stop instances phoning home, not to hand out a degraded Ghost.
             //
-            // These are the only privacy flags 6.63.0 reads in `core/`; a
-            // Ghost upgrade can add more, which is why docs/GHOST_PROVISIONER.md
-            // calls this list out for re-checking.
+            // These are the only phoning privacy flags 6.63.0, 6.71.0 and
+            // 5.130.6 read in `core/`; another version can add more, which is
+            // why docs/GHOST_PROVISIONER.md calls this list out for
+            // re-checking.
             "privacy": {
                 "useGravatar": false,
                 "useIndexNow": false,
+                "useRpcPing": false,
             },
             // Ghost's defaults.json ships
             // `updateCheck: {"url": "https://updates.ghost.org"}` and registers
@@ -776,6 +786,15 @@ impl GoopyProvisioner for GhostProvisioner {
     /// the default for subsequent instances.
     fn service_version(&self) -> &str {
         &self.ghost.default_version
+    }
+
+    /// Every `[[provisioner.versions]]` entry, in config order.
+    fn versions(&self) -> Vec<&str> {
+        self.ghost
+            .versions
+            .iter()
+            .map(|install| install.version.as_str())
+            .collect()
     }
 
     /// Provisions the instance against the install for its own
@@ -1251,6 +1270,11 @@ mod tests {
              is live and would announce this sandbox's post URLs to search \
              engines"
         );
+        assert_eq!(
+            cfg["privacy"]["useRpcPing"],
+            serde_json::Value::Bool(false),
+            "Ghost 5 pings rpc.pingomatic.com with every published post's URL"
+        );
     }
 
     /// `useTinfoil` would disable every privacy-gated feature in one line,
@@ -1372,6 +1396,7 @@ mod tests {
             cfg["privacy"]["useIndexNow"],
             serde_json::Value::Bool(false)
         );
+        assert_eq!(cfg["privacy"]["useRpcPing"], serde_json::Value::Bool(false));
     }
 
     #[test]

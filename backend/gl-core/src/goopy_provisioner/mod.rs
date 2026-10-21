@@ -19,6 +19,14 @@ pub trait GoopyProvisioner {
     /// Instances are pinned to the version they were provisioned with: changing
     /// the configured version affects only instances created afterwards.
     fn service_version(&self) -> &str;
+
+    /// Every version a spawn may ask for, in the order to offer them (#210).
+    /// [`Self::service_version`], the default, is always one of them.
+    ///
+    /// Defaults to the one version a provisioner without a choice installs.
+    fn versions(&self) -> Vec<&str> {
+        vec![self.service_version()]
+    }
 }
 
 /// Forwarding impl so a provisioner chosen at runtime (`Config::build_provisioner`)
@@ -38,5 +46,12 @@ impl GoopyProvisioner for Box<dyn GoopyProvisioner + Send + Sync> {
 
     fn service_version(&self) -> &str {
         (**self).service_version()
+    }
+
+    // Spelled out, not left to the default: the default would ask this
+    // wrapper's own `service_version`, and offer only the default of a
+    // provisioner that offers several.
+    fn versions(&self) -> Vec<&str> {
+        (**self).versions()
     }
 }

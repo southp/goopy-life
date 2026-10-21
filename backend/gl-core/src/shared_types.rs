@@ -221,6 +221,7 @@ mod tests {
             Error::CapacityFull { .. } => "capacity_full",
             Error::ReadinessTimeout { .. } => "readiness_timeout",
             Error::Forbidden => "forbidden",
+            Error::UnknownVersion(_) => "unknown_version",
         }
     }
 
@@ -257,6 +258,7 @@ mod tests {
                 kind: CapacityKind::Provisioned,
             },
             Error::Forbidden,
+            Error::UnknownVersion("4.48.0".into()),
             Error::ReadinessTimeout {
                 slug: "a-b-c".into(),
                 waited_secs: 120,
@@ -366,6 +368,9 @@ pub enum Error {
     /// The presented despawn token is not the one issued for this instance —
     /// or the instance predates tokens and none was issued (#203).
     Forbidden,
+    /// A spawn asked for a Ghost version this host does not offer (#210).
+    /// Carries the version as asked for.
+    UnknownVersion(String),
 }
 
 /// Which of the two instance caps a spawn ran into.
@@ -429,6 +434,7 @@ impl Error {
             Error::CapacityFull { .. } => "capacity_full",
             Error::ReadinessTimeout { .. } => "readiness_timeout",
             Error::Forbidden => "forbidden",
+            Error::UnknownVersion(_) => "unknown_version",
         }
     }
 }
@@ -479,6 +485,7 @@ impl std::fmt::Display for Error {
                 "{slug} did not serve HTTP within {waited_secs}s (last probe: {last})"
             ),
             Error::Forbidden => write!(f, "despawn token does not match"),
+            Error::UnknownVersion(v) => write!(f, "Ghost {v} is not offered on this host"),
         }
     }
 }

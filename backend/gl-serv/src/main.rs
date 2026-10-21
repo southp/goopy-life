@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 use axum::body::Body;
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -313,7 +314,8 @@ fn parse_systemd_version(output: &str) -> Option<u32> {
 // ---------------------------------------------------------------------------
 
 trait ManagerService: Send + Sync {
-    fn spawn(&self) -> Result<gl_core::Spawned, gl_core::Error>;
+    fn spawn(&self, version: Option<&str>) -> Result<gl_core::Spawned, gl_core::Error>;
+    fn versions(&self) -> gl_core::OfferedVersions;
     fn despawn_as_owner(&self, slug: &str, token: &str) -> Result<(), gl_core::Error>;
     fn get(&self, slug: &str) -> Result<Option<gl_core::Goopy>, gl_core::Error>;
     fn sweep(&self) -> Result<(u32, Vec<gl_core::Error>), gl_core::Error>;
@@ -326,8 +328,12 @@ where
     R: gl_core::goopy_registry::GoopyRegistry + Send + Sync + 'static,
     P: gl_core::goopy_provisioner::GoopyProvisioner + Send + Sync + 'static,
 {
-    fn spawn(&self) -> Result<gl_core::Spawned, gl_core::Error> {
-        GoopyManager::spawn(self)
+    fn spawn(&self, version: Option<&str>) -> Result<gl_core::Spawned, gl_core::Error> {
+        GoopyManager::spawn(self, version)
+    }
+
+    fn versions(&self) -> gl_core::OfferedVersions {
+        GoopyManager::versions(self)
     }
 
     fn despawn_as_owner(&self, slug: &str, token: &str) -> Result<(), gl_core::Error> {
@@ -364,6 +370,15 @@ struct AppState {
 // JSON response types
 // ---------------------------------------------------------------------------
 
+/// Body of `POST /goopies`, all of it optional (#210). A request with no body
+/// at all, which is what every client sent before #210, spawns the default.
+#[derive(Debug, Default, serde::Deserialize)]
+struct SpawnRequest {
+    /// One of `GET /ghost-versions`'s versions. Absent means the default.
+    #[serde(default)]
+    ghost_version: Option<String>,
+}
+
 #[derive(serde::Serialize)]
 struct SpawnResponse {
     slug: String,
@@ -390,6 +405,28 @@ struct GoopyResponse {
     created_at: String,
     expires_at: String,
     is_expired: bool,
+    /// The Ghost the instance runs, fixed when it was spawned (#210).
+    ghost_version: String,
+}
+
+/// Body of `GET /ghost-versions` (#210): what `POST /goopies` may ask for.
+///
+/// A runtime fetch rather than part of [`ConfigResponse`], for the reason
+/// [`VersionResponse`] gives: `/config` is read once at Vercel build time and
+/// not again on a backend-only deploy, and the list changes with exactly such
+/// a deploy.
+#[derive(serde::Serialize)]
+struct GhostVersionsResponse {
+    /// What a spawn that names no version gets. One of `versions`.
+    default: String,
+    /// In the order to offer them. Objects rather than bare strings, so that a
+    /// label or a note can join a version without breaking the shape.
+    versions: Vec<GhostVersionEntry>,
+}
+
+#[derive(serde::Serialize)]
+struct GhostVersionEntry {
+    version: String,
 }
 
 #[derive(serde::Serialize)]
@@ -518,6 +555,9 @@ enum AppError {
     Forbidden(String),
     /// The request is fine but the resource is in the wrong state for it.
     Conflict(String),
+    /// A spawn named a Ghost version this host does not offer: renders `400`
+    /// with its own code, so a client can tell it from a malformed request.
+    UnknownVersion(String),
     ServiceUnavailable(String),
     /// A cap was hit. Renders 503 with a `Retry-After` header and a body that
     /// names which limit was exceeded (server-full vs. busy).
@@ -573,6 +613,7 @@ impl IntoResponse for AppError {
         let (status, message, code) = match self {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg, "not_found"),
             AppError::Invalid(msg) => (StatusCode::BAD_REQUEST, msg, "invalid"),
+            AppError::UnknownVersion(msg) => (StatusCode::BAD_REQUEST, msg, "unknown_version"),
             AppError::Unauthorized(_) => unreachable!("handled above"),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg, "forbidden"),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, msg, "conflict"),
@@ -611,6 +652,7 @@ impl AppError {
             gl_core::Error::NotFound => AppError::NotFound("not found".into()),
             gl_core::Error::Invalid => AppError::Invalid("invalid".into()),
             gl_core::Error::Forbidden => AppError::Forbidden("forbidden".into()),
+            e @ gl_core::Error::UnknownVersion(_) => AppError::UnknownVersion(e.to_string()),
             gl_core::Error::PortExhausted => {
                 AppError::ServiceUnavailable("port range exhausted".into())
             }
@@ -642,10 +684,21 @@ impl AppError {
 // Handlers
 // ---------------------------------------------------------------------------
 
-async fn spawn_goopy(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
+async fn spawn_goopy(
+    State(state): State<Arc<AppState>>,
+    body: Result<Option<Json<SpawnRequest>>, JsonRejection>,
+) -> Result<impl IntoResponse, AppError> {
+    // A body that is there but is not JSON this endpoint reads is the client's
+    // mistake, said in this API's own error shape rather than axum's plain
+    // text.
+    let request = body
+        .map_err(|rejection| AppError::Invalid(rejection.body_text()))?
+        .map(|Json(request)| request)
+        .unwrap_or_default();
+
     let spawned = tokio::task::spawn_blocking({
         let state = Arc::clone(&state);
-        move || state.manager.spawn()
+        move || state.manager.spawn(request.ghost_version.as_deref())
     })
     .await
     .map_err(|e| AppError::Internal(format!("task join error: {e}")))?
@@ -693,6 +746,7 @@ async fn get_goopy(
         created_at: goopy.created_at.to_rfc3339(),
         expires_at: expires_at.to_rfc3339(),
         is_expired,
+        ghost_version: goopy.service_version,
     }))
 }
 
@@ -867,6 +921,21 @@ async fn get_capacity(State(state): State<Arc<AppState>>) -> Result<impl IntoRes
         provisioned: capacity.provisioned,
         max_provisioned: capacity.max_provisioned,
     }))
+}
+
+/// `GET /ghost-versions` — the versions `POST /goopies` may ask for, and the
+/// default (#210). Public, on the read limiter. Read straight from the
+/// provisioner's config: no registry, so no blocking task.
+async fn get_ghost_versions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let offered = state.manager.versions();
+    Json(GhostVersionsResponse {
+        default: offered.default,
+        versions: offered
+            .versions
+            .into_iter()
+            .map(|version| GhostVersionEntry { version })
+            .collect(),
+    })
 }
 
 /// `GET /stats` — provision counts for today, the last seven days and all
@@ -1180,6 +1249,7 @@ fn build_router(
         .route("/goopies/{slug}", get(get_goopy).delete(despawn_goopy))
         .route("/config", get(get_config))
         .route("/capacity", get(get_capacity))
+        .route("/ghost-versions", get(get_ghost_versions))
         .route("/version", get(get_version))
         .route("/stats", get(get_stats))
         .layer(read_layer)
@@ -1439,6 +1509,10 @@ mod tests {
         fn service_version(&self) -> &str {
             "9.9.9-mock"
         }
+        /// Two, so a spawn has something other than the default to ask for.
+        fn versions(&self) -> Vec<&str> {
+            vec!["9.9.9-mock", "8.8.8-mock"]
+        }
     }
 
     // ── Test helpers ──────────────────────────────────────────────────────
@@ -1600,6 +1674,209 @@ mod tests {
         let body = body_json(resp.into_body()).await;
         assert!(body["slug"].is_string(), "slug should be present");
         assert_eq!(body["status"], "Spawning");
+    }
+
+    // ── Ghost versions (#210) ─────────────────────────────────────────────
+
+    /// `POST /goopies` from `ip`, with `body` as JSON when there is one.
+    fn spawn_request(ip: &str, body: Option<&str>) -> Request<Body> {
+        let builder = Request::builder()
+            .header("x-real-ip", ip)
+            .method("POST")
+            .uri("/goopies");
+        match body {
+            Some(json) => builder
+                .header("content-type", "application/json")
+                .body(Body::from(json.to_string()))
+                .unwrap(),
+            None => builder.body(Body::empty()).unwrap(),
+        }
+    }
+
+    /// Spawns through `app` and returns what `GET /goopies/:slug` then says.
+    async fn spawn_and_read(app: &Router, body: Option<&str>) -> Value {
+        let resp = app
+            .clone()
+            .oneshot(spawn_request("127.0.0.1", body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let slug = body_json(resp.into_body()).await["slug"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
+                    .uri(format!("/goopies/{slug}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        body_json(resp.into_body()).await
+    }
+
+    /// What every client sent before #210 (no body, no Content-Type), and
+    /// what the frontend still sends until it offers a choice: the default.
+    #[tokio::test]
+    async fn spawn_without_a_body_gets_the_default_ghost_version() {
+        let app = make_router(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+        );
+        let goopy = spawn_and_read(&app, None).await;
+        assert_eq!(goopy["ghost_version"], "9.9.9-mock");
+    }
+
+    #[tokio::test]
+    async fn spawn_with_an_empty_object_gets_the_default_ghost_version() {
+        let app = make_router(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+        );
+        let goopy = spawn_and_read(&app, Some("{}")).await;
+        assert_eq!(goopy["ghost_version"], "9.9.9-mock");
+    }
+
+    #[tokio::test]
+    async fn spawn_with_a_ghost_version_spawns_that_version() {
+        let app = make_router(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+        );
+        let goopy = spawn_and_read(&app, Some(r#"{"ghost_version":"8.8.8-mock"}"#)).await;
+        assert_eq!(goopy["ghost_version"], "8.8.8-mock");
+    }
+
+    /// Its own code, so the frontend can tell "that version went away" from a
+    /// request it built wrong.
+    #[tokio::test]
+    async fn spawn_with_an_unknown_ghost_version_is_a_400_unknown_version() {
+        let app = make_router(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+        );
+        let resp = app
+            .oneshot(spawn_request(
+                "127.0.0.1",
+                Some(r#"{"ghost_version":"4.48.0"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_json(resp.into_body()).await;
+        assert_eq!(body["code"], "unknown_version");
+        assert!(
+            body["error"].as_str().unwrap().contains("4.48.0"),
+            "the message names the version asked for: {body}"
+        );
+    }
+
+    /// Malformed JSON is answered in this API's error shape, not axum's
+    /// plain-text rejection.
+    #[tokio::test]
+    async fn spawn_with_malformed_json_is_a_400_in_the_api_error_shape() {
+        let app = make_router(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+        );
+        let resp = app
+            .oneshot(spawn_request("127.0.0.1", Some(r#"{"ghost_version":"#)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+        assert_eq!(body_json(resp.into_body()).await["code"], "invalid");
+    }
+
+    #[tokio::test]
+    async fn get_ghost_versions_lists_the_default_and_every_version_in_order() {
+        let app = make_router(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .header("x-real-ip", "127.0.0.1")
+                    .uri("/ghost-versions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(resp.into_body()).await,
+            serde_json::json!({
+                "default": "9.9.9-mock",
+                "versions": [{"version": "9.9.9-mock"}, {"version": "8.8.8-mock"}],
+            })
+        );
+    }
+
+    /// A JSON body makes the browser send a CORS preflight first, which no
+    /// spawn did before #210. It must be answered by the CORS layer alone:
+    /// were it to reach the provision limiter, it would spend the visitor's one
+    /// spawn token and the POST behind it would be a 429.
+    #[tokio::test]
+    async fn a_json_spawns_preflight_passes_cors_and_spends_no_spawn_token() {
+        let rl = gl_core::config::RateLimitConfig {
+            provision_burst: 1,
+            provision_period_secs: 60,
+            ..gl_core::config::RateLimitConfig::default()
+        };
+        let app = make_router_with_rl(
+            "goopy.life",
+            SqliteRegistry::new(Path::new(":memory:")).unwrap(),
+            rl,
+        );
+
+        let preflight = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/goopies")
+                    .header("x-real-ip", "203.0.113.9")
+                    .header("origin", "https://goopy.life")
+                    .header("access-control-request-method", "POST")
+                    .header("access-control-request-headers", "content-type")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(preflight.status(), StatusCode::OK);
+        let allowed = preflight
+            .headers()
+            .get("access-control-allow-headers")
+            .map(|v| v.to_str().unwrap().to_ascii_lowercase())
+            .unwrap_or_default();
+        assert!(
+            allowed.contains("content-type"),
+            "allowed headers: {allowed}"
+        );
+
+        let spawn = app
+            .oneshot(spawn_request(
+                "203.0.113.9",
+                Some(r#"{"ghost_version":"8.8.8-mock"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            spawn.status(),
+            StatusCode::CREATED,
+            "the preflight must not have spent the spawn token"
+        );
     }
 
     /// The token is handed out once, to the spawner. `GET /goopies/:slug` is
@@ -3161,8 +3438,11 @@ mod tests {
     }
 
     impl ManagerService for CountingManager {
-        fn spawn(&self) -> Result<gl_core::Spawned, gl_core::Error> {
+        fn spawn(&self, _version: Option<&str>) -> Result<gl_core::Spawned, gl_core::Error> {
             unimplemented!("the sweeper never spawns")
+        }
+        fn versions(&self) -> gl_core::OfferedVersions {
+            unimplemented!("the sweeper never lists versions")
         }
         fn despawn_as_owner(&self, _slug: &str, _token: &str) -> Result<(), gl_core::Error> {
             unimplemented!("the sweeper never despawns on a visitor's behalf")
