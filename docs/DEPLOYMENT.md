@@ -555,7 +555,7 @@ tell if any of this is missing:
 |---|---|---|
 | Swap (4 GB) + zswap | bootstrap | the caps of 20 assume it. Without it the box serves ~10, and nothing errors |
 | `zpool_ghost`, 8 GB, at `/opt/goopy-life/data` | bootstrap | every instance's dataset; `prod.toml`'s caps × quota must fit (the bootstrap's tests check) |
-| Node 22.23.2 + Ghost 6.71.0 at `/opt/goopy-life/ghost-6.71.0` | bootstrap | `prod.toml`'s `default_version` entry (also tested) |
+| Node 22.23.4 + Ghost 6.71.0 at `/opt/goopy-life/ghost-6.71.0` | bootstrap | `prod.toml`'s `default_version` entry (also tested) |
 | The other Ghost versions `prod.toml` lists (6.63.0, 5.130.6) | `deploy/ghost-install.sh <admin@host> prod` | each `[[provisioner.versions]]` entry. Missing, `--check-config` refuses the deploy before the swap |
 | `tini` at `/usr/bin/tini` | bootstrap | PID 1 of every instance unit (#195). Missing, `--check-config` refuses the deploy before the swap |
 | `goopy` account, `/opt/goopy-life/` | bootstrap | the deploy and the provisioner write into these |
