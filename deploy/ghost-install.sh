@@ -134,7 +134,7 @@ main() {
             die "'$ghost_version' is not a Ghost release (expected e.g. 6.71.0)"
         fi
         if ! is_release "$node_version"; then
-            die "'$node_version' is not a Node release (expected e.g. 22.23.2)"
+            die "'$node_version' is not a Node release (expected e.g. 22.23.4)"
         fi
         triples=("$ghost_version" "$APP_DIR/ghost-$ghost_version" "$NODE_DIR/$node_version/bin/node")
     fi

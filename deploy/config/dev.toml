@@ -169,7 +169,7 @@ ready_poll_ms = 500
 # The latest, and the default (#210).
 version = "6.71.0"
 source_dir = "/opt/goopy-life/ghost-6.71.0"
-# Ghost 6.71.0 requires Node ^22.23.1 || ^24.20.0: the host's pinned 22.23.2.
+# Ghost 6.71.0 requires Node ^22.23.1 || ^24.20.0: the host's pinned 22.23.4.
 node_bin = "/usr/bin/node"
 
 [[provisioner.versions]]
@@ -192,5 +192,5 @@ node_bin = "/usr/bin/node"
 # build-essential and python3-setuptools (deploy/ghost-install.remote.sh).
 version = "5.130.6"
 source_dir = "/opt/goopy-life/ghost-5.130.6"
-# Ghost 5.130.6 requires Node ^18.12.1 || ^20.11.1 || ^22.13.1: the same 22.23.2.
+# Ghost 5.130.6 requires Node ^18.12.1 || ^20.11.1 || ^22.13.1: the same 22.23.4.
 node_bin = "/usr/bin/node"

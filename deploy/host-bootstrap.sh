@@ -60,8 +60,10 @@ DNS_PLUGIN=dns-digitalocean
 # Every Ghost prod.toml offers runs on this one Node: 6.71.0 and 6.63.0 require
 # ^22.23.1 || ^24.20.0, and 5.130.6 ^18.12.1 || ^20.11.1 || ^22.13.1. Only
 # deploy/ghost-install.sh checks that before an instance boots
-# (docs/GHOST_PROVISIONER.md). Pinned to what dev runs.
-NODE_VERSION=22.23.2-1nodesource1
+# (docs/GHOST_PROVISIONER.md). Pinned to what dev runs. Never below 22.23.4:
+# earlier 22.x bundle a Brotli decoder open to HTTP2Shell, CVE-2026-111497
+# (#217).
+NODE_VERSION=22.23.4-1nodesource1
 NODESOURCE_KEY_URL=https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
 # Compared after download: a key served by anyone else is refused.
 NODESOURCE_KEY_FPR=6F71F525282841EEDAF851B42F59B5F99B1BE0B4
