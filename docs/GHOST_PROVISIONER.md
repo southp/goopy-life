@@ -54,7 +54,7 @@ account with password sudo (not `goopy`) and asks for the password once:
 ./deploy/ghost-install.sh southp@<host> <env>
 
 # One version, ahead of the config that will name it.
-./deploy/ghost-install.sh southp@<host> 6.71.0 22.23.2
+./deploy/ghost-install.sh southp@<host> 6.71.0 22.23.4
 ```
 
 For each Ghost version it produces two root-owned directories:
@@ -566,7 +566,7 @@ To move the default to a new version:
 1. Prepare the new version in its own directory, on the host, before any config
    names it:
    ```bash
-   ./deploy/ghost-install.sh southp@<host> 6.64.0 22.23.2
+   ./deploy/ghost-install.sh southp@<host> 6.64.0 22.23.4
    ```
 2. Add its entry, and point `default_version` at it:
    ```toml
@@ -576,7 +576,7 @@ To move the default to a new version:
    [[provisioner.versions]]
    version = "6.64.0"
    source_dir = "/opt/goopy-life/ghost-6.64.0"
-   node_bin = "/opt/goopy-node/22.23.2/bin/node"
+   node_bin = "/opt/goopy-node/22.23.4/bin/node"
 
    [[provisioner.versions]]
    version = "6.63.0"
