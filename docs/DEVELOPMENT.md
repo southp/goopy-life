@@ -189,7 +189,7 @@ Key settings:
 ## Deployment
 
 - **Infrastructure:** any online x86_64 Linux host with systemd, nginx and ZFS; today, a DigitalOcean droplet.
-- **Backend:** The host runs gl-serv. The dev host is deployed automatically on every merge to `trunk`; production is a manual cross-compile + scp.
+- **Backend:** The host runs gl-serv. Every deploy is a manual cross-compile + scp (`deploy/deploy.sh`).
 - **Frontend:** Deployed on Vercel via its GitHub integration. The host serves only gl-serv and local static pages (e.g. `/expired`).
 - **API domain:** `api.goopy.life`.
 

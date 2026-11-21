@@ -4,9 +4,8 @@
 #   env   the environment to deploy, naming a file in deploy/config/
 #         (e.g. `dev` -> deploy/config/dev.toml)
 #
-# Manual deploy path — this is how production gets updated. The dev host is
-# deployed automatically on every merge to trunk by
-# .github/workflows/backend-deploy.yml; see docs/DEPLOYMENT.md.
+# The deploy path for every host: nothing deploys the backend automatically.
+# See docs/DEPLOYMENT.md.
 #
 # Cross-compiles gl-serv and gl-cli for x86_64 Linux and hands both binaries and
 # that environment's config to deploy/push-binary.sh, which installs all three
