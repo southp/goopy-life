@@ -17,13 +17,12 @@
 # a separate path is how a host ends up with a gl-cli older than the gl-serv it
 # shares a database with, which is when a maintenance tool is most dangerous.
 #
-# This is the single source of truth for the remote half of a deploy. Both
-# callers share it on purpose:
-#   - deploy/deploy.sh                        (manual, production)
-#   - .github/workflows/backend-deploy.yml    (automated, dev host)
-# The install command below is pinned verbatim in deploy/sudoers.goopy, so a
-# copy that drifted in one caller would fail with a sudo denial on the host
-# rather than anything self-explanatory.
+# This is the remote half of a deploy, called by deploy/deploy.sh once it has
+# cross-compiled. It is kept apart from the build so that whatever builds the
+# binaries next -- a CI job, say -- reuses it rather than copying it: the
+# install command below is pinned verbatim in deploy/sudoers.goopy, so a copy
+# that drifted would fail with a sudo denial on the host rather than anything
+# self-explanatory.
 #
 # The config is shipped rather than hand-maintained on the host, which makes
 # this script the only writer of the remote file: a hand-edit there is
@@ -62,9 +61,9 @@ DRY_RUN=${DRY_RUN:-0}
 # The commit the binaries being pushed were built from, stamped into them via
 # gl-core/build.rs. Required rather than defaulted: it is the value the identity
 # check at the end compares against, and a default would turn a real assertion
-# into one that always passes. Both callers export it.
+# into one that always passes. deploy/deploy.sh exports it.
 SHA_HINT="push-binary.sh: GL_GIT_SHA must name the commit the binaries were built from"
-GIT_SHA=${GL_GIT_SHA:?"$SHA_HINT (deploy/deploy.sh and .github/workflows/backend-deploy.yml set it)"}
+GIT_SHA=${GL_GIT_SHA:?"$SHA_HINT (deploy/deploy.sh sets it)"}
 
 # `unknown` is what gl-core/build.rs stamps into a build handed no commit, so a
 # caller passing it through would build a binary that reports `unknown` and then

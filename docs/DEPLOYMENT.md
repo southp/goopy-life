@@ -4,18 +4,16 @@ Two environments, two deployment models:
 
 | | Backend (`gl-serv`) | Frontend (Next.js) |
 |---|---|---|
-| **Dev** | Automatic — every merge to `trunk` that touches `backend/**` | Automatic — every merge to `trunk` that touches `frontend/**` |
+| **Dev** | Manual — `./deploy/deploy.sh goopy@<dev-host> dev` | Automatic — every merge to `trunk` that touches `frontend/**` |
 | **Prod** | Manual — `./deploy/deploy.sh user@host` | Vercel production branch (see below) |
 
-Dev is deliberately hands-off so `trunk` is always live somewhere; production
-stays a deliberate act.
+No backend is deployed automatically: every backend deploy is a deliberate act.
 
 ## Where the servers are configured
 
-Neither host is hardcoded in the repo. Both are settings you can change without
-a code change:
+No host is hardcoded in the repo:
 
-- **Backend dev host** — the `dev` [GitHub Environment](https://github.com/southp/goopy-life/settings/environments).
+- **Backend** — the host is the first argument of every deploy script.
 - **Frontend** — the Vercel project's Git integration (project `goopy-life-frontend-dev`).
 
 ## Before the first deploy
@@ -52,79 +50,32 @@ gl-serv creates and destroys each instance's dataset in `zpool_ghost` via sudo (
 
 There is no step for `config.toml`, the systemd unit or the api nginx site: they are version-controlled — the unit at [`deploy/gl-serv.service`](../deploy/gl-serv.service), the rest per environment under [`deploy/config/`](../deploy/config/) — and installed by the deploy itself. After the first deploy, `./deploy/check-host.sh goopy@<host> <env>` confirms the host matches the repo. See [Host artifacts](#host-artifacts).
 
-## Backend — automated dev deploys
+## Backend — what a deploy ships
 
-`.github/workflows/backend-deploy.yml` runs on every push to `trunk` under
-`backend/**`. It tests, lints, cross-compiles a static musl binary, then hands
-it to `deploy/push-binary.sh` — the same script the manual production deploy
-uses, so the two paths cannot drift apart.
+Every backend deploy goes through `deploy/push-binary.sh`, which
+`deploy/deploy.sh` calls once it has cross-compiled (see [Manual production
+deploy](#manual-production-deploy)).
 
-The workflow ships **both binaries, the config and the host artifacts** —
+A deploy ships **both binaries, the config and the host artifacts** —
 `gl-serv` and `gl-cli` (see [The maintenance CLI on the
 host](#the-maintenance-cli-on-the-host)), and the systemd unit, its drop-in and
 the api nginx site (see [Host artifacts](#host-artifacts)). The sudoers drop-in
 and the nginx cache zone are applied by an admin with `deploy/admin-apply.sh`
 (see [Applying the root-owned artifacts](#applying-the-root-owned-artifacts)) —
 the deploy checks the sudoers drop-in and fails until that has run. The ZFS pool
-is still one-time manual setup (see the
-[host setup](#host-setup-one-time) steps).
-
-### One-time setup
-
-**1. Create a deploy key on your machine.**
-
-```bash
-ssh-keygen -t ed25519 -N '' -f ~/.ssh/goopy-dev-deploy -C 'github-actions dev deploy'
-```
-
-**2. Authorise it on the dev host** for the `goopy` service account — the
-same account `deploy/sudoers.goopy` grants the `install` and
-`systemctl restart gl-serv` rules to:
-
-```bash
-ssh-copy-id -i ~/.ssh/goopy-dev-deploy.pub goopy@<dev-host>
-```
-
-**3. Capture the dev host's SSH key** so the runner can verify what it connects
-to (the workflow pins `StrictHostKeyChecking yes` — an unverified key would let
-anyone winning a DNS race collect a `sudo install` on the host):
-
-```bash
-ssh-keyscan -t ed25519 <dev-host>
-```
-
-**4. Create a `dev` environment** under *Settings → Environments* and add:
-
-| Kind | Name | Value |
-|---|---|---|
-| Secret | `DEV_SSH_PRIVATE_KEY` | contents of `~/.ssh/goopy-dev-deploy` (the private half, including the BEGIN/END lines) |
-| Secret | `DEV_SSH_KNOWN_HOSTS` | the `ssh-keyscan` output from step 3 |
-| Variable | `DEV_DEPLOY_HOST` | dev host's hostname or IP |
-| Variable | `DEV_DEPLOY_USER` | `goopy` |
-| Variable | `DEV_SSH_PORT` | optional; defaults to `22` |
-
-The workflow fails fast with a named-variable error if any of these is missing,
-so a half-configured environment is obvious rather than an opaque ssh failure.
-
-Adding a `prod` environment later is the same shape — the workflow reads its
-target from environment settings, not from the YAML.
-
-### Re-running a deploy
-
-*Actions → Deploy backend to dev → Run workflow*. Useful after rotating the
-deploy key or rebuilding the host, and avoids an empty commit.
+is one-time host setup (see the [host setup](#host-setup-one-time) steps).
 
 ### Verifying a deploy
 
 `push-binary.sh` does not trust `systemctl restart` on its own: restart reports
 success as soon as the process is spawned, so a binary that panics at startup —
 or a config it cannot parse — would leave the run green while the API is down. It waits past
-`RestartSec=5` and asserts `systemctl is-active gl-serv`, failing the job
+`RestartSec=5` and asserts `systemctl is-active gl-serv`, failing the deploy
 otherwise. To check by hand:
 
 ```bash
-ssh goopy@<dev-host> 'systemctl status gl-serv --no-pager'
-curl -sS https://<dev-api-host>/config | head
+ssh goopy@<host> 'systemctl status gl-serv --no-pager'
+curl -sS https://<api-host>/config | head
 ```
 
 That check is honest but late: by the time it fires, the old binary has already
@@ -142,12 +93,8 @@ beside the live service — running the binary bare to test a config is not, as 
 collides on `Address in use`. A non-zero exit aborts the deploy with the
 installed binary and config untouched and still serving.
 
-It matters most on the **manual production path**: `deploy.sh` builds from
-whatever local tree the operator has, which need not be the commit CI validated,
-and nothing watches production. On the automated dev deploy it is close to
-tautological — binary and config come from the same trunk commit, and
-`committed_configs.rs` has already parsed that config with the same `gl-core` — but
-it costs one ssh round trip and it is the cheap half of the guarantee.
+It matters because `deploy.sh` builds from whatever local tree the operator
+has, which need not be the commit CI validated, and nothing watches production.
 
 To run it by hand against a config before deploying it (from `backend/`):
 
@@ -161,20 +108,19 @@ cargo run -q -p gl-serv -- --check-config --config ../deploy/config/prod.toml
 from file mtimes:
 
 ```bash
-curl -sS https://<dev-api-host>/version
+curl -sS https://<api-host>/version
 {"sha":"c50c932","sha_full":"c50c932…","built_at":"2026-09-04T11:57:00Z","version":"0.1.0"}
 ```
 
 The commit id is compiled into the binary by `gl-core/build.rs` from
-`GL_GIT_SHA`, which both deploy paths set — `deploy.sh` from the checkout it is
-building, the workflow from `github.sha`. Three answers are possible and each
-means something specific:
+`GL_GIT_SHA`, which `deploy.sh` sets from the checkout it is building. Three
+answers are possible and each means something specific:
 
 | `sha_full` | What it means |
 |---|---|
 | a commit id | that commit is serving |
 | `<commit>-dirty` | built by `deploy.sh` from a tree with uncommitted changes — what is running is *not* that commit |
-| `unknown` | built by neither deploy path (a local `cargo build`), so nothing can be said about which commit it is |
+| `unknown` | not built by `deploy.sh` (a local `cargo build`), so nothing can be said about which commit it is |
 
 On the host itself, both binaries print the same stamp, so a gl-serv and a
 gl-cli from one build print matching lines:
@@ -243,7 +189,7 @@ gl-serv counts provisions, failures and early destroys, and answers with the
 totals, publicly and on the read rate limiter:
 
 ```bash
-curl -sS https://<dev-api-host>/stats
+curl -sS https://<api-host>/stats
 {"all_time":{"provisioned":1234,"failed":56,"destroyed":310},"last_7_days":{"provisioned":140,"failed":3,"destroyed":37},"today":{"provisioned":21,"failed":0,"destroyed":6},"window_days":90,"daily":[{"day":"2026-09-29","provisioned":21,"failed":0,"destroyed":6}]}
 ```
 
@@ -376,9 +322,8 @@ Cross-compiles `gl-serv` and `gl-cli` to static musl binaries with
 `./deploy/check-host.sh goopy@<host> prod` first to see what it is about to
 replace.
 
-A deploy makes about a dozen `scp`/`ssh` calls. CI shares one connection
-between them (`ControlMaster` in the workflow's ssh config); to do the same on
-your machine, add to the host's entry in `~/.ssh/config`:
+A deploy makes about a dozen `scp`/`ssh` calls. To share one connection
+between them, add to the host's entry in `~/.ssh/config`:
 
 ```
 ControlMaster auto
@@ -597,9 +542,9 @@ Two rules keep it that way:
   with no edit.
 - **And again on the host, before the swap.** The deploy runs the uploaded
   binary with `--check-config` against the staged config while the previous pair
-  is still installed — see [Verifying a deploy](#verifying-a-deploy). CI covers
-  the automated path; this covers the manual one, where the binary was built
-  from an operator's local tree.
+  is still installed — see [Verifying a deploy](#verifying-a-deploy). CI cannot
+  cover this: the binary was built from an operator's local tree, not from the
+  commit CI checked.
 
 To roll a config change back, revert the commit and deploy again.
 

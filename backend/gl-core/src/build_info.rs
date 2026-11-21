@@ -8,7 +8,7 @@
 //! an identity check.
 //!
 //! Both values are injected at compile time by `build.rs` from environment
-//! variables the two deploy paths set. A build made by neither — a local
+//! variables `deploy/deploy.sh` sets. A build made any other way — a local
 //! `cargo run` — reports [`UNKNOWN`].
 
 /// What a build that was handed no commit id reports.

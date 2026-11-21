@@ -4,10 +4,9 @@
 //! the deploy cross-compiles from a checkout that the *deploy script* knows the
 //! state of, and shelling out to `git` from a build script would report the
 //! state of whatever tree cargo happened to run in — which, for a vendored or
-//! packaged build, is no tree at all. See `deploy/deploy.sh` and
-//! `.github/workflows/backend-deploy.yml` for the two callers that set them.
+//! packaged build, is no tree at all. See `deploy/deploy.sh`, which sets them.
 //!
-//! A build made by neither path reports `unknown`, which is the honest answer
+//! A build made any other way reports `unknown`, which is the honest answer
 //! and is deliberately not dressed up as anything else.
 
 /// What a build that was handed no commit id reports.
