@@ -731,6 +731,47 @@ step is a no-op.
 Then deploy. It installs the unit without `RUST_LOG` and the drop-in that now
 carries it, and `check-host.sh` should report the host clean.
 
+## Decommissioning a host
+
+`deploy/decommission.sh` takes Goopy off a host: the reverse of `deploy.sh`
+and `admin-apply.sh` and, with `--purge`, of the Goopy half of
+`host-bootstrap.sh`. Run it as the admin account, as with `admin-apply.sh`:
+
+```bash
+DRY_RUN=1 ./deploy/decommission.sh <admin>@<host> --confirm <hostname>   # print the commands
+./deploy/decommission.sh <admin>@<host> --confirm <hostname> [--purge]
+```
+
+`--confirm` takes the host's own name, as `hostname` prints it there. Nothing
+changes until the host agrees, so an ssh alias that points at the wrong machine
+costs that machine nothing.
+
+| Removed | Always | `--purge` |
+|---|---|---|
+| gl-serv: stopped, its unit, drop-in, api site and cache zone | ✓ | ✓ |
+| `/etc/sudoers.d/goopy`, so no deploy can put it back | ✓ | ✓ |
+| Every instance: `goopy-*` units and sites, `zpool_ghost/*` datasets | ✓ | ✓ |
+| The registry | moved aside, `goopy.db.decommissioned-<time>` | ✓ |
+| `zpool_ghost` and its file, `/opt/goopy-life`, `/opt/goopy-node` | | ✓ |
+| The `goopy` and `goopy-ghost` accounts | | ✓ |
+
+- **Instances are found on the host, not in the registry.** Anything named
+  `goopy-*` and every dataset in the pool goes, orphans included. A gl-cli or
+  config that no longer works cannot stop it.
+- **nginx is never left broken.** Goopy's files are moved aside, and `nginx -t`
+  judges the result before the single reload. If it fails, every file goes
+  back. A host whose nginx already fails is refused before anything changes.
+- **Done means nothing runs.** It finishes by checking that gl-serv is
+  inactive, that nothing listens on port 3000 and that no process runs as
+  either account.
+- **Idempotent.** What is already gone is reported `absent`. Re-run a run that
+  stopped partway.
+- **What stays is the host's:** certificates, DNS, both firewalls, sshd,
+  fail2ban, swap, sysctl, apt packages (Node included) and the machine. The
+  bootstrap's nftables rules name the two accounts by uid, so they outlive
+  `--purge` as inert rules.
+- **Nothing is backed up.** Copy the registry off first if it matters.
+
 ## Testing the deploy scripts
 
 `deploy/push-binary.sh` supports `DRY_RUN=1`, which prints the `scp`/`ssh`
@@ -743,6 +784,7 @@ host, network or key needed:
 ./deploy/tests/admin-apply.test.sh
 ./deploy/tests/host-bootstrap.test.sh
 ./deploy/tests/ghost-install.test.sh
+./deploy/tests/decommission.test.sh
 ```
 
 `host-bootstrap.test.sh` sources the script without running it and checks its
@@ -756,6 +798,12 @@ it makes (signatures, checksums, `engines.node`, layout, the SQLite driver,
 the yarn lockfile) is exercised without a network. Its Ghost cases need a
 `node` on `PATH` and are skipped without one. Whether a real release builds
 is answered by running the script for real, on dev first.
+
+`decommission.test.sh` runs the host half of `decommission.sh` against a
+scratch directory with stub `systemctl`, `nginx`, `zfs`, `zpool` and account
+tools. It also reads the paths and names the script hardcodes back from where
+they are set: the bootstrap, `ghost-install.remote.sh`, `prod.toml` and the
+cache zone.
 
 `check-host.test.sh` also covers the drift comparison both scripts share
 (`deploy/host-artifacts.sh`), by running it against a scratch directory that
